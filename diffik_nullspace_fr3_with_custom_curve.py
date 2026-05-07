@@ -188,6 +188,11 @@ class SharedState:
         self.ori_err = 0.0
         self.status = "正在启动 MuJoCo..."
         self.gripper_value = float(initial_gripper)
+        self.gripper_command_value = float(initial_gripper)
+        self.gripper_actual_value = float(initial_gripper)
+        self.gripper_blocked = False
+        self.gripper_close_limit = 0.0
+        self.gripper_auto_closing = False
         self.show_ee_axes = True
         self.show_mocap = True
         self.show_trail = True
@@ -212,6 +217,11 @@ class SharedState:
                 "ori_err": float(self.ori_err),
                 "status": str(self.status),
                 "gripper": float(self.gripper_value),
+                "gripper_command": float(self.gripper_command_value),
+                "gripper_actual": float(self.gripper_actual_value),
+                "gripper_blocked": bool(self.gripper_blocked),
+                "gripper_close_limit": float(self.gripper_close_limit),
+                "gripper_auto_closing": bool(self.gripper_auto_closing),
                 "show_ee_axes": bool(self.show_ee_axes),
                 "show_mocap": bool(self.show_mocap),
                 "show_trail": bool(self.show_trail),
@@ -278,9 +288,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
             elif self.path == "/gripper":
                 value = max(0.0, min(255.0, float(payload.get("value", 255.0))))
-                self.shared.update(gripper_value=value, status=f"gripper = {value:.0f}")
+                self.shared.update(gripper_command_value=value, status=f"gripper = {value:.0f}")
                 self.shared.commands.put({"type": "gripper", "value": value})
                 self._send_json({"ok": True, "value": value})
+            elif self.path == "/gripper_open":
+                self.shared.update(
+                    gripper_command_value=255.0,
+                    gripper_value=255.0,
+                    gripper_blocked=False,
+                    gripper_close_limit=0.0,
+                    gripper_auto_closing=False,
+                    status="gripper open",
+                )
+                self.shared.commands.put({"type": "gripper_open"})
+                self._send_json({"ok": True})
+            elif self.path == "/gripper_close":
+                self.shared.update(
+                    gripper_command_value=0.0,
+                    gripper_auto_closing=True,
+                    status="gripper close：关闭直到受阻或完全闭合",
+                )
+                self.shared.commands.put({"type": "gripper_close"})
+                self._send_json({"ok": True})
             elif self.path == "/ee_axes":
                 visible = bool(payload.get("visible", True))
                 self.shared.update(show_ee_axes=visible, status="显示机械臂末端坐标轴" if visible else "隐藏机械臂末端坐标轴")
@@ -427,6 +456,8 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.last_pose_rad = [0.0] * 6
             self.last_object_poses_rad: dict[str, list[float]] = {}
             self.last_object_poses_deg: dict[str, list[float]] = {}
+            self.gripper_blocked = False
+            self.gripper_close_limit = 0
             self.default_unit = "rad"
             self._build()
 
@@ -633,6 +664,17 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.gripper_slider.valueChanged.connect(self.set_gripper)
             grip_layout.addWidget(QLabel("0 = 闭合，255 = 张开"))
             grip_layout.addWidget(self.gripper_slider)
+            grip_btns = QHBoxLayout()
+            open_btn = QPushButton("open")
+            open_btn.clicked.connect(self.open_gripper)
+            close_btn = QPushButton("close")
+            close_btn.clicked.connect(self.close_gripper)
+            self.gripper_state_label = QLabel("actual: --   command: --")
+            grip_btns.addWidget(open_btn)
+            grip_btns.addWidget(close_btn)
+            grip_btns.addWidget(self.gripper_state_label)
+            grip_btns.addStretch(1)
+            grip_layout.addLayout(grip_btns)
             layout.addWidget(grip_group)
 
             # Visibility.
@@ -784,11 +826,25 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.post("/stop", {})
 
         def set_gripper(self, value: int) -> None:
+            if self.gripper_blocked and value < self.gripper_close_limit:
+                self.gripper_slider.blockSignals(True)
+                self.gripper_slider.setValue(self.gripper_close_limit)
+                self.gripper_slider.blockSignals(False)
+                self.status_label.setText(f"gripper 受阻：不能继续闭合，当前限制 = {self.gripper_close_limit}")
+                return
             try:
                 post_json(f"{self.base_url}/gripper", {"value": int(value)}, timeout=0.25)
             except Exception:
                 # Avoid popping message boxes while the slider is being dragged.
                 pass
+
+        def open_gripper(self) -> None:
+            self.gripper_blocked = False
+            self.gripper_close_limit = 0
+            self.post("/gripper_open", {})
+
+        def close_gripper(self) -> None:
+            self.post("/gripper_close", {})
 
         def fill_circle_example(self) -> None:
             self.expr_x.setText("0.45 + 0.05*cos(2*pi*t)")
@@ -861,10 +917,26 @@ def run_ui_client(args: argparse.Namespace) -> int:
                 mode = str(state.get("active_mode", "idle"))
                 self.status_label.setText(f"{state.get('status', '')}    [{mode} {wp_i}/{wp_n}]")
                 g = int(float(state.get("gripper", 255)))
-                if not self.gripper_slider.isSliderDown() and self.gripper_slider.value() != g:
+                actual_g = float(state.get("gripper_actual", g))
+                command_g = float(state.get("gripper_command", g))
+                self.gripper_blocked = bool(state.get("gripper_blocked", False))
+                self.gripper_close_limit = max(0, min(255, int(math.ceil(float(state.get("gripper_close_limit", 0))))))
+                if self.gripper_blocked and self.gripper_slider.value() < self.gripper_close_limit:
+                    self.gripper_slider.blockSignals(True)
+                    self.gripper_slider.setValue(self.gripper_close_limit)
+                    self.gripper_slider.blockSignals(False)
+                elif not self.gripper_slider.isSliderDown() and self.gripper_slider.value() != g:
                     self.gripper_slider.blockSignals(True)
                     self.gripper_slider.setValue(max(0, min(255, g)))
                     self.gripper_slider.blockSignals(False)
+                if self.gripper_blocked:
+                    self.gripper_state_label.setText(
+                        f"actual: {actual_g:.0f}   command: {command_g:.0f}   受阻 limit: {self.gripper_close_limit}"
+                    )
+                elif bool(state.get("gripper_auto_closing", False)):
+                    self.gripper_state_label.setText(f"actual: {actual_g:.0f}   command: {command_g:.0f}   closing")
+                else:
+                    self.gripper_state_label.setText(f"actual: {actual_g:.0f}   command: {command_g:.0f}")
                 show_ee = bool(state.get("show_ee_axes", True))
                 show_mocap = bool(state.get("show_mocap", True))
                 if self.ee_axes_checkbox.isChecked() != show_ee:
@@ -1051,6 +1123,13 @@ def run_controller(args: argparse.Namespace) -> int:
         except KeyError:
             gripper_actuator_id = None
     shared.has_gripper = gripper_actuator_id is not None
+    finger_qpos_ids: list[int] = []
+    for joint_name in FINGER_JOINT_NAMES:
+        try:
+            jid = model.joint(joint_name).id
+            finger_qpos_ids.append(int(model.jnt_qposadr[jid]))
+        except KeyError:
+            pass
 
     mocap_id = model.body(MOCAP_NAME).mocapid[0]
     if mocap_id < 0:
@@ -1114,13 +1193,15 @@ def run_controller(args: argparse.Namespace) -> int:
         value = float(np.clip(value, lo, hi))
         data.ctrl[gripper_actuator_id] = value
         finger_open = value / 255.0 * 0.04
-        for joint_name in FINGER_JOINT_NAMES:
-            try:
-                jid = model.joint(joint_name).id
-                data.qpos[int(model.jnt_qposadr[jid])] = finger_open
-            except KeyError:
-                pass
+        for qpos_id in finger_qpos_ids:
+            data.qpos[qpos_id] = finger_open
         mujoco.mj_forward(model, data)
+
+    def actual_gripper_value() -> float:
+        if not finger_qpos_ids:
+            return float(data.ctrl[gripper_actuator_id]) if gripper_actuator_id is not None else float(args.gripper_open)
+        opening = float(np.mean([data.qpos[qpos_id] for qpos_id in finger_qpos_ids]))
+        return float(np.clip(opening / 0.04 * 255.0, 0.0, 255.0))
 
     def current_pose() -> np.ndarray:
         return np.concatenate([np.array(data.site(site_id).xpos, copy=True), rpy_from_mat(data.site(site_id).xmat)])
@@ -1225,6 +1306,13 @@ def run_controller(args: argparse.Namespace) -> int:
         stream_wait_until = 0.0
         last_state_time = 0.0
         desired_gripper = float(args.gripper_open)
+        auto_gripper_close = False
+        gripper_blocked = False
+        gripper_close_limit = 0.0
+        gripper_stall_since: Optional[float] = None
+        last_gripper_actual = actual_gripper_value()
+        last_gripper_sample_time = time.time()
+        gripper_display_value = desired_gripper
         running = True
         status = "就绪：可拖动 mocap，也可在 UI 中执行函数轨迹。"
         trail_strokes: list[list[np.ndarray]] = []
@@ -1365,6 +1453,29 @@ def run_controller(args: argparse.Namespace) -> int:
                         status = "已停止当前任务，并把 target 同步到当前末端位姿。"
                     elif ctype == "gripper":
                         desired_gripper = float(command.get("value", desired_gripper))
+                        auto_gripper_close = False
+                    elif ctype == "gripper_open":
+                        if gripper_actuator_id is not None:
+                            _, hi = model.actuator_ctrlrange[gripper_actuator_id]
+                            desired_gripper = float(hi)
+                        else:
+                            desired_gripper = float(args.gripper_open)
+                        auto_gripper_close = False
+                        gripper_blocked = False
+                        gripper_close_limit = 0.0
+                        gripper_stall_since = None
+                        status = "gripper open：完全打开"
+                    elif ctype == "gripper_close":
+                        if gripper_actuator_id is not None:
+                            lo, _ = model.actuator_ctrlrange[gripper_actuator_id]
+                            desired_gripper = float(lo)
+                        else:
+                            desired_gripper = 0.0
+                        auto_gripper_close = True
+                        gripper_blocked = False
+                        gripper_close_limit = 0.0
+                        gripper_stall_since = None
+                        status = "gripper close：正在关闭直到受阻或完全闭合"
                     elif ctype == "ee_axes":
                         shared.show_ee_axes = bool(command.get("visible", True))
                     elif ctype == "mocap":
@@ -1484,6 +1595,53 @@ def run_controller(args: argparse.Namespace) -> int:
             clip_joints(q)
             data.ctrl[actuator_ids] = q[qpos_ids]
             mujoco.mj_step(model, data)
+
+            actual_gripper = actual_gripper_value()
+            now_for_gripper = time.time()
+            gripper_dt = max(1e-6, now_for_gripper - last_gripper_sample_time)
+            gripper_speed = abs(actual_gripper - last_gripper_actual) / gripper_dt
+            closing_requested = desired_gripper < actual_gripper - 3.0
+            opening_requested = desired_gripper > actual_gripper + 3.0
+            fully_closed = actual_gripper <= 2.0
+
+            if opening_requested:
+                gripper_blocked = False
+                gripper_close_limit = 0.0
+                gripper_stall_since = None
+                auto_gripper_close = False
+            elif closing_requested and not fully_closed:
+                if gripper_speed < 2.0:
+                    if gripper_stall_since is None:
+                        gripper_stall_since = now_for_gripper
+                    elif now_for_gripper - gripper_stall_since >= 0.20:
+                        gripper_blocked = True
+                        gripper_close_limit = float(np.clip(actual_gripper, 0.0, 255.0))
+                        if auto_gripper_close:
+                            auto_gripper_close = False
+                        status = f"gripper 受阻：实际开度 {actual_gripper:.0f}，已阻止继续闭合滑条"
+                else:
+                    gripper_stall_since = None
+            else:
+                gripper_stall_since = None
+                if fully_closed:
+                    was_auto_closing = auto_gripper_close
+                    gripper_blocked = False
+                    gripper_close_limit = 0.0
+                    auto_gripper_close = False
+                    if was_auto_closing and desired_gripper <= 2.0:
+                        status = "gripper 已完全闭合。"
+
+            if gripper_blocked:
+                gripper_close_limit = float(np.clip(actual_gripper, 0.0, 255.0))
+            if gripper_blocked:
+                gripper_display_value = gripper_close_limit
+            elif auto_gripper_close:
+                gripper_display_value = actual_gripper
+            else:
+                gripper_display_value = desired_gripper
+            last_gripper_actual = actual_gripper
+            last_gripper_sample_time = now_for_gripper
+
             if show_trail:
                 append_trail_point(data.site(site_id).xpos - compensation_vec())
             else:
@@ -1502,7 +1660,12 @@ def run_controller(args: argparse.Namespace) -> int:
                     pos_err=float(np.linalg.norm(compensated_target_pos() - data.site(site_id).xpos)),
                     ori_err=orientation_error(),
                     status=status,
-                    gripper_value=float(desired_gripper),
+                    gripper_value=float(gripper_display_value),
+                    gripper_command_value=float(desired_gripper),
+                    gripper_actual_value=float(actual_gripper),
+                    gripper_blocked=bool(gripper_blocked),
+                    gripper_close_limit=float(gripper_close_limit),
+                    gripper_auto_closing=bool(auto_gripper_close),
                     mocap_z_comp=float(shared.mocap_z_comp),
                     viewer_running=True,
                     waypoint_index=int(motion.active_goal_index),
