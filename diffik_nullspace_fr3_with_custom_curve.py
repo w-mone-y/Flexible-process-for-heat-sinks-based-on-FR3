@@ -28,7 +28,6 @@ UI features:
   - gripper slider
   - show/hide EE axes and mocap/target axes
   - show/clear mocap center trajectory trail
-  - write "LYX" above the table with the gripper trail
 
 Function convention:
   - use variable `t`
@@ -177,65 +176,6 @@ def format_pose(values: list[float] | np.ndarray) -> str:
     return " ".join(f"{float(x):.6f}" for x in values)
 
 
-def interpolate_polyline(points: list[np.ndarray], spacing: float) -> list[np.ndarray]:
-    if not points:
-        return []
-    result = [np.asarray(points[0], dtype=float).copy()]
-    for start, end in zip(points, points[1:]):
-        p0 = np.asarray(start, dtype=float)
-        p1 = np.asarray(end, dtype=float)
-        distance = float(np.linalg.norm(p1 - p0))
-        steps = max(1, int(math.ceil(distance / max(spacing, 1e-6))))
-        for i in range(1, steps + 1):
-            result.append(p0 + (p1 - p0) * (i / steps))
-    return result
-
-
-def generate_lyx_strokes(
-    center: tuple[float, float, float] = (0.62, 0.0, 0.34),
-    letter_height: float = 0.12,
-    letter_width: float = 0.055,
-    letter_gap: float = 0.030,
-    point_spacing: float = 0.006,
-) -> list[list[PoseCommand]]:
-    cx, cy, cz = center
-    top_x = cx + letter_height * 0.5
-    mid_x = cx
-    bottom_x = cx - letter_height * 0.5
-    total_width = letter_width * 3.0 + letter_gap * 2.0
-    y0 = cy - total_width * 0.5
-
-    def letter_bounds(index: int) -> tuple[float, float, float]:
-        left = y0 + index * (letter_width + letter_gap)
-        right = left + letter_width
-        return left, (left + right) * 0.5, right
-
-    l_left, _, l_right = letter_bounds(0)
-    y_left, y_mid, y_right = letter_bounds(1)
-    x_left, _, x_right = letter_bounds(2)
-
-    def p(x: float, y: float) -> np.ndarray:
-        return np.asarray([x, y, cz], dtype=float)
-
-    polylines = [
-        [p(top_x, l_left), p(bottom_x, l_left), p(bottom_x, l_right)],
-        [p(top_x, y_left), p(mid_x, y_mid), p(top_x, y_right)],
-        [p(mid_x, y_mid), p(bottom_x, y_mid)],
-        [p(top_x, x_left), p(bottom_x, x_right)],
-        [p(top_x, x_right), p(bottom_x, x_left)],
-    ]
-    rpy = (math.pi, 0.0, 0.0)
-    strokes: list[list[PoseCommand]] = []
-    for polyline in polylines:
-        stroke = [
-            pose_array_to_command([float(point[0]), float(point[1]), float(point[2]), *rpy])
-            for point in interpolate_polyline(polyline, point_spacing)
-        ]
-        if stroke:
-            strokes.append(stroke)
-    return strokes
-
-
 # ----------------------------- HTTP IPC server -------------------------------
 
 class SharedState:
@@ -359,10 +299,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             elif self.path == "/clear_trail":
                 self.shared.commands.put({"type": "clear_trail"})
                 self.shared.update(trail_point_count=0, status="已清除 mocap 中心轨迹")
-                self._send_json({"ok": True})
-            elif self.path == "/write_lyx":
-                self.shared.commands.put({"type": "write_lyx"})
-                self.shared.update(show_trail=True, trail_point_count=0, status="准备写 LYX")
                 self._send_json({"ok": True})
             elif self.path == "/offset":
                 value = float(payload.get("mocap_z_comp", 0.0090))
@@ -719,12 +655,9 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.trail_checkbox.toggled.connect(lambda v: self.post("/trail", {"enabled": bool(v)}))
             clear_trail_btn = QPushButton("清除运动轨迹")
             clear_trail_btn.clicked.connect(lambda: self.post("/clear_trail", {}))
-            write_lyx_btn = QPushButton("写 LYX")
-            write_lyx_btn.clicked.connect(lambda: self.post("/write_lyx", {}))
             self.trail_count_label = QLabel("轨迹点: 0")
             trail_layout.addWidget(self.trail_checkbox)
             trail_layout.addWidget(clear_trail_btn)
-            trail_layout.addWidget(write_lyx_btn)
             trail_layout.addWidget(self.trail_count_label)
             trail_layout.addStretch(1)
             layout.addWidget(trail_group)
@@ -1300,13 +1233,6 @@ def run_controller(args: argparse.Namespace) -> int:
         trail_min_distance = 0.003
         trail_max_points = 1500
         trail_radius = 0.002
-        write_strokes: list[list[PoseCommand]] = []
-        write_stroke_index = 0
-        write_point_index = 0
-        write_completed_points = 0
-        write_total_points = 0
-        write_phase = ""
-        write_last_time = 0.0
 
         def trail_point_count() -> int:
             return sum(len(stroke) for stroke in trail_strokes)
@@ -1382,17 +1308,6 @@ def run_controller(args: argparse.Namespace) -> int:
                 )
                 scn.ngeom += 1
 
-        def clear_write_state() -> None:
-            nonlocal write_strokes, write_stroke_index, write_point_index
-            nonlocal write_completed_points, write_total_points, write_phase, write_last_time
-            write_strokes = []
-            write_stroke_index = 0
-            write_point_index = 0
-            write_completed_points = 0
-            write_total_points = 0
-            write_phase = ""
-            write_last_time = 0.0
-
         while viewer.is_running() and running:
             step_start = time.time()
 
@@ -1406,7 +1321,6 @@ def run_controller(args: argparse.Namespace) -> int:
                     if ctype == "move":
                         waypoints = parse_waypoints_rad(command.get("waypoints", []))
                         if waypoints:
-                            clear_write_state()
                             mode = str(command.get("mode", "move"))
                             motion.active_mode = mode
                             motion.current_goal = waypoints[0]
@@ -1445,7 +1359,6 @@ def run_controller(args: argparse.Namespace) -> int:
                         stream_index = 0
                         stream_started = False
                         stream_wait_until = 0.0
-                        clear_write_state()
                         reset_trail_writer()
                         motion.clear()
                         snap_mocap_to_site()
@@ -1464,32 +1377,6 @@ def run_controller(args: argparse.Namespace) -> int:
                         trail_strokes.clear()
                         reset_trail_writer()
                         status = "已清除 mocap 中心轨迹。"
-                    elif ctype == "write_lyx":
-                        stream_waypoints = []
-                        stream_index = 0
-                        stream_started = False
-                        stream_wait_until = 0.0
-                        write_strokes = generate_lyx_strokes()
-                        write_stroke_index = 0
-                        write_point_index = 0
-                        write_completed_points = 0
-                        write_total_points = sum(len(stroke) for stroke in write_strokes)
-                        write_phase = "move_to_start" if write_strokes else ""
-                        write_last_time = 0.0
-                        trail_strokes.clear()
-                        reset_trail_writer()
-                        shared.show_trail = True
-                        if write_strokes:
-                            motion.active_mode = "write_lyx"
-                            motion.current_goal = write_strokes[0][0]
-                            motion.remaining_goals = []
-                            motion.active_goal_index = 0
-                            motion.total_goal_count = write_total_points
-                            set_mocap_pose(motion.current_goal)
-                            status = f"准备写 LYX：移动到第 1/{len(write_strokes)} 笔起点"
-                        else:
-                            motion.clear()
-                            status = "LYX 路径为空，未开始写字。"
                     elif ctype == "offset":
                         shared.mocap_z_comp = float(command.get("mocap_z_comp", shared.mocap_z_comp))
                         status = f"mocap z 补偿 = {shared.mocap_z_comp:.4f} m"
@@ -1534,59 +1421,7 @@ def run_controller(args: argparse.Namespace) -> int:
                 pos_err_goal = float(np.linalg.norm(compensated_target_pos() - data.site(site_id).xpos))
                 ori_err_goal = orientation_error()
 
-                if motion.active_mode == "write_lyx":
-                    if not write_strokes or write_stroke_index >= len(write_strokes):
-                        clear_write_state()
-                        motion.clear()
-                    elif write_phase == "move_to_start":
-                        if pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance:
-                            start_trail_stroke()
-                            write_phase = "draw"
-                            write_point_index = 0
-                            write_last_time = time.time()
-                            motion.active_goal_index = write_completed_points + 1
-                            status = f"LYX 第 {write_stroke_index + 1}/{len(write_strokes)} 笔开始"
-                        else:
-                            status = f"LYX 抬笔移动：第 {write_stroke_index + 1}/{len(write_strokes)} 笔起点"
-                    elif write_phase == "draw":
-                        now_for_write = time.time()
-                        current_write_stroke = write_strokes[write_stroke_index]
-                        if (
-                            write_point_index < len(current_write_stroke) - 1
-                            and now_for_write - write_last_time >= stream_step_time
-                        ):
-                            write_point_index += 1
-                            motion.current_goal = current_write_stroke[write_point_index]
-                            motion.active_goal_index = write_completed_points + write_point_index + 1
-                            set_mocap_pose(motion.current_goal)
-                            write_last_time = now_for_write
-                            status = (
-                                f"LYX 第 {write_stroke_index + 1}/{len(write_strokes)} 笔执行中："
-                                f"{write_point_index + 1}/{len(current_write_stroke)}"
-                            )
-                        elif write_point_index >= len(current_write_stroke) - 1:
-                            if pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance:
-                                write_completed_points += len(current_write_stroke)
-                                reset_trail_writer()
-                                write_stroke_index += 1
-                                write_point_index = 0
-                                if write_stroke_index < len(write_strokes):
-                                    write_phase = "move_to_start"
-                                    motion.current_goal = write_strokes[write_stroke_index][0]
-                                    motion.active_goal_index = write_completed_points
-                                    set_mocap_pose(motion.current_goal)
-                                    status = (
-                                        f"LYX 第 {write_stroke_index}/{len(write_strokes)} 笔完成，"
-                                        f"移动到第 {write_stroke_index + 1} 笔起点"
-                                    )
-                                else:
-                                    status = "LYX 写字完成。"
-                                    clear_write_state()
-                                    motion.clear()
-                    else:
-                        clear_write_state()
-                        motion.clear()
-                elif motion.active_mode in {"function_path", "move_multi_step"} and stream_waypoints and stream_started:
+                if motion.active_mode in {"function_path", "move_multi_step"} and stream_waypoints and stream_started:
                     now_for_stream = time.time()
                     label = "函数轨迹" if motion.active_mode == "function_path" else "Multi Step 轨迹"
                     if stream_index < len(stream_waypoints) - 1 and now_for_stream - stream_last_time >= stream_step_time:
@@ -1649,8 +1484,7 @@ def run_controller(args: argparse.Namespace) -> int:
             clip_joints(q)
             data.ctrl[actuator_ids] = q[qpos_ids]
             mujoco.mj_step(model, data)
-            record_trail = show_trail and (motion.active_mode != "write_lyx" or write_phase == "draw")
-            if record_trail:
+            if show_trail:
                 append_trail_point(data.site(site_id).xpos - compensation_vec())
             else:
                 last_trail_pos = None
