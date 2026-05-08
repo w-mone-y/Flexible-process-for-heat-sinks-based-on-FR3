@@ -27,6 +27,7 @@ UI features:
   - function_path and Multi Step first hold the current mocap pose for 1s before streaming
   - gripper slider
   - show/hide EE axes and mocap/target axes
+  - always-visible target region x/y/z status boxes
   - show/clear mocap center trajectory trail
 
 Function convention:
@@ -100,6 +101,28 @@ class MotionState:
         self.active_goal_index = 0
         self.total_goal_count = 0
         self.active_mode = ""
+
+
+@dataclass
+class Workflow1State:
+    active: bool = False
+    phase: str = ""
+    initial_position: Optional[np.ndarray] = None
+    initial_quat: Optional[np.ndarray] = None
+    carry_quat: Optional[np.ndarray] = None
+    target_xy: Optional[np.ndarray] = None
+    z0: float = 0.0
+    gripper_wait_started_at: float = 0.0
+
+    def clear(self) -> None:
+        self.active = False
+        self.phase = ""
+        self.initial_position = None
+        self.initial_quat = None
+        self.carry_quat = None
+        self.target_xy = None
+        self.z0 = 0.0
+        self.gripper_wait_started_at = 0.0
 
 
 @dataclass
@@ -195,7 +218,7 @@ class SharedState:
         self.gripper_auto_closing = False
         self.show_ee_axes = True
         self.show_mocap = True
-        self.show_trail = True
+        self.show_trail = False
         self.mocap_z_comp = 0.0090
         self.has_gripper = True
         self.viewer_running = False
@@ -203,6 +226,7 @@ class SharedState:
         self.waypoint_count = 0
         self.active_mode = "idle"
         self.trail_point_count = 0
+        self.target_region_xyz: Optional[list[float]] = None
         self.object_names: list[str] = []
         self.object_poses_rad: dict[str, list[float]] = {}
         self.object_poses_deg: dict[str, list[float]] = {}
@@ -232,6 +256,7 @@ class SharedState:
                 "waypoint_count": int(self.waypoint_count),
                 "active_mode": str(self.active_mode),
                 "trail_point_count": int(self.trail_point_count),
+                "target_region_xyz": None if self.target_region_xyz is None else list(self.target_region_xyz),
                 "object_names": list(self.object_names),
                 "object_poses_rad": {name: list(pose) for name, pose in self.object_poses_rad.items()},
                 "object_poses_deg": {name: list(pose) for name, pose in self.object_poses_deg.items()},
@@ -345,6 +370,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.shared.commands.put({"type": "object_pose", "object": object_name, "pose": values})
                 self.shared.update(status=f"请求移动 {object_name}: {format_pose(values)}")
                 self._send_json({"ok": True, "object": object_name, "pose": values})
+            elif self.path == "/workflow1":
+                self.shared.commands.put({"type": "workflow1"})
+                self.shared.update(status="已请求执行工作流1")
+                self._send_json({"ok": True})
             elif self.path == "/quit":
                 self.shared.commands.put({"type": "quit"})
                 self._send_json({"ok": True})
@@ -472,6 +501,15 @@ def run_ui_client(args: argparse.Namespace) -> int:
                 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
                 QLabel#TitleLabel { font-size: 18px; font-weight: bold; }
                 QLabel#MonoLabel { font-family: Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+                QLabel#CoordStatusBox {
+                    font-family: Menlo, Monaco, Consolas, monospace;
+                    font-size: 12px;
+                    padding: 4px 8px;
+                    border: 1px solid #b8b8b8;
+                    border-radius: 4px;
+                    background: #f7f7f7;
+                    min-width: 112px;
+                }
                 QPushButton { padding: 4px 10px; }
                 """
             )
@@ -545,9 +583,12 @@ def run_ui_client(args: argparse.Namespace) -> int:
             object_btns = QHBoxLayout()
             fill_object_btn = QPushButton("把当前物体位姿填入")
             fill_object_btn.clicked.connect(self.fill_current_object_pose)
+            fill_move_btn = QPushButton("填入Move框")
+            fill_move_btn.clicked.connect(self.fill_object_pose_to_move_box)
             move_object_btn = QPushButton("移动物体到该位姿")
             move_object_btn.clicked.connect(self.move_object_pose)
             object_btns.addWidget(fill_object_btn)
+            object_btns.addWidget(fill_move_btn)
             object_btns.addWidget(move_object_btn)
             object_btns.addStretch(1)
             object_layout.addLayout(object_btns)
@@ -677,6 +718,14 @@ def run_ui_client(args: argparse.Namespace) -> int:
             grip_layout.addLayout(grip_btns)
             layout.addWidget(grip_group)
 
+            workflow_group = QGroupBox("工作流1")
+            workflow_layout = QHBoxLayout(workflow_group)
+            workflow_btn = QPushButton("执行工作流1")
+            workflow_btn.clicked.connect(self.execute_workflow1)
+            workflow_layout.addWidget(workflow_btn)
+            workflow_layout.addStretch(1)
+            layout.addWidget(workflow_group)
+
             # Visibility.
             vis_group = QGroupBox("显示 / 隐藏")
             vis_layout = QHBoxLayout(vis_group)
@@ -688,12 +737,13 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.mocap_checkbox.toggled.connect(lambda v: self.post("/mocap", {"visible": bool(v)}))
             vis_layout.addWidget(self.ee_axes_checkbox)
             vis_layout.addWidget(self.mocap_checkbox)
+            vis_layout.addStretch(1)
             layout.addWidget(vis_group)
 
             trail_group = QGroupBox("Mocap 中心运动轨迹")
             trail_layout = QHBoxLayout(trail_group)
             self.trail_checkbox = QCheckBox("留下 mocap 中心轨迹")
-            self.trail_checkbox.setChecked(True)
+            self.trail_checkbox.setChecked(False)
             self.trail_checkbox.toggled.connect(lambda v: self.post("/trail", {"enabled": bool(v)}))
             clear_trail_btn = QPushButton("清除运动轨迹")
             clear_trail_btn.clicked.connect(lambda: self.post("/clear_trail", {}))
@@ -703,6 +753,17 @@ def run_ui_client(args: argparse.Namespace) -> int:
             trail_layout.addWidget(self.trail_count_label)
             trail_layout.addStretch(1)
             layout.addWidget(trail_group)
+
+            target_region_row = QHBoxLayout()
+            target_region_row.addWidget(QLabel("目标区域坐标："))
+            self.target_region_coord_labels: dict[str, QLabel] = {}
+            for axis in ("x", "y", "z"):
+                coord_label = QLabel(f"{axis}: --")
+                coord_label.setObjectName("CoordStatusBox")
+                self.target_region_coord_labels[axis] = coord_label
+                target_region_row.addWidget(coord_label)
+            target_region_row.addStretch(1)
+            layout.addLayout(target_region_row)
 
             line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); layout.addWidget(line)
             self.status_label = QLabel("正在连接控制器...")
@@ -776,6 +837,19 @@ def run_ui_client(args: argparse.Namespace) -> int:
                 self.object_pose_boxes[name].setValue(float(value))
             self.status_label.setText(f"已把当前 {key} 位姿填入物体位姿输入框。")
 
+        def fill_object_pose_to_move_box(self) -> None:
+            key = self.selected_object_key()
+            pose = self.last_object_poses_rad.get(key)
+            if pose is None:
+                self.status_label.setText(f"当前模型中未找到 {key} 位姿，无法填入 Move One Step。")
+                return
+            vals = list(pose)
+            if self.unit() == "deg":
+                vals[3:] = [math.degrees(v) for v in vals[3:]]
+            for name, value in zip(("x", "y", "z", "roll", "pitch", "yaw"), vals):
+                self.pose_boxes[name].setValue(float(value))
+            self.status_label.setText(f"已把当前 {key} 位姿填入 Move One Step。")
+
         def get_object_pose_rad(self) -> list[float]:
             vals = [self.object_pose_boxes[n].value() for n in ("x", "y", "z", "roll", "pitch", "yaw")]
             if self.object_unit() == "deg":
@@ -787,6 +861,9 @@ def run_ui_client(args: argparse.Namespace) -> int:
 
         def move_one_step(self) -> None:
             self.post("/move", {"mode": "move_one_step", "waypoints": [self.get_one_pose_rad()]})
+
+        def execute_workflow1(self) -> None:
+            self.post("/workflow1", {})
 
         def parse_multi_line(self, line: str) -> list[float]:
             tokens = line.replace(",", " ").strip().split()
@@ -953,6 +1030,13 @@ def run_ui_client(args: argparse.Namespace) -> int:
                     self.trail_checkbox.setChecked(show_trail)
                     self.trail_checkbox.blockSignals(False)
                 self.trail_count_label.setText(f"轨迹点: {int(state.get('trail_point_count', 0))}")
+                target_region_xyz = state.get("target_region_xyz")
+                if isinstance(target_region_xyz, list) and len(target_region_xyz) == 3:
+                    for axis, value in zip(("x", "y", "z"), target_region_xyz, strict=True):
+                        self.target_region_coord_labels[axis].setText(f"{axis}: {float(value):.6f}")
+                else:
+                    for axis in ("x", "y", "z"):
+                        self.target_region_coord_labels[axis].setText(f"{axis}: --")
             except Exception as exc:
                 self.status_label.setText(f"连接控制器失败：{exc}")
 
@@ -1172,6 +1256,7 @@ def run_controller(args: argparse.Namespace) -> int:
 
     ee_geom_ids = [x for x in [maybe_geom("ee_axis_x"), maybe_geom("ee_axis_y"), maybe_geom("ee_axis_z")] if x is not None]
     ee_site_ids = [x for x in [maybe_site(SITE_NAME)] if x is not None]
+    target_region_geom_id = maybe_geom("target_region_fill")
     target_body_id = int(model.body(MOCAP_NAME).id)
     mocap_geom_ids = [int(i) for i in range(model.ngeom) if int(model.geom_bodyid[i]) == target_body_id]
     mocap_site_ids = [int(i) for i in range(model.nsite) if int(model.site_bodyid[i]) == target_body_id]
@@ -1215,6 +1300,24 @@ def run_controller(args: argparse.Namespace) -> int:
             poses_rad[object_name] = [float(x) for x in pose_rad]
             poses_deg[object_name] = [float(x) for x in pose_deg]
         return poses_rad, poses_deg
+
+    def current_target_region_xyz() -> Optional[list[float]]:
+        if target_region_geom_id is None:
+            return None
+        return [float(x) for x in data.geom_xpos[target_region_geom_id]]
+
+    def command_from_pos_quat(position: np.ndarray, quat: np.ndarray) -> PoseCommand:
+        pos = np.asarray(position, dtype=float).copy()
+        q = np.asarray(quat, dtype=float).copy()
+        return PoseCommand(position=pos, quat=q, raw_pose=np.concatenate([pos, np.zeros(3, dtype=float)]))
+
+    def current_object_command(object_name: str) -> PoseCommand:
+        if object_name not in object_controls:
+            raise ValueError(f"当前模型中没有可用于工作流的物体：{object_name}")
+        body_id, _, _ = object_controls[object_name]
+        quat = np.zeros(4, dtype=float)
+        mujoco.mju_mat2Quat(quat, data.xmat[body_id])
+        return command_from_pos_quat(np.array(data.xpos[body_id], copy=True), quat)
 
     def set_object_pose(object_name: str, values: list[float] | np.ndarray) -> None:
         if object_name not in object_controls:
@@ -1321,6 +1424,11 @@ def run_controller(args: argparse.Namespace) -> int:
         trail_min_distance = 0.003
         trail_max_points = 1500
         trail_radius = 0.002
+        workflow1 = Workflow1State()
+        workflow_lift_z = 0.4
+        workflow_position_tolerance = 0.010
+        workflow_close_timeout = 3.0
+        workflow_open_timeout = 1.5
 
         def trail_point_count() -> int:
             return sum(len(stroke) for stroke in trail_strokes)
@@ -1396,6 +1504,172 @@ def run_controller(args: argparse.Namespace) -> int:
                 )
                 scn.ngeom += 1
 
+        def reset_motion_execution() -> None:
+            nonlocal stream_waypoints, stream_index, stream_last_time, stream_started, stream_wait_until
+            stream_waypoints = []
+            stream_index = 0
+            stream_last_time = 0.0
+            stream_started = False
+            stream_wait_until = 0.0
+            motion.clear()
+
+        def start_motion_goal(cmd: PoseCommand, mode: str, status_text: str) -> None:
+            nonlocal status
+            motion.active_mode = mode
+            motion.current_goal = cmd
+            motion.active_goal_index = 1
+            motion.total_goal_count = 1
+            motion.remaining_goals = []
+            set_mocap_pose(cmd)
+            status = status_text
+
+        def workflow_quat() -> np.ndarray:
+            if workflow1.carry_quat is not None:
+                return workflow1.carry_quat.copy()
+            return np.array(data.mocap_quat[mocap_id], copy=True)
+
+        def start_workflow1() -> None:
+            nonlocal status
+            if gripper_actuator_id is None:
+                workflow1.clear()
+                status = "工作流1无法执行：当前模型没有 gripper actuator。"
+                return
+            if "cube" not in object_controls:
+                workflow1.clear()
+                status = "工作流1无法执行：当前模型中没有 cube。"
+                return
+            target_xyz = current_target_region_xyz()
+            if target_xyz is None:
+                workflow1.clear()
+                status = "工作流1无法执行：没有找到 target_region_fill。"
+                return
+
+            reset_motion_execution()
+            workflow1.clear()
+            cube_cmd = current_object_command("cube")
+            workflow1.active = True
+            workflow1.phase = "move_to_cube"
+            workflow1.initial_position = np.array(data.mocap_pos[mocap_id], copy=True)
+            workflow1.initial_quat = np.array(data.mocap_quat[mocap_id], copy=True)
+            workflow1.carry_quat = cube_cmd.quat.copy()
+            workflow1.target_xy = np.asarray(target_xyz[:2], dtype=float)
+            start_motion_goal(cube_cmd, "workflow1", "工作流1：步骤 1/7，移动到 cube 六维位姿。")
+
+        def start_workflow_gripper_close() -> None:
+            nonlocal desired_gripper, auto_gripper_close, gripper_blocked, gripper_close_limit, gripper_stall_since, status
+            if gripper_actuator_id is not None:
+                lo, _ = model.actuator_ctrlrange[gripper_actuator_id]
+                desired_gripper = float(lo)
+            else:
+                desired_gripper = 0.0
+            auto_gripper_close = True
+            gripper_blocked = False
+            gripper_close_limit = 0.0
+            gripper_stall_since = None
+            workflow1.phase = "closing"
+            workflow1.gripper_wait_started_at = time.time()
+            status = "工作流1：步骤 2/7，gripper close，等待夹爪闭合后记录 z0。"
+
+        def start_workflow_gripper_open() -> None:
+            nonlocal desired_gripper, auto_gripper_close, gripper_blocked, gripper_close_limit, gripper_stall_since, status
+            if gripper_actuator_id is not None:
+                _, hi = model.actuator_ctrlrange[gripper_actuator_id]
+                desired_gripper = float(hi)
+            else:
+                desired_gripper = float(args.gripper_open)
+            auto_gripper_close = False
+            gripper_blocked = False
+            gripper_close_limit = 0.0
+            gripper_stall_since = None
+            workflow1.phase = "opening"
+            workflow1.gripper_wait_started_at = time.time()
+            status = "工作流1：步骤 6/7，gripper open。"
+
+        def advance_workflow_after_motion() -> None:
+            nonlocal status
+            if not workflow1.active or motion.current_goal is not None:
+                return
+            quat = workflow_quat()
+            target_xy = workflow1.target_xy
+            if workflow1.phase == "move_to_cube":
+                start_workflow_gripper_close()
+            elif workflow1.phase == "lift_after_grasp":
+                if target_xy is None:
+                    workflow1.clear()
+                    status = "工作流1中止：目标区域坐标不存在。"
+                    return
+                pos = np.array(data.mocap_pos[mocap_id], copy=True)
+                pos[0] = float(target_xy[0])
+                pos[1] = float(target_xy[1])
+                pos[2] = workflow_lift_z
+                workflow1.phase = "move_to_target_xy"
+                start_motion_goal(
+                    command_from_pos_quat(pos, quat),
+                    "workflow1",
+                    "工作流1：步骤 4/7，移动 x/y 到目标区域中心。",
+                )
+            elif workflow1.phase == "move_to_target_xy":
+                pos = np.array(data.mocap_pos[mocap_id], copy=True)
+                pos[2] = workflow1.z0
+                workflow1.phase = "lower_to_z0"
+                start_motion_goal(
+                    command_from_pos_quat(pos, quat),
+                    "workflow1",
+                    f"工作流1：步骤 5/7，z 移动到 z0={workflow1.z0:.6f}。",
+                )
+            elif workflow1.phase == "lower_to_z0":
+                start_workflow_gripper_open()
+            elif workflow1.phase == "lift_after_release":
+                if workflow1.initial_position is None or workflow1.initial_quat is None:
+                    workflow1.clear()
+                    status = "工作流1中止：初始位姿记录丢失。"
+                    return
+                workflow1.phase = "return_initial"
+                start_motion_goal(
+                    command_from_pos_quat(workflow1.initial_position, workflow1.initial_quat),
+                    "workflow1",
+                    "工作流1：步骤 7/7，返回第一步之前的初始位置。",
+                )
+            elif workflow1.phase == "return_initial":
+                workflow1.clear()
+                status = "工作流1完成：已回到第一步之前的初始位置。"
+
+        def advance_workflow_after_gripper(actual_value: float) -> None:
+            if not workflow1.active:
+                return
+            now_for_workflow = time.time()
+            quat = workflow_quat()
+            if workflow1.phase == "closing":
+                close_timed_out = now_for_workflow - workflow1.gripper_wait_started_at >= workflow_close_timeout
+                if gripper_blocked or actual_value <= 2.0 or close_timed_out:
+                    workflow1.z0 = float(data.mocap_pos[mocap_id][2])
+                    pos = np.array(data.mocap_pos[mocap_id], copy=True)
+                    pos[2] = workflow_lift_z
+                    workflow1.phase = "lift_after_grasp"
+                    suffix = "（夹爪等待超时，继续执行）" if close_timed_out and not gripper_blocked and actual_value > 2.0 else ""
+                    start_motion_goal(
+                        command_from_pos_quat(pos, quat),
+                        "workflow1",
+                        f"工作流1：步骤 3/7，记录 z0={workflow1.z0:.6f}，z 抬高到 {workflow_lift_z:.3f}。{suffix}",
+                    )
+            elif workflow1.phase == "opening":
+                if gripper_actuator_id is not None:
+                    _, hi = model.actuator_ctrlrange[gripper_actuator_id]
+                    open_target = float(hi)
+                else:
+                    open_target = float(args.gripper_open)
+                open_timed_out = now_for_workflow - workflow1.gripper_wait_started_at >= workflow_open_timeout
+                if actual_value >= open_target - 2.0 or open_timed_out:
+                    pos = np.array(data.mocap_pos[mocap_id], copy=True)
+                    pos[2] = workflow_lift_z
+                    workflow1.phase = "lift_after_release"
+                    suffix = "（夹爪打开等待超时，继续执行）" if open_timed_out and actual_value < open_target - 2.0 else ""
+                    start_motion_goal(
+                        command_from_pos_quat(pos, quat),
+                        "workflow1",
+                        f"工作流1：步骤 7/7，z 抬高到 {workflow_lift_z:.3f}。{suffix}",
+                    )
+
         while viewer.is_running() and running:
             step_start = time.time()
 
@@ -1407,6 +1681,7 @@ def run_controller(args: argparse.Namespace) -> int:
                 try:
                     ctype = command.get("type")
                     if ctype == "move":
+                        workflow1.clear()
                         waypoints = parse_waypoints_rad(command.get("waypoints", []))
                         if waypoints:
                             mode = str(command.get("mode", "move"))
@@ -1449,12 +1724,15 @@ def run_controller(args: argparse.Namespace) -> int:
                         stream_wait_until = 0.0
                         reset_trail_writer()
                         motion.clear()
+                        workflow1.clear()
                         snap_mocap_to_site()
                         status = "已停止当前任务，并把 target 同步到当前末端位姿。"
                     elif ctype == "gripper":
+                        workflow1.clear()
                         desired_gripper = float(command.get("value", desired_gripper))
                         auto_gripper_close = False
                     elif ctype == "gripper_open":
+                        workflow1.clear()
                         if gripper_actuator_id is not None:
                             _, hi = model.actuator_ctrlrange[gripper_actuator_id]
                             desired_gripper = float(hi)
@@ -1466,6 +1744,7 @@ def run_controller(args: argparse.Namespace) -> int:
                         gripper_stall_since = None
                         status = "gripper open：完全打开"
                     elif ctype == "gripper_close":
+                        workflow1.clear()
                         if gripper_actuator_id is not None:
                             lo, _ = model.actuator_ctrlrange[gripper_actuator_id]
                             desired_gripper = float(lo)
@@ -1492,9 +1771,12 @@ def run_controller(args: argparse.Namespace) -> int:
                         shared.mocap_z_comp = float(command.get("mocap_z_comp", shared.mocap_z_comp))
                         status = f"mocap z 补偿 = {shared.mocap_z_comp:.4f} m"
                     elif ctype == "object_pose":
+                        workflow1.clear()
                         object_name = str(command.get("object", ""))
                         set_object_pose(object_name, command.get("pose", []))
                         status = f"已移动 {object_name}: {format_pose(command.get('pose', []))}"
+                    elif ctype == "workflow1":
+                        start_workflow1()
                     elif ctype == "quit":
                         running = False
                 except Exception as exc:
@@ -1554,7 +1836,11 @@ def run_controller(args: argparse.Namespace) -> int:
                             motion.clear()
                 else:
                     # Normal multi-step execution waits until each waypoint is reached.
-                    if pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance:
+                    if motion.active_mode == "workflow1":
+                        reached_goal = pos_err_goal <= workflow_position_tolerance
+                    else:
+                        reached_goal = pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance
+                    if reached_goal:
                         if motion.remaining_goals:
                             motion.current_goal = motion.remaining_goals.pop(0)
                             motion.active_goal_index += 1
@@ -1563,6 +1849,8 @@ def run_controller(args: argparse.Namespace) -> int:
                         else:
                             status = f"{motion.active_mode} 执行完成。"
                             motion.clear()
+
+            advance_workflow_after_motion()
 
             dx = compensated_target_pos() - data.site(site_id).xpos
             twist[:3] = Kpos * dx / integration_dt
@@ -1642,6 +1930,8 @@ def run_controller(args: argparse.Namespace) -> int:
             last_gripper_actual = actual_gripper
             last_gripper_sample_time = now_for_gripper
 
+            advance_workflow_after_gripper(actual_gripper)
+
             if show_trail:
                 append_trail_point(data.site(site_id).xpos - compensation_vec())
             else:
@@ -1673,6 +1963,7 @@ def run_controller(args: argparse.Namespace) -> int:
                     active_mode=motion.active_mode or "idle",
                     show_trail=show_trail,
                     trail_point_count=trail_point_count(),
+                    target_region_xyz=current_target_region_xyz(),
                     object_names=list(object_controls),
                     object_poses_rad=object_poses_rad,
                     object_poses_deg=object_poses_deg,
