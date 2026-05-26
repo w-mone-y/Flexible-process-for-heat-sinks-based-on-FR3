@@ -1442,6 +1442,11 @@ def run_controller(args: argparse.Namespace) -> int:
         wheel_spin_opposite_actuator_id = model.actuator("wheel_spin_opposite").id
     except KeyError:
         wheel_spin_opposite_actuator_id = None
+    wheel_spin_opposite_mirror_actuator_id: Optional[int] = None
+    try:
+        wheel_spin_opposite_mirror_actuator_id = model.actuator("wheel_spin_opposite_mirror").id
+    except KeyError:
+        wheel_spin_opposite_mirror_actuator_id = None
     shared.has_gripper = gripper_actuator_id is not None
     finger_qpos_ids: list[int] = []
     for joint_name in FINGER_JOINT_NAMES:
@@ -2711,6 +2716,9 @@ def run_controller(args: argparse.Namespace) -> int:
             if wheel_spin_opposite_actuator_id is not None:
                 lo, hi = model.actuator_ctrlrange[wheel_spin_opposite_actuator_id]
                 data.ctrl[wheel_spin_opposite_actuator_id] = float(np.clip(2.0, lo, hi))
+            if wheel_spin_opposite_mirror_actuator_id is not None:
+                lo, hi = model.actuator_ctrlrange[wheel_spin_opposite_mirror_actuator_id]
+                data.ctrl[wheel_spin_opposite_mirror_actuator_id] = float(np.clip(2.0, lo, hi))
 
             # For streamed function_path: first hold the current mocap pose for
             # stream_start_hold_time, then send the first sampled waypoint.
