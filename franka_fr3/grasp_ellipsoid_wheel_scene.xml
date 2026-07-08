@@ -20,6 +20,7 @@
     <material name="grasp_ellipsoid_purple" rgba="0.55 0.20 0.90 1" specular="0.25" shininess="0.35"/>
     <mesh name="double_sphere_overlap_mesh" file="../../双球重叠体.STL" scale="0.001 0.001 0.001"/>
     <material name="wheel_table_mat" rgba="0.34 0.32 0.40 1" specular="0.15" shininess="0.2"/>
+    <material name="wheel_rail_mat" rgba="0.20 0.22 0.25 1" specular="0.25" shininess="0.35"/>
     <material name="wheel_support_mat" rgba="0.46 0.46 0.50 1" specular="0.2" shininess="0.25"/>
     <material name="wheel_cylinder_mat" rgba="0.95 0.20 0.16 1" specular="0.3" shininess="0.4"/>
     <material name="wheel_marker_mat" rgba="1.00 0.95 0.05 1" specular="0.2" shininess="0.3"/>
@@ -63,32 +64,43 @@
     <!-- Symmetry center C=(0.000000, 0.529257, 0.439859); centers are 0.250m apart along X. -->
     <!-- Both wheel axes / circular-face normals are parallel to world Y. -->
     <!-- Retain the *_opposite names for the negative-X wheel so existing controller lookups remain valid. -->
-    <geom name="wheel_table_opposite" type="box" pos="-0.125000 0.529257 0.259859" size="0.060 0.036 0.020"
-          material="wheel_table_mat" friction="2.0 0.08 0.005" condim="6" contype="1" conaffinity="1"/>
-    <geom name="wheel_support_opposite" type="box" pos="-0.125000 0.529257 0.359859" size="0.030 0.035 0.080"
-          material="wheel_support_mat" contype="0" conaffinity="0"/>
-    <body name="wheel_rotor_opposite" pos="-0.125000 0.529257 0.439859">
-      <joint name="wheel_hinge_opposite" type="hinge" axis="0 1 0" damping="0.02" armature="0.001"/>
-      <geom name="wheel_cylinder_opposite" type="cylinder" size="0.075 0.018" quat="0.7071068 -0.7071068 0 0"
-            material="wheel_cylinder_mat" mass="0.080" friction="0 0 0" condim="6" priority="2"
-            contype="1" conaffinity="1" margin="0.001"
-            solref="0.003 1" solimp="0.99 0.999 0.0001"/>
-      <geom name="wheel_rotation_marker_opposite" type="capsule" fromto="0 -0.020 0 0 -0.020 0.070" size="0.004"
-            material="wheel_marker_mat" density="0" contype="0" conaffinity="0"/>
+    <!-- The rail accommodates a maximum 0.750m wheel-center spacing; the initial 0.250m is one third of that span. -->
+    <geom name="wheel_slider_rail" type="box" pos="0 0.529257 0.229859" size="0.440 0.060 0.010"
+          material="wheel_rail_mat" friction="1.5 0.05 0.003" condim="4" contype="0" conaffinity="0"/>
+    <body name="wheel_slider_opposite" pos="-0.125000 0.529257 0">
+      <joint name="wheel_slider_joint_opposite" type="slide" axis="-1 0 0" range="-0.050 0.250"
+             damping="1.0" armature="0.01"/>
+      <geom name="wheel_table_opposite" type="box" pos="0 0 0.259859" size="0.060 0.036 0.020"
+            material="wheel_table_mat" friction="2.0 0.08 0.005" condim="6" contype="0" conaffinity="0"/>
+      <geom name="wheel_support_opposite" type="box" pos="0 0 0.359859" size="0.030 0.035 0.080"
+            material="wheel_support_mat" contype="0" conaffinity="0"/>
+      <body name="wheel_rotor_opposite" pos="0 0 0.439859">
+        <joint name="wheel_hinge_opposite" type="hinge" axis="0 1 0" damping="0.02" armature="0.001"/>
+        <geom name="wheel_cylinder_opposite" type="cylinder" size="0.075 0.018" quat="0.7071068 -0.7071068 0 0"
+              material="wheel_cylinder_mat" mass="0.080" friction="0 0 0" condim="6" priority="2"
+              contype="1" conaffinity="1" margin="0.001"
+              solref="0.003 1" solimp="0.99 0.999 0.0001"/>
+        <geom name="wheel_rotation_marker_opposite" type="capsule" fromto="0 -0.020 0 0 -0.020 0.070" size="0.004"
+              material="wheel_marker_mat" density="0" contype="0" conaffinity="0"/>
+      </body>
     </body>
 
-    <geom name="wheel_table_opposite_mirror" type="box" pos="0.125000 0.529257 0.259859" size="0.060 0.036 0.020"
-          material="wheel_table_mat" friction="2.0 0.08 0.005" condim="6" contype="1" conaffinity="1"/>
-    <geom name="wheel_support_opposite_mirror" type="box" pos="0.125000 0.529257 0.359859" size="0.030 0.035 0.080"
-          material="wheel_support_mat" contype="0" conaffinity="0"/>
-    <body name="wheel_rotor_opposite_mirror" pos="0.125000 0.529257 0.439859">
-      <joint name="wheel_hinge_opposite_mirror" type="hinge" axis="0 1 0" damping="0.02" armature="0.001"/>
-      <geom name="wheel_cylinder_opposite_mirror" type="cylinder" size="0.075 0.018" quat="0.7071068 -0.7071068 0 0"
-            material="wheel_cylinder_mat" mass="0.080" friction="0 0 0" condim="6" priority="2"
-            contype="1" conaffinity="1" margin="0.001"
-            solref="0.003 1" solimp="0.99 0.999 0.0001"/>
-      <geom name="wheel_rotation_marker_opposite_mirror" type="capsule" fromto="0 -0.020 0 0 -0.020 0.070" size="0.004"
-            material="wheel_marker_mat" density="0" contype="0" conaffinity="0"/>
+    <body name="wheel_slider_opposite_mirror" pos="0.125000 0.529257 0">
+      <joint name="wheel_slider_joint_opposite_mirror" type="slide" axis="1 0 0" range="-0.050 0.250"
+             damping="1.0" armature="0.01"/>
+      <geom name="wheel_table_opposite_mirror" type="box" pos="0 0 0.259859" size="0.060 0.036 0.020"
+            material="wheel_table_mat" friction="2.0 0.08 0.005" condim="6" contype="0" conaffinity="0"/>
+      <geom name="wheel_support_opposite_mirror" type="box" pos="0 0 0.359859" size="0.030 0.035 0.080"
+            material="wheel_support_mat" contype="0" conaffinity="0"/>
+      <body name="wheel_rotor_opposite_mirror" pos="0 0 0.439859">
+        <joint name="wheel_hinge_opposite_mirror" type="hinge" axis="0 1 0" damping="0.02" armature="0.001"/>
+        <geom name="wheel_cylinder_opposite_mirror" type="cylinder" size="0.075 0.018" quat="0.7071068 -0.7071068 0 0"
+              material="wheel_cylinder_mat" mass="0.080" friction="0 0 0" condim="6" priority="2"
+              contype="1" conaffinity="1" margin="0.001"
+              solref="0.003 1" solimp="0.99 0.999 0.0001"/>
+        <geom name="wheel_rotation_marker_opposite_mirror" type="capsule" fromto="0 -0.020 0 0 -0.020 0.070" size="0.004"
+              material="wheel_marker_mat" density="0" contype="0" conaffinity="0"/>
+      </body>
     </body>
 
     <!-- Virtual lens workpiece. Its body xyz axes initially match the world xyz axes. -->

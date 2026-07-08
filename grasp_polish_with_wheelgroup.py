@@ -81,47 +81,68 @@ locked_pose_ik_orientation_tolerance = 0.020
 locked_pose_ik_orientation_weight = 0.20
 locked_pose_min_joint_clearance = 0.080
 locked_pose_ik_supplemental_seed_count = 24
-locked_move_position_tolerance = 0.0010
-locked_move_orientation_tolerance = 0.020
-locked_move_intermediate_position_tolerance = 0.006
-locked_move_intermediate_orientation_tolerance = 0.045
+locked_move_position_tolerance = 0.0025
+locked_move_orientation_tolerance = 0.040
+locked_move_intermediate_position_tolerance = 0.020
+locked_move_intermediate_orientation_tolerance = 0.120
 locked_move_transit_position_step = 0.015
 locked_move_contact_position_step = 0.004
 locked_move_body_angle_step = math.radians(5.0)
-locked_move_in_place_translation_threshold = 0.003
-locked_move_in_place_max_penetration = 0.0025
-locked_move_wheel_retreat = 0.030
+locked_move_in_place_translation_threshold = 0.015
+locked_move_in_place_max_penetration = 0.0140
+locked_move_nullspace_release_position_error = 0.030
+locked_move_nullspace_release_orientation_error = 0.180
+locked_move_wheel_retreat = 0.060
 locked_move_reconfiguration_retreat = 0.060
-locked_move_near_wheel_margin = 0.045
-surface_scan_samples_per_side = 160
+locked_move_near_wheel_margin = 0.090
 double_sphere_radius = 0.0725
 double_sphere_center_half_distance = 0.0525
-surface_scan_circle_radius = math.sqrt(
+lens_intersection_circle_radius = math.sqrt(
     max(0.0, double_sphere_radius * double_sphere_radius - double_sphere_center_half_distance * double_sphere_center_half_distance)
 )
-surface_scan_yaw_center = math.pi
-surface_scan_step_time = 0.06
-surface_scan_transition_lift = 0.040
-# Cap1 Archimedean-spiral polishing scan defaults. Units are SI.
-# cap1_sphere_center_offset is the distance from the lens mid-plane to cap1's
-# mother-sphere center along cap1's body-fixed surface-axis normal. If your 52.5 mm is the total
-# distance between the two mother-sphere centers, use 0.02625 here/in the UI.
-# If it is already the half-distance used by the XML, keep 0.0525.
-cap1_spiral_default_arc_step = 0.0020
-cap1_spiral_default_radial_spacing = 0.0060
-cap1_spiral_default_max_normal_angle_deg = 1.5
-cap1_sphere_center_offset_default = double_sphere_center_half_distance
-cap1_spiral_max_points = 2200
+wheel_slider_initial_spacing = 0.250
+wheel_slider_min_spacing = 0.150
+wheel_slider_max_spacing = 0.750
+wheel_slider_speed = 0.300
+wheel_slider_completion_tolerance = 0.0005
+polishing_workflow1_contact_spacing = 0.2490
+polishing_workflow1_center = np.asarray([0.0, 0.529257, 0.439859], dtype=float)
+polishing_workflow1_roll_sequence_deg = (90.0, 150.0, 90.0, 30.0, 90.0)
+# Polishing workflow 2: run after workflow 1 has finished and reopened the two wheel sliders.
+# It keeps x/y/orientation fixed, lowers the lens center to z=0.410 m, closes the sliders
+# more tightly, then runs the requested roll sequence. Steps 2-4 use 90 -> 20 -> 90 -> 150 -> 90 deg; step 5 uses 90 -> 30 -> 90 -> 150 -> 90 deg.
+polishing_workflow2_contact_spacing = 0.2190
+polishing_workflow2_center = np.asarray([0.0, 0.529257, 0.410000], dtype=float)
+polishing_workflow2_roll_sequence_deg = (90.0, 30.0, 90.0, 150.0, 90.0)
+# Polishing workflow 3: same as workflow 2, but raises the lens center to z=0.460 m.
+polishing_workflow3_contact_spacing = 0.2190
+polishing_workflow3_center = np.asarray([0.0, 0.529257, 0.460000], dtype=float)
+polishing_workflow3_roll_sequence_deg = (90.0, 30.0, 90.0, 150.0, 90.0)
+
+polishing_workflow4_contact_spacing = 0.1650
+polishing_workflow4_center = np.asarray([0.0, 0.529257, 0.500000], dtype=float)
+polishing_workflow4_roll_sequence_deg = (90.0, 30.0, 90.0, 150.0, 90.0)
+
+polishing_workflow5_contact_spacing = 0.1670
+polishing_workflow5_center = np.asarray([0.0, 0.529257, 0.380000], dtype=float)
+polishing_workflow5_roll_sequence_deg = (90.0, 30.0, 90.0, 150.0, 90.0)
 
 # Names expected in your FR3+gripper XML.
 SITE_NAME = "attachment_site"
 MOCAP_NAME = "target"
 EE_AXIS_CYLINDER_GEOM_NAME = "ee_axis_z_center_cylinder"
 ELLIPSOID_GEOM_NAME = "grasp_ellipsoid_geom"
-WHEEL_CYLINDER_GEOM_NAME = "wheel_cylinder"
 OPPOSITE_WHEEL_CYLINDER_GEOM_NAME = "wheel_cylinder_opposite"
+MIRROR_OPPOSITE_WHEEL_CYLINDER_GEOM_NAME = "wheel_cylinder_opposite_mirror"
+WHEEL_SLIDER_JOINT_NAMES = ("wheel_slider_joint_opposite", "wheel_slider_joint_opposite_mirror")
 FINGER_JOINT_NAMES = ("finger_joint1", "finger_joint2")
 ELLIPSOID_BODY_NAME = "grasp_ellipsoid"
+TOOL_ROLL_JOINT_NAME = "tool_roll_joint"
+TOOL_ROLL_ACTUATOR_NAME = "tool_roll"
+tool_roll_motion_step = math.radians(5.0)
+tool_roll_position_tolerance = math.radians(0.5)
+pure_tool_roll_position_tolerance = 0.003
+pure_tool_roll_axis_tolerance = math.radians(1.0)
 
 
 @dataclass(frozen=True)
@@ -140,6 +161,8 @@ class MotionState:
     total_goal_count: int = 0
     active_mode: str = ""
     protect_opposite_wheel_contact: bool = False
+    protected_wheel_clearance_reference: Optional[float] = None
+    require_tool_roll_target: bool = False
 
     def clear(self) -> None:
         self.current_goal = None
@@ -148,6 +171,8 @@ class MotionState:
         self.total_goal_count = 0
         self.active_mode = ""
         self.protect_opposite_wheel_contact = False
+        self.protected_wheel_clearance_reference = None
+        self.require_tool_roll_target = False
 
 
 @dataclass
@@ -168,26 +193,73 @@ class WorkpieceLockState:
 
 
 @dataclass
-class SurfaceScanState:
+class PolishingWorkflow1State:
     active: bool = False
-    streaming: bool = False
-    index: int = 0
-    last_step_at: float = 0.0
-    clearance: float = 0.0
-    labels: list[str] | None = None
+    stage: str = "inactive"
+
+    def start(self) -> None:
+        self.active = True
+        self.stage = "opening_and_aligning"
 
     def clear(self) -> None:
         self.active = False
-        self.streaming = False
-        self.index = 0
-        self.last_step_at = 0.0
-        self.clearance = 0.0
-        self.labels = None
+        self.stage = "inactive"
 
-    def label(self) -> str:
-        if not self.labels or self.index < 0 or self.index >= len(self.labels):
-            return "inactive"
-        return self.labels[self.index]
+
+@dataclass
+class PolishingWorkflow2State:
+    active: bool = False
+    stage: str = "inactive"
+
+    def start(self) -> None:
+        self.active = True
+        self.stage = "opening_sliders"
+
+    def clear(self) -> None:
+        self.active = False
+        self.stage = "inactive"
+
+
+@dataclass
+class PolishingWorkflow3State:
+    active: bool = False
+    stage: str = "inactive"
+
+    def start(self) -> None:
+        self.active = True
+        self.stage = "opening_sliders"
+
+    def clear(self) -> None:
+        self.active = False
+        self.stage = "inactive"
+
+
+@dataclass
+class PolishingWorkflow4State:
+    active: bool = False
+    stage: str = "inactive"
+
+    def start(self) -> None:
+        self.active = True
+        self.stage = "opening_sliders"
+
+    def clear(self) -> None:
+        self.active = False
+        self.stage = "inactive"
+
+
+@dataclass
+class PolishingWorkflow5State:
+    active: bool = False
+    stage: str = "inactive"
+
+    def start(self) -> None:
+        self.active = True
+        self.stage = "opening_sliders"
+
+    def clear(self) -> None:
+        self.active = False
+        self.stage = "inactive"
 
 
 @dataclass
@@ -286,6 +358,11 @@ class SharedState:
         self.show_trail = False
         self.mocap_z_comp = 0.0
         self.has_gripper = True
+        self.has_tool_roll = False
+        self.tool_roll_angle_rad = 0.0
+        self.tool_roll_angle_deg = 0.0
+        self.tool_roll_target_angle_rad = 0.0
+        self.tool_roll_target_angle_deg = 0.0
         self.viewer_running = False
         self.waypoint_index = 0
         self.waypoint_count = 0
@@ -295,7 +372,13 @@ class SharedState:
         self.lens_center_pose_deg: Optional[list[float]] = None
         self.align_step1_error_text = f"步骤1固定目标: {align_step1_fixed_pose_deg_text}"
         self.workpiece_lock_status = "inactive"
-        self.scan_status = "inactive"
+        self.polishing_workflow1_status = "inactive"
+        self.polishing_workflow2_status = "inactive"
+        self.polishing_workflow3_status = "inactive"
+        self.polishing_workflow4_status = "inactive"
+        self.polishing_workflow5_status = "inactive"
+        self.wheel_slider_spacing = wheel_slider_initial_spacing
+        self.wheel_slider_target_spacing = wheel_slider_initial_spacing
         self.server_time = time.time()
 
     def snapshot(self) -> dict[str, Any]:
@@ -317,6 +400,11 @@ class SharedState:
                 "show_trail": bool(self.show_trail),
                 "mocap_z_comp": float(self.mocap_z_comp),
                 "has_gripper": bool(self.has_gripper),
+                "has_tool_roll": bool(self.has_tool_roll),
+                "tool_roll_angle_rad": float(self.tool_roll_angle_rad),
+                "tool_roll_angle_deg": float(self.tool_roll_angle_deg),
+                "tool_roll_target_angle_rad": float(self.tool_roll_target_angle_rad),
+                "tool_roll_target_angle_deg": float(self.tool_roll_target_angle_deg),
                 "viewer_running": bool(self.viewer_running),
                 "waypoint_index": int(self.waypoint_index),
                 "waypoint_count": int(self.waypoint_count),
@@ -326,7 +414,13 @@ class SharedState:
                 "lens_center_pose_deg": None if self.lens_center_pose_deg is None else list(self.lens_center_pose_deg),
                 "align_step1_error_text": str(self.align_step1_error_text),
                 "workpiece_lock_status": str(self.workpiece_lock_status),
-                "scan_status": str(self.scan_status),
+                "polishing_workflow1_status": str(self.polishing_workflow1_status),
+                "polishing_workflow2_status": str(self.polishing_workflow2_status),
+                "polishing_workflow3_status": str(self.polishing_workflow3_status),
+                "polishing_workflow4_status": str(self.polishing_workflow4_status),
+                "polishing_workflow5_status": str(self.polishing_workflow5_status),
+                "wheel_slider_spacing": float(self.wheel_slider_spacing),
+                "wheel_slider_target_spacing": float(self.wheel_slider_target_spacing),
                 "server_time": float(self.server_time),
             }
 
@@ -377,7 +471,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("mode must be move_one_step or function_path")
                 if mode == "move_one_step" and len(waypoints) != 1:
                     raise ValueError("move_one_step requires exactly one waypoint")
-                self.shared.commands.put({"type": "move", "mode": mode, "waypoints": waypoints})
+                command: dict[str, Any] = {"type": "move", "mode": mode, "waypoints": waypoints}
+                if "tool_roll_angle_rad" in payload:
+                    command["tool_roll_angle_rad"] = float(payload["tool_roll_angle_rad"])
+                self.shared.commands.put(command)
                 self._send_json({"ok": True})
             elif self.path == "/stop":
                 self.shared.commands.put({"type": "stop"})
@@ -407,6 +504,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
                 self.shared.commands.put({"type": "gripper_close"})
                 self._send_json({"ok": True})
+            elif self.path == "/tool_roll":
+                angle_rad = float(payload.get("angle_rad", 0.0))
+                self.shared.update(
+                    tool_roll_target_angle_rad=angle_rad,
+                    tool_roll_target_angle_deg=math.degrees(angle_rad),
+                    status=f"请求 gripper 连续自转到 {math.degrees(angle_rad):.2f} deg",
+                )
+                self.shared.commands.put({"type": "tool_roll", "angle_rad": angle_rad})
+                self._send_json({"ok": True, "angle_rad": angle_rad, "angle_deg": math.degrees(angle_rad)})
             elif self.path == "/ee_axes":
                 visible = bool(payload.get("visible", True))
                 self.shared.update(show_ee_axes=visible, status="显示机械臂末端坐标轴" if visible else "隐藏机械臂末端坐标轴")
@@ -431,6 +537,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.shared.update(mocap_z_comp=value, status=f"mocap z 补偿 = {value:.4f} m")
                 self.shared.commands.put({"type": "offset", "mocap_z_comp": value})
                 self._send_json({"ok": True, "mocap_z_comp": value})
+            elif self.path == "/wheel_slider_spacing":
+                spacing = float(
+                    np.clip(
+                        float(payload.get("spacing", wheel_slider_initial_spacing)),
+                        wheel_slider_min_spacing,
+                        wheel_slider_max_spacing,
+                    )
+                )
+                self.shared.update(wheel_slider_target_spacing=spacing, status=f"双滑块目标圆心距离 = {spacing:.4f} m")
+                self.shared.commands.put({"type": "wheel_slider_spacing", "spacing": spacing})
+                self._send_json({"ok": True, "spacing": spacing})
             elif self.path == "/lens_center_pose":
                 with self.shared.lock:
                     lock_status = str(self.shared.workpiece_lock_status)
@@ -454,57 +571,26 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self.shared.commands.put({"type": "align_workpiece_handle_step2"})
                 self.shared.update(status="请求执行对齐步骤2：关闭 gripper 并锁定待磨件", workpiece_lock_status="closing")
                 self._send_json({"ok": True})
-            elif self.path == "/ellipsoid_surface_scan":
-                with self.shared.lock:
-                    lock_status = str(self.shared.workpiece_lock_status)
-                if lock_status != "locked":
-                    raise ValueError("待磨件尚未 locked；请先执行步骤2。")
-                clearance = float(payload.get("surface_clearance", 0.0))
-                clearance = float(np.clip(clearance, -0.020, 0.020))
-                self.shared.commands.put({"type": "ellipsoid_surface_scan", "surface_clearance": clearance})
-                self.shared.update(
-                    status=f"请求执行圆周扫描：surface_clearance={clearance:.4f}m",
-                    scan_status=f"waiting_start, clearance={clearance:.4f}m",
-                )
-                self._send_json({"ok": True, "surface_clearance": clearance})
-            elif self.path == "/cap1_spiral_scan":
-                with self.shared.lock:
-                    lock_status = str(self.shared.workpiece_lock_status)
-                if lock_status != "locked":
-                    raise ValueError("待磨件尚未 locked；请先执行步骤2。")
-                clearance = float(np.clip(float(payload.get("surface_clearance", 0.0)), -0.020, 0.020))
-                arc_step = float(np.clip(float(payload.get("arc_step", cap1_spiral_default_arc_step)), 0.0005, 0.0100))
-                radial_spacing = float(np.clip(float(payload.get("radial_spacing", cap1_spiral_default_radial_spacing)), 0.0010, 0.0300))
-                max_normal_angle_deg = float(np.clip(float(payload.get("max_normal_angle_deg", cap1_spiral_default_max_normal_angle_deg)), 0.25, 10.0))
-                center_offset = float(np.clip(float(payload.get("center_offset", cap1_sphere_center_offset_default)), 0.0, double_sphere_radius * 0.98))
-                target_z_sign = 1.0 if float(payload.get("target_z_sign", 1.0)) >= 0.0 else -1.0
-                self.shared.commands.put({
-                    "type": "cap1_spiral_scan",
-                    "surface_clearance": clearance,
-                    "arc_step": arc_step,
-                    "radial_spacing": radial_spacing,
-                    "max_normal_angle_deg": max_normal_angle_deg,
-                    "center_offset": center_offset,
-                    "target_z_sign": target_z_sign,
-                })
-                self.shared.update(
-                    status=(
-                        f"请求执行 cap1 螺线打磨：arc_step={arc_step:.4f}m, "
-                        f"radial_spacing={radial_spacing:.4f}m, normal≤{max_normal_angle_deg:.2f}°, "
-                        f"target红轴/接触法线≈{' +X' if target_z_sign > 0 else ' -X'}，"
-                        f"target蓝轴≈{' -Y' if target_z_sign > 0 else ' +Y'}"
-                    ),
-                    scan_status=f"waiting_start, clearance={clearance:.4f}m",
-                )
-                self._send_json({
-                    "ok": True,
-                    "surface_clearance": clearance,
-                    "arc_step": arc_step,
-                    "radial_spacing": radial_spacing,
-                    "max_normal_angle_deg": max_normal_angle_deg,
-                    "center_offset": center_offset,
-                    "target_z_sign": target_z_sign,
-                })
+            elif self.path == "/polishing_workflow1":
+                self.shared.commands.put({"type": "polishing_workflow1"})
+                self.shared.update(status="请求执行打磨流程1", polishing_workflow1_status="starting")
+                self._send_json({"ok": True})
+            elif self.path == "/polishing_workflow2":
+                self.shared.commands.put({"type": "polishing_workflow2"})
+                self.shared.update(status="请求执行打磨步骤2", polishing_workflow2_status="starting")
+                self._send_json({"ok": True})
+            elif self.path == "/polishing_workflow3":
+                self.shared.commands.put({"type": "polishing_workflow3"})
+                self.shared.update(status="请求执行打磨步骤3", polishing_workflow3_status="starting")
+                self._send_json({"ok": True})
+            elif self.path == "/polishing_workflow4":
+                self.shared.commands.put({"type": "polishing_workflow4"})
+                self.shared.update(status="请求执行打磨步骤4", polishing_workflow4_status="starting")
+                self._send_json({"ok": True})
+            elif self.path == "/polishing_workflow5":
+                self.shared.commands.put({"type": "polishing_workflow5"})
+                self.shared.update(status="请求执行打磨步骤5", polishing_workflow5_status="starting")
+                self._send_json({"ok": True})
             elif self.path == "/quit":
                 self.shared.commands.put({"type": "quit"})
                 self._send_json({"ok": True})
@@ -615,6 +701,8 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.last_pose_rad = [0.0] * 6
             self.last_lens_center_pose_rad: Optional[list[float]] = None
             self.last_lens_center_pose_deg: Optional[list[float]] = None
+            self.last_tool_roll_angle_deg = 0.0
+            self.last_tool_roll_target_angle_deg = 0.0
             self.gripper_blocked = False
             self.gripper_close_limit = 0
             self.default_unit = "rad"
@@ -622,8 +710,8 @@ def run_ui_client(args: argparse.Namespace) -> int:
 
         def _build(self) -> None:
             self.setWindowTitle("FR3 PySide6 控制面板 - Ellipsoid + Wheel")
-            self.resize(820, 840)
-            self.setMinimumSize(740, 760)
+            self.resize(1100, 840)
+            self.setMinimumSize(980, 760)
             self.setStyleSheet(
                 """
                 QWidget { font-size: 13px; }
@@ -750,63 +838,10 @@ def run_ui_client(args: argparse.Namespace) -> int:
             align_step1_btn.clicked.connect(self.align_workpiece_handle_step1)
             align_step2_btn = QPushButton("执行对齐步骤2")
             align_step2_btn.clicked.connect(self.align_workpiece_handle_step2)
-            scan_btn = QPushButton("执行圆周扫描")
-            scan_btn.clicked.connect(self.execute_ellipsoid_surface_scan)
-            cap1_spiral_btn = QPushButton("执行cap1螺线打磨")
-            cap1_spiral_btn.clicked.connect(self.execute_cap1_spiral_scan)
             align_btns.addWidget(align_step1_btn)
             align_btns.addWidget(align_step2_btn)
-            align_btns.addWidget(scan_btn)
-            align_btns.addWidget(cap1_spiral_btn)
             align_btns.addStretch(1)
             align_layout.addLayout(align_btns)
-            clearance_row = QHBoxLayout()
-            clearance_row.addWidget(QLabel("surface_clearance(m):"))
-            self.surface_clearance_box = QDoubleSpinBox()
-            self.surface_clearance_box.setDecimals(6)
-            self.surface_clearance_box.setRange(-0.020, 0.020)
-            self.surface_clearance_box.setSingleStep(0.0005)
-            self.surface_clearance_box.setValue(0.0)
-            clearance_row.addWidget(self.surface_clearance_box)
-            clearance_row.addWidget(QLabel("arc_step(m):"))
-            self.cap1_arc_step_box = QDoubleSpinBox()
-            self.cap1_arc_step_box.setDecimals(6)
-            self.cap1_arc_step_box.setRange(0.0005, 0.0100)
-            self.cap1_arc_step_box.setSingleStep(0.0005)
-            self.cap1_arc_step_box.setValue(cap1_spiral_default_arc_step)
-            clearance_row.addWidget(self.cap1_arc_step_box)
-            clearance_row.addWidget(QLabel("loop_spacing(m):"))
-            self.cap1_radial_spacing_box = QDoubleSpinBox()
-            self.cap1_radial_spacing_box.setDecimals(6)
-            self.cap1_radial_spacing_box.setRange(0.0010, 0.0300)
-            self.cap1_radial_spacing_box.setSingleStep(0.0010)
-            self.cap1_radial_spacing_box.setValue(cap1_spiral_default_radial_spacing)
-            clearance_row.addWidget(self.cap1_radial_spacing_box)
-            clearance_row.addStretch(1)
-            align_layout.addLayout(clearance_row)
-
-            cap1_row = QHBoxLayout()
-            cap1_row.addWidget(QLabel("max_normal_angle(deg):"))
-            self.cap1_normal_angle_box = QDoubleSpinBox()
-            self.cap1_normal_angle_box.setDecimals(3)
-            self.cap1_normal_angle_box.setRange(0.25, 10.0)
-            self.cap1_normal_angle_box.setSingleStep(0.25)
-            self.cap1_normal_angle_box.setValue(cap1_spiral_default_max_normal_angle_deg)
-            cap1_row.addWidget(self.cap1_normal_angle_box)
-            cap1_row.addWidget(QLabel("sphere_center_offset(m):"))
-            self.cap1_center_offset_box = QDoubleSpinBox()
-            self.cap1_center_offset_box.setDecimals(6)
-            self.cap1_center_offset_box.setRange(0.0, double_sphere_radius * 0.98)
-            self.cap1_center_offset_box.setSingleStep(0.0010)
-            self.cap1_center_offset_box.setValue(cap1_sphere_center_offset_default)
-            cap1_row.addWidget(self.cap1_center_offset_box)
-            cap1_row.addWidget(QLabel("cap1姿态:"))
-            self.cap1_target_z_combo = QComboBox()
-            self.cap1_target_z_combo.addItems(["红轴接触+X / 蓝轴-Y", "红轴接触-X / 蓝轴+Y"])
-            self.cap1_target_z_combo.setCurrentIndex(0)
-            cap1_row.addWidget(self.cap1_target_z_combo)
-            cap1_row.addStretch(1)
-            align_layout.addLayout(cap1_row)
             self.align_step1_error_label = QLabel(f"步骤1固定目标: {align_step1_fixed_pose_deg_text}")
             self.align_step1_error_label.setObjectName("MonoLabel")
             self.align_step1_error_label.setWordWrap(True)
@@ -814,11 +849,99 @@ def run_ui_client(args: argparse.Namespace) -> int:
             self.workpiece_lock_label = QLabel("待磨件锁定: inactive")
             self.workpiece_lock_label.setObjectName("MonoLabel")
             align_layout.addWidget(self.workpiece_lock_label)
-            self.scan_status_label = QLabel("扫描状态: inactive")
-            self.scan_status_label.setObjectName("MonoLabel")
-            self.scan_status_label.setWordWrap(True)
-            align_layout.addWidget(self.scan_status_label)
             layout.addWidget(align_group)
+
+            slider_group = QGroupBox("Polishing Wheel 2 滑轨")
+            slider_layout = QVBoxLayout(slider_group)
+            slider_row = QHBoxLayout()
+            slider_row.addWidget(QLabel("双滑块圆心距离(m):"))
+            self.wheel_slider_spacing_slider = QSlider(Qt.Orientation.Horizontal)
+            self.wheel_slider_spacing_slider.setRange(
+                int(round(wheel_slider_min_spacing * 1000.0)),
+                int(round(wheel_slider_max_spacing * 1000.0)),
+            )
+            self.wheel_slider_spacing_slider.setValue(int(round(wheel_slider_initial_spacing * 1000.0)))
+            self.wheel_slider_spacing_slider.valueChanged.connect(self.sync_wheel_slider_spacing_from_slider)
+            self.wheel_slider_spacing_slider.sliderReleased.connect(self.set_wheel_slider_spacing)
+            slider_row.addWidget(self.wheel_slider_spacing_slider, 1)
+            self.wheel_slider_spacing_box = QDoubleSpinBox()
+            self.wheel_slider_spacing_box.setDecimals(4)
+            self.wheel_slider_spacing_box.setRange(wheel_slider_min_spacing, wheel_slider_max_spacing)
+            self.wheel_slider_spacing_box.setSingleStep(0.005)
+            self.wheel_slider_spacing_box.setValue(wheel_slider_initial_spacing)
+            self.wheel_slider_spacing_box.valueChanged.connect(self.sync_wheel_slider_spacing_from_box)
+            self.wheel_slider_spacing_box.editingFinished.connect(self.set_wheel_slider_spacing)
+            slider_row.addWidget(self.wheel_slider_spacing_box)
+            set_slider_spacing_btn = QPushButton("设置距离")
+            set_slider_spacing_btn.clicked.connect(self.set_wheel_slider_spacing)
+            slider_row.addWidget(set_slider_spacing_btn)
+            slider_layout.addLayout(slider_row)
+            self.wheel_slider_spacing_label = QLabel(f"当前距离: {wheel_slider_initial_spacing:.4f} m")
+            self.wheel_slider_spacing_label.setObjectName("MonoLabel")
+            slider_layout.addWidget(self.wheel_slider_spacing_label)
+            self.wheel_slider_send_timer = QTimer(self)
+            self.wheel_slider_send_timer.setSingleShot(True)
+            self.wheel_slider_send_timer.setInterval(30)
+            self.wheel_slider_send_timer.timeout.connect(self.set_wheel_slider_spacing)
+            layout.addWidget(slider_group)
+
+            polishing_group = QGroupBox("打磨流程")
+            polishing_layout = QVBoxLayout(polishing_group)
+            polishing_steps_row = QHBoxLayout()
+            polishing_steps_row.setSpacing(8)
+
+            polishing_workflow1_col = QVBoxLayout()
+            polishing_workflow1_btn = QPushButton("执行打磨步骤1")
+            polishing_workflow1_btn.clicked.connect(self.execute_polishing_workflow1)
+            polishing_workflow1_col.addWidget(polishing_workflow1_btn)
+            self.polishing_workflow1_status_label = QLabel("步骤1状态: inactive")
+            self.polishing_workflow1_status_label.setObjectName("MonoLabel")
+            self.polishing_workflow1_status_label.setWordWrap(True)
+            polishing_workflow1_col.addWidget(self.polishing_workflow1_status_label)
+            polishing_steps_row.addLayout(polishing_workflow1_col, 1)
+
+            polishing_workflow2_col = QVBoxLayout()
+            polishing_workflow2_btn = QPushButton("执行打磨步骤2")
+            polishing_workflow2_btn.clicked.connect(self.execute_polishing_workflow2)
+            polishing_workflow2_col.addWidget(polishing_workflow2_btn)
+            self.polishing_workflow2_status_label = QLabel("步骤2状态: inactive")
+            self.polishing_workflow2_status_label.setObjectName("MonoLabel")
+            self.polishing_workflow2_status_label.setWordWrap(True)
+            polishing_workflow2_col.addWidget(self.polishing_workflow2_status_label)
+            polishing_steps_row.addLayout(polishing_workflow2_col, 1)
+
+            polishing_workflow3_col = QVBoxLayout()
+            polishing_workflow3_btn = QPushButton("执行打磨步骤3")
+            polishing_workflow3_btn.clicked.connect(self.execute_polishing_workflow3)
+            polishing_workflow3_col.addWidget(polishing_workflow3_btn)
+            self.polishing_workflow3_status_label = QLabel("步骤3状态: inactive")
+            self.polishing_workflow3_status_label.setObjectName("MonoLabel")
+            self.polishing_workflow3_status_label.setWordWrap(True)
+            polishing_workflow3_col.addWidget(self.polishing_workflow3_status_label)
+            polishing_steps_row.addLayout(polishing_workflow3_col, 1)
+
+            polishing_workflow4_col = QVBoxLayout()
+            polishing_workflow4_btn = QPushButton("执行打磨步骤4")
+            polishing_workflow4_btn.clicked.connect(self.execute_polishing_workflow4)
+            polishing_workflow4_col.addWidget(polishing_workflow4_btn)
+            self.polishing_workflow4_status_label = QLabel("步骤4状态: inactive")
+            self.polishing_workflow4_status_label.setObjectName("MonoLabel")
+            self.polishing_workflow4_status_label.setWordWrap(True)
+            polishing_workflow4_col.addWidget(self.polishing_workflow4_status_label)
+            polishing_steps_row.addLayout(polishing_workflow4_col, 1)
+
+            polishing_workflow5_col = QVBoxLayout()
+            polishing_workflow5_btn = QPushButton("执行打磨步骤5")
+            polishing_workflow5_btn.clicked.connect(self.execute_polishing_workflow5)
+            polishing_workflow5_col.addWidget(polishing_workflow5_btn)
+            self.polishing_workflow5_status_label = QLabel("步骤5状态: inactive")
+            self.polishing_workflow5_status_label.setObjectName("MonoLabel")
+            self.polishing_workflow5_status_label.setWordWrap(True)
+            polishing_workflow5_col.addWidget(self.polishing_workflow5_status_label)
+            polishing_steps_row.addLayout(polishing_workflow5_col, 1)
+
+            polishing_layout.addLayout(polishing_steps_row)
+            layout.addWidget(polishing_group)
 
             # Move one step.
             one_group = QGroupBox("Move One Step")
@@ -935,6 +1058,34 @@ def run_ui_client(args: argparse.Namespace) -> int:
             grip_btns.addStretch(1)
             grip_layout.addLayout(grip_btns)
             layout.addWidget(grip_group)
+
+            tool_roll_group = QGroupBox("Gripper 360deg 连续自转")
+            tool_roll_layout = QVBoxLayout(tool_roll_group)
+            self.tool_roll_state_label = QLabel("actual: -- deg   target: -- deg")
+            self.tool_roll_state_label.setObjectName("MonoLabel")
+            tool_roll_layout.addWidget(self.tool_roll_state_label)
+            tool_roll_row = QHBoxLayout()
+            tool_roll_row.addWidget(QLabel("累计目标角度(deg):"))
+            self.tool_roll_target_box = QDoubleSpinBox()
+            self.tool_roll_target_box.setDecimals(3)
+            self.tool_roll_target_box.setRange(-1000000.0, 1000000.0)
+            self.tool_roll_target_box.setSingleStep(5.0)
+            tool_roll_row.addWidget(self.tool_roll_target_box)
+            tool_roll_current_btn = QPushButton("填入当前")
+            tool_roll_current_btn.clicked.connect(self.fill_current_tool_roll)
+            tool_roll_minus_btn = QPushButton("-360")
+            tool_roll_minus_btn.clicked.connect(lambda: self.add_tool_roll_degrees(-360.0))
+            tool_roll_plus_btn = QPushButton("+360")
+            tool_roll_plus_btn.clicked.connect(lambda: self.add_tool_roll_degrees(360.0))
+            tool_roll_move_btn = QPushButton("转到该角度")
+            tool_roll_move_btn.clicked.connect(self.move_tool_roll)
+            tool_roll_row.addWidget(tool_roll_current_btn)
+            tool_roll_row.addWidget(tool_roll_minus_btn)
+            tool_roll_row.addWidget(tool_roll_plus_btn)
+            tool_roll_row.addWidget(tool_roll_move_btn)
+            tool_roll_row.addStretch(1)
+            tool_roll_layout.addLayout(tool_roll_row)
+            layout.addWidget(tool_roll_group)
 
             # Visibility.
             vis_group = QGroupBox("显示 / 隐藏")
@@ -1120,24 +1271,49 @@ def run_ui_client(args: argparse.Namespace) -> int:
         def align_workpiece_handle_step2(self) -> None:
             self.post("/align_workpiece_handle_step2", {})
 
-        def execute_ellipsoid_surface_scan(self) -> None:
-            self.post("/ellipsoid_surface_scan", {"surface_clearance": float(self.surface_clearance_box.value())})
+        def execute_polishing_workflow1(self) -> None:
+            self.post("/polishing_workflow1", {})
 
-        def execute_cap1_spiral_scan(self) -> None:
-            self.post(
-                "/cap1_spiral_scan",
-                {
-                    "surface_clearance": float(self.surface_clearance_box.value()),
-                    "arc_step": float(self.cap1_arc_step_box.value()),
-                    "radial_spacing": float(self.cap1_radial_spacing_box.value()),
-                    "max_normal_angle_deg": float(self.cap1_normal_angle_box.value()),
-                    "center_offset": float(self.cap1_center_offset_box.value()),
-                    "target_z_sign": 1.0 if self.cap1_target_z_combo.currentIndex() == 0 else -1.0,
-                },
-            )
+        def execute_polishing_workflow2(self) -> None:
+            self.post("/polishing_workflow2", {})
+
+        def execute_polishing_workflow3(self) -> None:
+            self.post("/polishing_workflow3", {})
+
+        def execute_polishing_workflow4(self) -> None:
+            self.post("/polishing_workflow4", {})
+
+        def execute_polishing_workflow5(self) -> None:
+            self.post("/polishing_workflow5", {})
+
+        def sync_wheel_slider_spacing_from_slider(self, value: int) -> None:
+            self.wheel_slider_spacing_box.blockSignals(True)
+            self.wheel_slider_spacing_box.setValue(float(value) / 1000.0)
+            self.wheel_slider_spacing_box.blockSignals(False)
+            self.schedule_wheel_slider_spacing()
+
+        def sync_wheel_slider_spacing_from_box(self, value: float) -> None:
+            self.wheel_slider_spacing_slider.blockSignals(True)
+            self.wheel_slider_spacing_slider.setValue(int(round(float(value) * 1000.0)))
+            self.wheel_slider_spacing_slider.blockSignals(False)
+            self.schedule_wheel_slider_spacing()
+
+        def set_wheel_slider_spacing(self) -> None:
+            self.post("/wheel_slider_spacing", {"spacing": float(self.wheel_slider_spacing_box.value())})
+
+        def schedule_wheel_slider_spacing(self) -> None:
+            if not self.wheel_slider_send_timer.isActive():
+                self.wheel_slider_send_timer.start()
 
         def move_one_step(self) -> None:
-            self.post("/move", {"mode": "move_one_step", "waypoints": [self.get_one_pose_rad()]})
+            self.post(
+                "/move",
+                {
+                    "mode": "move_one_step",
+                    "waypoints": [self.get_one_pose_rad()],
+                    "tool_roll_angle_rad": math.radians(float(self.tool_roll_target_box.value())),
+                },
+            )
 
         def stop_motion(self) -> None:
             self.post("/stop", {})
@@ -1162,6 +1338,17 @@ def run_ui_client(args: argparse.Namespace) -> int:
 
         def close_gripper(self) -> None:
             self.post("/gripper_close", {})
+
+        def fill_current_tool_roll(self) -> None:
+            self.tool_roll_target_box.setValue(float(self.last_tool_roll_angle_deg))
+
+        def add_tool_roll_degrees(self, delta_deg: float) -> None:
+            self.tool_roll_target_box.setValue(float(self.tool_roll_target_box.value()) + float(delta_deg))
+            self.move_tool_roll()
+
+        def move_tool_roll(self) -> None:
+            angle_rad = math.radians(float(self.tool_roll_target_box.value()))
+            self.post("/tool_roll", {"angle_rad": angle_rad})
 
         def fill_circle_example(self) -> None:
             self.expr_x.setText("0.45 + 0.05*cos(2*pi*t)")
@@ -1192,7 +1379,14 @@ def run_ui_client(args: argparse.Namespace) -> int:
             except Exception as exc:
                 QMessageBox.critical(self, "函数轨迹生成失败", str(exc))
                 return
-            self.post("/move", {"mode": "function_path", "waypoints": waypoints})
+            self.post(
+                "/move",
+                {
+                    "mode": "function_path",
+                    "waypoints": waypoints,
+                    "tool_roll_angle_rad": math.radians(float(self.tool_roll_target_box.value())),
+                },
+            )
 
         def poll_state(self) -> None:
             try:
@@ -1217,7 +1411,26 @@ def run_ui_client(args: argparse.Namespace) -> int:
                     self.lens_center_pose_deg_label.setText("当前模型中未找到凸透镜中心。")
                 self.align_step1_error_label.setText(str(state.get("align_step1_error_text", "对齐误差: --")))
                 self.workpiece_lock_label.setText(f"待磨件锁定: {state.get('workpiece_lock_status', 'inactive')}")
-                self.scan_status_label.setText(f"扫描状态: {state.get('scan_status', 'inactive')}")
+                self.polishing_workflow1_status_label.setText(
+                    f"步骤1状态: {state.get('polishing_workflow1_status', 'inactive')}"
+                )
+                self.polishing_workflow2_status_label.setText(
+                    f"步骤2状态: {state.get('polishing_workflow2_status', 'inactive')}"
+                )
+                self.polishing_workflow3_status_label.setText(
+                    f"步骤3状态: {state.get('polishing_workflow3_status', 'inactive')}"
+                )
+                self.polishing_workflow4_status_label.setText(
+                    f"步骤4状态: {state.get('polishing_workflow4_status', 'inactive')}"
+                )
+                self.polishing_workflow5_status_label.setText(
+                    f"步骤5状态: {state.get('polishing_workflow5_status', 'inactive')}"
+                )
+                current_slider_spacing = float(state.get("wheel_slider_spacing", wheel_slider_initial_spacing))
+                target_slider_spacing = float(state.get("wheel_slider_target_spacing", current_slider_spacing))
+                self.wheel_slider_spacing_label.setText(
+                    f"当前距离: {current_slider_spacing:.4f} m    目标: {target_slider_spacing:.4f} m"
+                )
                 self.err_label.setText(
                     f"pos_err: {float(state.get('pos_err', 0)):.5f} m    "
                     f"ori_err: {float(state.get('ori_err', 0)):.5f} rad"
@@ -1247,6 +1460,19 @@ def run_ui_client(args: argparse.Namespace) -> int:
                     self.gripper_state_label.setText(f"actual: {actual_g:.0f}   command: {command_g:.0f}   closing")
                 else:
                     self.gripper_state_label.setText(f"actual: {actual_g:.0f}   command: {command_g:.0f}")
+                self.last_tool_roll_angle_deg = float(state.get("tool_roll_angle_deg", 0.0))
+                self.last_tool_roll_target_angle_deg = float(state.get("tool_roll_target_angle_deg", 0.0))
+                if bool(state.get("has_tool_roll", False)):
+                    self.tool_roll_state_label.setText(
+                        f"actual: {self.last_tool_roll_angle_deg:.2f} deg   "
+                        f"target: {self.last_tool_roll_target_angle_deg:.2f} deg"
+                    )
+                    if not self.tool_roll_target_box.hasFocus() and not self.tool_roll_target_box.lineEdit().hasSelectedText():
+                        self.tool_roll_target_box.blockSignals(True)
+                        self.tool_roll_target_box.setValue(self.last_tool_roll_target_angle_deg)
+                        self.tool_roll_target_box.blockSignals(False)
+                else:
+                    self.tool_roll_state_label.setText("当前模型未检测到 gripper 连续自转轴。")
                 show_ee = bool(state.get("show_ee_axes", True))
                 show_mocap = bool(state.get("show_mocap", True))
                 if self.ee_axes_checkbox.isChecked() != show_ee:
@@ -1390,8 +1616,22 @@ def run_controller(args: argparse.Namespace) -> int:
 
     print("[5/8] 绑定 FR3 joints / actuators / site / target...", flush=True)
     site_id = model.site(SITE_NAME).id
+    controlled_joint_names = list(cfg.joint_names)
+    controlled_actuator_names = list(cfg.actuator_names)
+    tool_roll_control_index: Optional[int] = None
+    try:
+        model.joint(TOOL_ROLL_JOINT_NAME)
+        model.actuator(TOOL_ROLL_ACTUATOR_NAME)
+    except KeyError:
+        print("[5/8] 未检测到 gripper tool-roll 轴，按原 7 轴末端控制。", flush=True)
+    else:
+        tool_roll_control_index = len(controlled_joint_names)
+        controlled_joint_names.append(TOOL_ROLL_JOINT_NAME)
+        controlled_actuator_names.append(TOOL_ROLL_ACTUATOR_NAME)
+        print("[5/8] 检测到 gripper 360deg tool-roll 轴，已纳入 IK 控制。", flush=True)
+
     joint_ids, qpos_ids, dof_ids = [], [], []
-    for name in cfg.joint_names:
+    for name in controlled_joint_names:
         jid = model.joint(name).id
         joint_ids.append(jid)
         qpos_ids.append(int(model.jnt_qposadr[jid]))
@@ -1399,7 +1639,7 @@ def run_controller(args: argparse.Namespace) -> int:
     joint_ids = np.asarray(joint_ids, dtype=int)
     qpos_ids = np.asarray(qpos_ids, dtype=int)
     dof_ids = np.asarray(dof_ids, dtype=int)
-    actuator_ids = np.asarray([model.actuator(name).id for name in cfg.actuator_names], dtype=int)
+    actuator_ids = np.asarray([model.actuator(name).id for name in controlled_actuator_names], dtype=int)
 
     model.body_gravcomp[:] = 0.0
     if not args.no_gravity_comp and gravity_compensation:
@@ -1447,7 +1687,17 @@ def run_controller(args: argparse.Namespace) -> int:
         wheel_spin_opposite_mirror_actuator_id = model.actuator("wheel_spin_opposite_mirror").id
     except KeyError:
         wheel_spin_opposite_mirror_actuator_id = None
+    wheel_slider_joint_addresses: list[tuple[int, int]] = []
+    for joint_name in WHEEL_SLIDER_JOINT_NAMES:
+        try:
+            slider_joint_id = int(model.joint(joint_name).id)
+        except KeyError:
+            continue
+        wheel_slider_joint_addresses.append(
+            (int(model.jnt_qposadr[slider_joint_id]), int(model.jnt_dofadr[slider_joint_id]))
+        )
     shared.has_gripper = gripper_actuator_id is not None
+    shared.has_tool_roll = tool_roll_control_index is not None
     finger_qpos_ids: list[int] = []
     for joint_name in FINGER_JOINT_NAMES:
         try:
@@ -1507,8 +1757,13 @@ def run_controller(args: argparse.Namespace) -> int:
     ]
     ee_site_ids = [x for x in [maybe_site(SITE_NAME)] if x is not None]
     ellipsoid_geom_id = maybe_geom(ELLIPSOID_GEOM_NAME)
-    wheel_cylinder_geom_id = maybe_geom(WHEEL_CYLINDER_GEOM_NAME)
     opposite_wheel_cylinder_geom_id = maybe_geom(OPPOSITE_WHEEL_CYLINDER_GEOM_NAME)
+    mirror_opposite_wheel_cylinder_geom_id = maybe_geom(MIRROR_OPPOSITE_WHEEL_CYLINDER_GEOM_NAME)
+    polishing_wheel2_geom_ids = [
+        geom_id
+        for geom_id in [opposite_wheel_cylinder_geom_id, mirror_opposite_wheel_cylinder_geom_id]
+        if geom_id is not None
+    ]
     target_body_id = int(model.body(MOCAP_NAME).id)
     mocap_geom_ids = [int(i) for i in range(model.ngeom) if int(model.geom_bodyid[i]) == target_body_id]
     mocap_site_ids = [int(i) for i in range(model.nsite) if int(model.site_bodyid[i]) == target_body_id]
@@ -1522,6 +1777,16 @@ def run_controller(args: argparse.Namespace) -> int:
             model.site_rgba[sid] = original_site_rgba[sid]
             if not visible:
                 model.site_rgba[sid, 3] = 0.0
+
+    def apply_wheel_slider_spacing(spacing: float) -> float:
+        clipped_spacing = float(np.clip(spacing, wheel_slider_min_spacing, wheel_slider_max_spacing))
+        slider_displacement = 0.5 * (clipped_spacing - wheel_slider_initial_spacing)
+        for qpos_id, dof_id in wheel_slider_joint_addresses:
+            data.qpos[qpos_id] = slider_displacement
+            data.qvel[dof_id] = 0.0
+        if wheel_slider_joint_addresses:
+            mujoco.mj_forward(model, data)
+        return clipped_spacing
 
     def initialize_gripper(value: float) -> None:
         if gripper_actuator_id is None:
@@ -1650,12 +1915,31 @@ def run_controller(args: argparse.Namespace) -> int:
     def build_locked_lens_center_move_goals(
         values: list[float] | np.ndarray,
         lock_state: WorkpieceLockState,
+        force_in_place_rotation: bool = False,
     ) -> tuple[list[PoseCommand], bool, bool]:
         target_body_pos, target_body_mat = body_pose_from_lens_center_pose(values)
         start_body = current_lens_body_command()
         target_body = body_command_from_pose(target_body_pos, target_body_mat)
         requested_translation = float(np.linalg.norm(target_body.position - start_body.position))
-        in_place_orientation_change = requested_translation <= locked_move_in_place_translation_threshold
+        requested_rotation = command_rotation_distance(start_body, target_body)
+        # Workflow roll sweeps must remain true in-place rotations even if the previous
+        # contact step left the body center with a few millimeters of tracking/contact
+        # residual.  Otherwise the next 150->90 return can be misclassified as a
+        # translation and the planner inserts an XYZ detour.
+        in_place_orientation_change = (
+            requested_translation <= locked_move_in_place_translation_threshold
+            or (force_in_place_rotation and requested_rotation > math.radians(0.25))
+        )
+        # If the lens center is already at the polishing pose and the user only
+        # changes height along world Z (same X/Y and same orientation), do not use
+        # the wheel-entry detour.  The old detour intentionally offsets through X
+        # to enter the center safely from the gripper side, but for pure vertical
+        # edits it makes the body绕一下再下降.
+        direct_same_xy_orientation_motion = (
+            abs(float(target_body.position[0] - start_body.position[0])) <= 0.006
+            and abs(float(target_body.position[1] - start_body.position[1])) <= 0.006
+            and requested_rotation <= math.radians(2.0)
+        )
         if in_place_orientation_change:
             # Preserve the user's entered center exactly while changing
             # orientation; only the residual tracking error is corrected.
@@ -1663,7 +1947,11 @@ def run_controller(args: argparse.Namespace) -> int:
         stages: list[tuple[PoseCommand, float]] = [(target_body, locked_move_transit_position_step)]
         uses_wheel_detour = False
 
-        if opposite_wheel_cylinder_geom_id is not None and not in_place_orientation_change:
+        if (
+            opposite_wheel_cylinder_geom_id is not None
+            and not in_place_orientation_change
+            and not direct_same_xy_orientation_motion
+        ):
             wheel_center = np.array(data.geom_xpos[opposite_wheel_cylinder_geom_id], copy=True)
             wheel_radius = float(model.geom_size[opposite_wheel_cylinder_geom_id][0])
             wheel_axis = normalize_vector(
@@ -1673,16 +1961,28 @@ def run_controller(args: argparse.Namespace) -> int:
             radial = target_body.position - wheel_center
             radial -= wheel_axis * float(np.dot(radial, wheel_axis))
             radial_distance = float(np.linalg.norm(radial))
-            nominal_contact_distance = wheel_radius + surface_scan_circle_radius
-            if radial_distance > 1e-8 and radial_distance <= nominal_contact_distance + locked_move_near_wheel_margin:
+            nominal_contact_distance = wheel_radius + lens_intersection_circle_radius
+            # When entering the polishing center after locking, keep the original
+            # safer detour behavior: transfer at a small offset, rotate there,
+            # then make only a short approach to the final center.  The dual sliders
+            # are opened to their maximum spacing before this move, so the offset
+            # is no longer blocked by the mirror wheel.
+            target_near_polishing_center = (
+                float(np.linalg.norm(target_body.position - polishing_workflow1_center))
+                <= locked_move_near_wheel_margin
+            )
+            if radial_distance > 1e-8 and (
+                target_near_polishing_center
+                or radial_distance <= nominal_contact_distance + locked_move_near_wheel_margin
+            ):
                 outward = radial / radial_distance
                 retreat = outward * locked_move_wheel_retreat
                 retreat_start = body_command_from_pose(start_body.position + retreat, mat_from_quat(start_body.quat))
                 transit_target = body_command_from_pose(target_body.position + retreat, mat_from_quat(start_body.quat))
                 retreat_target = body_command_from_pose(target_body.position + retreat, target_body_mat)
-                # Keep the gripped workpiece orientation unchanged during a long
-                # transfer. For an in-place polishing rotation, stages remains a
-                # fixed-center orientation interpolation so contact is preserved.
+                # Reaching the polishing center through simultaneous translation and
+                # rotation drives fr3_joint4 into its lower limit. Transfer first,
+                # turn at an offset point, then perform only the short approach.
                 stages = [
                     (retreat_start, locked_move_transit_position_step),
                     (transit_target, locked_move_transit_position_step),
@@ -1701,264 +2001,6 @@ def run_controller(args: argparse.Namespace) -> int:
             uses_wheel_detour,
             in_place_orientation_change,
         )
-
-    def build_surface_scan_goals(clearance: float, lock_state: WorkpieceLockState) -> tuple[list[PoseCommand], list[str]]:
-        if wheel_cylinder_geom_id is None:
-            raise ValueError(f"当前模型中没有 {WHEEL_CYLINDER_GEOM_NAME}。")
-        if lock_state.mode != "locked":
-            raise ValueError("待磨件尚未 locked；请先执行步骤2。")
-
-        wheel_center = np.array(data.geom_xpos[wheel_cylinder_geom_id], copy=True)
-        wheel_radius = float(model.geom_size[wheel_cylinder_geom_id][0])
-        world_up = np.asarray([0.0, 0.0, 1.0], dtype=float)
-        side_dir = np.asarray([1.0, 0.0, 0.0], dtype=float)
-        body_pos = wheel_center + side_dir * (wheel_radius + surface_scan_circle_radius + float(clearance))
-        body_pos[2] = wheel_center[2]
-
-        commands: list[PoseCommand] = []
-        labels: list[str] = []
-        for i in range(surface_scan_samples_per_side):
-            s = i / max(1, surface_scan_samples_per_side - 1)
-            # Centering the body yaw at pi keeps the locked mocap/EE z-axis on the
-            # outward side of the +X wheel contact instead of flipping inward.
-            yaw = surface_scan_yaw_center - 0.5 * math.pi + math.pi * s
-            body_mat = mat_from_quat(quat_from_rpy(0.0, 0.0, yaw))
-            commands.append(site_command_from_body_pose(body_pos, body_mat, lock_state))
-            labels.append("scanning circle")
-
-        lift = world_up * surface_scan_transition_lift
-        final_lift = pose_command_from_position_quat(commands[-1].position + lift, commands[-1].quat)
-        commands.append(final_lift)
-        labels.append("finished lift")
-        return commands, labels
-
-    def tangent_hint_for_normal(normal: np.ndarray, preferred: np.ndarray, fallback: np.ndarray) -> np.ndarray:
-        n = normalize_vector(normal, "surface normal")
-        t = np.asarray(preferred, dtype=float) - n * float(np.dot(n, preferred))
-        if float(np.linalg.norm(t)) < 1e-8:
-            t = np.asarray(fallback, dtype=float) - n * float(np.dot(n, fallback))
-        return normalize_vector(t, "surface tangent")
-
-    def frame_from_normal_tangent(normal: np.ndarray, tangent: np.ndarray) -> np.ndarray:
-        n = normalize_vector(normal, "surface normal")
-        t = np.asarray(tangent, dtype=float) - n * float(np.dot(n, tangent))
-        t = normalize_vector(t, "surface tangent")
-        b = normalize_vector(np.cross(n, t), "surface binormal")
-        # Columns are tangent, binormal, normal.
-        return np.column_stack([t, b, n])
-
-    def body_mat_from_cap_normal(
-        local_normal: np.ndarray,
-        world_normal: np.ndarray,
-        local_tangent_hint: np.ndarray,
-        world_tangent_hint: np.ndarray,
-    ) -> np.ndarray:
-        local_frame = frame_from_normal_tangent(local_normal, local_tangent_hint)
-        world_frame = frame_from_normal_tangent(world_normal, world_tangent_hint)
-        return world_frame @ local_frame.T
-
-    def cap1_frame_to_body_mat(lock_state: WorkpieceLockState) -> np.ndarray:
-        """Return cap1 coordinates expressed in the lens body frame.
-
-        The polishing surface is part of the lens, not of the gripper. Rotating
-        the EE around the handle axis during step 1 changes site_to_body_mat but
-        must not rotate cap1 within the lens. With the current body-frame
-        definition, cap1 uses:
-          cap x = -body Y axis
-          cap y = -body Z axis
-          cap z = +body X axis, the surface-axis normal
-        """
-        if lock_state.mode != "locked" or lock_state.site_to_body_mat is None:
-            raise ValueError("待磨件尚未 locked，无法建立 cap1 面坐标系。")
-        return np.column_stack(
-            [
-                np.asarray([0.0, -1.0, 0.0], dtype=float),
-                np.asarray([0.0, 0.0, -1.0], dtype=float),
-                np.asarray([1.0, 0.0, 0.0], dtype=float),
-            ]
-        )
-
-    def rotation_matrix_from_axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:
-        axis = normalize_vector(axis, "rotation axis")
-        x, y, z = axis
-        c = math.cos(angle)
-        s = math.sin(angle)
-        C = 1.0 - c
-        return np.asarray(
-            [
-                [c + x * x * C, x * y * C - z * s, x * z * C + y * s],
-                [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
-                [z * x * C - y * s, z * y * C + x * s, c + z * z * C],
-            ],
-            dtype=float,
-        )
-
-    def spin_body_mat_to_align_site_z(
-        body_mat: np.ndarray,
-        contact_normal_world: np.ndarray,
-        preferred_site_z_world: np.ndarray,
-        lock_state: WorkpieceLockState,
-    ) -> np.ndarray:
-        """Use cap-normal spin freedom to keep the target frame reachable.
-
-        `body_mat` already maps the sampled cap normal to `contact_normal_world`.
-        Premultiplying by a rotation around `contact_normal_world` preserves that
-        normal alignment while changing the locked EE/site frame orientation.
-        """
-        if lock_state.site_to_body_mat is None:
-            return body_mat
-        axis = normalize_vector(contact_normal_world, "contact normal")
-        desired = normalize_vector(preferred_site_z_world, "preferred target blue axis")
-        site_mat = np.asarray(body_mat, dtype=float) @ lock_state.site_to_body_mat.T
-        current_site_z = normalize_vector(site_mat[:, 2], "current target blue axis")
-
-        current_proj = current_site_z - axis * float(np.dot(current_site_z, axis))
-        desired_proj = desired - axis * float(np.dot(desired, axis))
-        if float(np.linalg.norm(current_proj)) < 1e-8 or float(np.linalg.norm(desired_proj)) < 1e-8:
-            return body_mat
-        current_proj = normalize_vector(current_proj, "projected target blue axis")
-        desired_proj = normalize_vector(desired_proj, "projected preferred target blue axis")
-        angle = math.atan2(float(np.dot(axis, np.cross(current_proj, desired_proj))), float(np.dot(current_proj, desired_proj)))
-        return rotation_matrix_from_axis_angle(axis, angle) @ np.asarray(body_mat, dtype=float)
-
-    def build_cap1_spiral_scan_goals(
-        clearance: float,
-        arc_step: float,
-        radial_spacing: float,
-        max_normal_angle_deg: float,
-        center_offset: float,
-        target_z_sign: float,
-        lock_state: WorkpieceLockState,
-    ) -> tuple[list[PoseCommand], list[str]]:
-        """Build an Archimedean-spiral polishing path on cap1.
-
-        cap1 is modeled in a polishing frame fixed to the lens body: cap x/y
-        span the widest circular plane and cap z is its surface-axis normal.
-        This remains valid if step 1 changes the EE's grip yaw. The path samples
-        an Archimedean spiral in the
-        cap xOy projection, then projects each point to the spherical cap. The
-        step size is measured on the spherical surface, capped by the requested
-        adjacent-normal angle. Each sampled cap normal is mapped to the
-        wheel-side contact normal and converted into an EE target through the
-        locked workpiece transform. The cap normal constraint leaves one free
-        spin around the contact normal; choose that spin so the final red
-        target/mocap blue z-axis stays on the reachable side instead of flipping.
-        """
-        if wheel_cylinder_geom_id is None:
-            raise ValueError(f"当前模型中没有 {WHEEL_CYLINDER_GEOM_NAME}。")
-        if lock_state.mode != "locked":
-            raise ValueError("待磨件尚未 locked；请先执行步骤2。")
-
-        radius = float(double_sphere_radius)
-        center_offset = float(np.clip(center_offset, 0.0, radius * 0.98))
-        rho_max = math.sqrt(max(0.0, radius * radius - center_offset * center_offset))
-        if rho_max < 1e-6:
-            raise ValueError("cap1 可扫描半径过小；请检查 sphere_center_offset。")
-
-        # Bound surface arc step by the desired adjacent-normal change. On a
-        # sphere, normal-angle change is exactly surface arc length / radius.
-        normal_limited_step = radius * math.radians(max(0.1, float(max_normal_angle_deg)))
-        target_ds = float(np.clip(min(float(arc_step), normal_limited_step), 0.0002, 0.0200))
-        loop_spacing = float(np.clip(radial_spacing, 0.0010, 0.0300))
-        spiral_b = loop_spacing / (2.0 * math.pi)
-
-        cap_to_body = cap1_frame_to_body_mat(lock_state)
-        local_normals: list[np.ndarray] = []
-        cap_normals: list[np.ndarray] = []
-        theta = 0.0
-        while True:
-            rho = min(rho_max, spiral_b * theta)
-            x = rho * math.cos(theta)
-            y = rho * math.sin(theta)
-            z_rel = math.sqrt(max(0.0, radius * radius - rho * rho))
-            cap_normal = normalize_vector(np.asarray([x, y, z_rel], dtype=float), "cap1 cap-frame normal")
-            cap_normals.append(cap_normal)
-            local_normals.append(cap_to_body @ cap_normal)
-            if rho >= rho_max - 1e-9:
-                break
-            ds_dtheta = math.sqrt((radius * radius / max(1e-12, radius * radius - rho * rho)) * spiral_b * spiral_b + rho * rho)
-            dtheta = target_ds / max(ds_dtheta, 1e-9)
-            # Keep the final edge region from being under-sampled.
-            dtheta = float(np.clip(dtheta, 1e-4, 0.35))
-            theta += dtheta
-            if len(local_normals) >= cap1_spiral_max_points:
-                break
-
-        if len(local_normals) < 2:
-            raise ValueError("cap1 螺线采样点不足。")
-
-        wheel_center = np.array(data.geom_xpos[wheel_cylinder_geom_id], copy=True)
-        wheel_radius = float(model.geom_size[wheel_cylinder_geom_id][0])
-        side_dir = np.asarray([1.0, 0.0, 0.0], dtype=float)
-
-        # cap1's surface normal is fixed in the lens body. The remaining spin is
-        # used only to keep the locked EE target blue axis on a stable +/-Y side
-        # after the body-fixed cap normal is aligned to the wheel.
-        contact_normal_world = normalize_vector(
-            side_dir * (1.0 if float(target_z_sign) >= 0.0 else -1.0),
-            "contact normal",
-        )
-        preferred_site_z_world = normalize_vector(
-            np.asarray([0.0, -1.0 if float(target_z_sign) >= 0.0 else 1.0, 0.0], dtype=float),
-            "preferred target blue axis",
-        )
-
-        contact_point_world = wheel_center + side_dir * (wheel_radius + float(clearance))
-        cap_sphere_center_world = contact_point_world - radius * contact_normal_world
-        cap_sphere_center_local = cap_to_body @ np.asarray([0.0, 0.0, -center_offset], dtype=float)
-        world_tangent_hint = tangent_hint_for_normal(contact_normal_world, np.asarray([0.0, 0.0, 1.0]), np.asarray([0.0, 1.0, 0.0]))
-
-        commands: list[PoseCommand] = []
-        labels: list[str] = []
-        max_observed_angle_deg = 0.0
-        min_site_z_dot = 1.0
-        min_site_x_dot = 1.0
-        min_normal_dot = 1.0
-        for i, local_normal in enumerate(local_normals):
-            cap_tangent_hint = tangent_hint_for_normal(
-                cap_normals[i],
-                np.asarray([0.0, 1.0, 0.0], dtype=float),
-                np.asarray([1.0, 0.0, 0.0], dtype=float),
-            )
-            local_tangent_hint = cap_to_body @ cap_tangent_hint
-            base_body_mat = body_mat_from_cap_normal(
-                local_normal=local_normal,
-                world_normal=contact_normal_world,
-                local_tangent_hint=local_tangent_hint,
-                world_tangent_hint=world_tangent_hint,
-            )
-            body_mat = spin_body_mat_to_align_site_z(
-                base_body_mat,
-                contact_normal_world,
-                preferred_site_z_world,
-                lock_state,
-            )
-
-            body_pos = cap_sphere_center_world - body_mat @ cap_sphere_center_local
-            cmd = site_command_from_body_pose(body_pos, body_mat, lock_state)
-            site_mat = mat_from_quat(cmd.quat)
-            site_x_dot = float(np.dot(site_mat[:, 0], contact_normal_world))
-            site_z_dot = float(np.dot(site_mat[:, 2], preferred_site_z_world))
-            normal_dot = float(np.dot(body_mat @ local_normal, contact_normal_world))
-            commands.append(cmd)
-            min_site_x_dot = min(min_site_x_dot, site_x_dot)
-            min_site_z_dot = min(min_site_z_dot, site_z_dot)
-            min_normal_dot = min(min_normal_dot, normal_dot)
-            if i > 0:
-                dot = float(np.clip(np.dot(local_normals[i - 1], local_normal), -1.0, 1.0))
-                max_observed_angle_deg = max(max_observed_angle_deg, math.degrees(math.acos(dot)))
-            labels.append(
-                f"cap1 spiral, normal≤{max_observed_angle_deg:.2f}deg, "
-                f"cap_n·contact≥{min_normal_dot:.2f}, red_x·contact≥{min_site_x_dot:.2f}, "
-                f"blue_z·pref≥{min_site_z_dot:.2f}"
-            )
-
-        # A small lift after the scan reduces the chance of staying pressed into
-        # the wheel when the final point is reached.
-        final_lift = pose_command_from_position_quat(commands[-1].position + np.asarray([0.0, 0.0, surface_scan_transition_lift]), commands[-1].quat)
-        commands.append(final_lift)
-        labels.append("cap1 spiral finished lift")
-        return commands, labels
 
     def body_pose_from_lens_center_pose(values: list[float] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         cmd = pose_array_to_command(values)
@@ -2009,10 +2051,10 @@ def run_controller(args: argparse.Namespace) -> int:
         body_mat = site_mat @ lock_state.site_to_body_mat
         apply_workpiece_body_pose(body_pos, body_mat)
 
-    def locked_opposite_wheel_clearance(lock_state: WorkpieceLockState) -> Optional[float]:
-        """Return radial surface clearance before writing the virtual workpiece pose."""
+    def locked_polishing_wheel2_min_clearance(lock_state: WorkpieceLockState) -> Optional[float]:
+        """Return the smaller radial clearance against the two slider-mounted wheels."""
         if (
-            opposite_wheel_cylinder_geom_id is None
+            not polishing_wheel2_geom_ids
             or lock_state.mode != "locked"
             or lock_state.site_to_body_pos is None
         ):
@@ -2020,15 +2062,18 @@ def run_controller(args: argparse.Namespace) -> int:
         site_pos = np.array(data.site(site_id).xpos, copy=True)
         site_mat = np.asarray(data.site(site_id).xmat, dtype=float).reshape(3, 3)
         body_pos = site_pos + site_mat @ lock_state.site_to_body_pos
-        wheel_center = np.array(data.geom_xpos[opposite_wheel_cylinder_geom_id], copy=True)
-        wheel_axis = normalize_vector(
-            np.asarray(data.geom_xmat[opposite_wheel_cylinder_geom_id], dtype=float).reshape(3, 3)[:, 2],
-            "opposite wheel axis",
-        )
-        radial = body_pos - wheel_center
-        radial -= wheel_axis * float(np.dot(radial, wheel_axis))
-        wheel_radius = float(model.geom_size[opposite_wheel_cylinder_geom_id][0])
-        return float(np.linalg.norm(radial) - (wheel_radius + surface_scan_circle_radius))
+        clearances: list[float] = []
+        for geom_id in polishing_wheel2_geom_ids:
+            wheel_center = np.array(data.geom_xpos[geom_id], copy=True)
+            wheel_axis = normalize_vector(
+                np.asarray(data.geom_xmat[geom_id], dtype=float).reshape(3, 3)[:, 2],
+                "polishing wheel 2 axis",
+            )
+            radial = body_pos - wheel_center
+            radial -= wheel_axis * float(np.dot(radial, wheel_axis))
+            wheel_radius = float(model.geom_size[geom_id][0])
+            clearances.append(float(np.linalg.norm(radial) - (wheel_radius + lens_intersection_circle_radius)))
+        return min(clearances)
 
     def orientation_error() -> float:
         site_quat = np.zeros(4)
@@ -2040,6 +2085,22 @@ def run_controller(args: argparse.Namespace) -> int:
         mujoco.mju_mulQuat(error_quat, data.mocap_quat[mocap_id], site_quat_conj)
         mujoco.mju_quat2Vel(omega, error_quat, 1.0)
         return float(np.linalg.norm(omega))
+
+    def pure_tool_roll_local_z_error(dx: np.ndarray) -> Optional[float]:
+        if tool_roll_control_index is None:
+            return None
+        if float(np.linalg.norm(dx)) > pure_tool_roll_position_tolerance:
+            return None
+        site_mat = np.asarray(data.site(site_id).xmat, dtype=float).reshape(3, 3)
+        target_mat = mat_from_quat(np.asarray(data.mocap_quat[mocap_id], dtype=float))
+        site_z = site_mat[:, 2]
+        target_z = target_mat[:, 2]
+        axis_dot = float(np.clip(np.dot(site_z, target_z), -1.0, 1.0))
+        axis_error = math.acos(axis_dot)
+        if axis_error > pure_tool_roll_axis_tolerance:
+            return None
+        delta_local = site_mat.T @ target_mat
+        return float(math.atan2(delta_local[1, 0], delta_local[0, 0]))
 
     def compensation_vec() -> np.ndarray:
         # The observed fixed offset is along world Z. Positive value means:
@@ -2068,6 +2129,15 @@ def run_controller(args: argparse.Namespace) -> int:
                 lo, hi = model.jnt_range[jid]
                 q[qpos_id] = np.clip(q[qpos_id], lo, hi)
 
+    def controlled_joint_bounds() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        limited = np.asarray([bool(model.jnt_limited[jid]) for jid in joint_ids], dtype=bool)
+        lower = np.full(len(joint_ids), -np.inf, dtype=float)
+        upper = np.full(len(joint_ids), np.inf, dtype=float)
+        for index, jid in enumerate(joint_ids):
+            if limited[index]:
+                lower[index], upper[index] = model.jnt_range[jid]
+        return lower, upper, limited
+
     def solve_locked_pose_posture(goal: PoseCommand, starting_q: Optional[np.ndarray] = None) -> np.ndarray:
         """Find a joint-limit-safe IK branch before commanding a locked workpiece pose."""
         try:
@@ -2077,8 +2147,7 @@ def run_controller(args: argparse.Namespace) -> int:
 
         target_pos = goal.position + compensation_vec()
         target_quat = np.asarray(goal.quat, dtype=float)
-        q_lower = np.asarray([model.jnt_range[jid][0] for jid in joint_ids], dtype=float)
-        q_upper = np.asarray([model.jnt_range[jid][1] for jid in joint_ids], dtype=float)
+        q_lower, q_upper, q_limited = controlled_joint_bounds()
         current_q = np.array(
             data.qpos[qpos_ids] if starting_q is None else starting_q,
             copy=True,
@@ -2113,8 +2182,10 @@ def run_controller(args: argparse.Namespace) -> int:
             # strict final target tolerance. Use deterministic supplemental
             # seeds so identical UI commands remain reproducible.
             rng = np.random.default_rng(20260525)
+            seed_lower = np.where(q_limited, q_lower + 1e-3, current_q - math.pi)
+            seed_upper = np.where(q_limited, q_upper - 1e-3, current_q + math.pi)
             supplemental_seeds = [
-                rng.uniform(q_lower + 1e-3, q_upper - 1e-3)
+                rng.uniform(seed_lower, seed_upper)
                 for _ in range(locked_pose_ik_supplemental_seed_count)
             ]
             seeds = [current_q, q0_arm, *supplemental_seeds]
@@ -2135,7 +2206,11 @@ def run_controller(args: argparse.Namespace) -> int:
                     pos_error <= locked_pose_ik_position_tolerance
                     and ori_error <= locked_pose_ik_orientation_tolerance
                 ):
-                    joint_clearance = float(np.min(np.minimum(result.x - q_lower, q_upper - result.x)))
+                    joint_clearance = (
+                        float(np.min(np.minimum(result.x[q_limited] - q_lower[q_limited], q_upper[q_limited] - result.x[q_limited])))
+                        if np.any(q_limited)
+                        else float("inf")
+                    )
                     travel = float(np.linalg.norm(result.x - current_q))
                     candidates.append((joint_clearance, travel, pos_error, ori_error, np.array(result.x, copy=True)))
         finally:
@@ -2167,8 +2242,7 @@ def run_controller(args: argparse.Namespace) -> int:
         except ImportError as exc:
             raise ValueError("locked 凸透镜中心移动需要 scipy 进行可达性预检查。") from exc
 
-        q_lower = np.asarray([model.jnt_range[jid][0] for jid in joint_ids], dtype=float)
-        q_upper = np.asarray([model.jnt_range[jid][1] for jid in joint_ids], dtype=float)
+        q_lower, q_upper, _ = controlled_joint_bounds()
         q_seed = np.array(
             data.qpos[qpos_ids] if initial_q is None else initial_q,
             copy=True,
@@ -2229,8 +2303,8 @@ def run_controller(args: argparse.Namespace) -> int:
             mujoco.mj_forward(model, data)
         return solved_goals
 
-    def validate_in_place_continuous_path(goals: list[PoseCommand]) -> None:
-        solve_continuous_path_postures(goals)
+    def validate_in_place_continuous_path(goals: list[PoseCommand]) -> list[PoseCommand]:
+        return solve_continuous_path_postures(goals)
 
     def build_contact_reconfiguration_goals(
         values: list[float] | np.ndarray,
@@ -2301,6 +2375,11 @@ def run_controller(args: argparse.Namespace) -> int:
         return [*retreat_goals, *turn_goals, *approach_goals]
 
     # mujoco.mj_resetDataKeyframe(model, data, key_id)
+    initial_wheel_slider_spacing = apply_wheel_slider_spacing(wheel_slider_initial_spacing)
+    shared.update(
+        wheel_slider_spacing=initial_wheel_slider_spacing,
+        wheel_slider_target_spacing=initial_wheel_slider_spacing,
+    )
     initialize_gripper(float(args.gripper_open))
     snap_mocap_to_site()
 
@@ -2324,6 +2403,14 @@ def run_controller(args: argparse.Namespace) -> int:
         jac_full = np.zeros((6, model.nv))
         diag = damping * np.eye(6)
         eye_arm = np.eye(len(dof_ids))
+        nullspace_gains = np.full(len(dof_ids), 5.0, dtype=float)
+        base_gain_count = min(len(Kn), len(nullspace_gains))
+        nullspace_gains[:base_gain_count] = Kn[:base_gain_count]
+        if tool_roll_control_index is not None:
+            nullspace_gains[tool_roll_control_index] = 0.25
+        joint_metric_inverse = np.ones(len(dof_ids), dtype=float)
+        if tool_roll_control_index is not None:
+            joint_metric_inverse[tool_roll_control_index] = 25.0
         twist = np.zeros(6)
         site_quat = np.zeros(4)
         site_quat_conj = np.zeros(4)
@@ -2341,8 +2428,14 @@ def run_controller(args: argparse.Namespace) -> int:
         stream_wait_until = 0.0
         last_state_time = 0.0
         workpiece_lock = WorkpieceLockState()
-        surface_scan = SurfaceScanState()
-        surface_scan_waypoints: list[PoseCommand] = []
+        polishing_workflow1 = PolishingWorkflow1State()
+        polishing_workflow2 = PolishingWorkflow2State()
+        polishing_workflow3 = PolishingWorkflow3State()
+        polishing_workflow4 = PolishingWorkflow4State()
+        polishing_workflow5 = PolishingWorkflow5State()
+        actual_wheel_slider_spacing = initial_wheel_slider_spacing
+        desired_wheel_slider_spacing = initial_wheel_slider_spacing
+        auto_close_sliders_after_center_motion = False
         desired_gripper = float(args.gripper_open)
         auto_gripper_close = False
         gripper_blocked = False
@@ -2353,7 +2446,16 @@ def run_controller(args: argparse.Namespace) -> int:
         gripper_display_value = desired_gripper
         running = True
         status = "就绪：可在 UI 中执行函数轨迹。"
-        scan_status_text = "inactive"
+        polishing_workflow1_status_text = "inactive"
+        polishing_workflow2_status_text = "inactive"
+        polishing_workflow3_status_text = "inactive"
+        polishing_workflow4_status_text = "inactive"
+        polishing_workflow5_status_text = "inactive"
+        desired_tool_roll_angle = (
+            float(data.qpos[qpos_ids[tool_roll_control_index]])
+            if tool_roll_control_index is not None
+            else 0.0
+        )
         trail_strokes: list[list[np.ndarray]] = []
         current_trail_stroke: Optional[list[np.ndarray]] = None
         last_trail_pos: Optional[np.ndarray] = None
@@ -2435,17 +2537,214 @@ def run_controller(args: argparse.Namespace) -> int:
                 )
                 scn.ngeom += 1
 
+        def current_tool_roll_angle() -> Optional[float]:
+            if tool_roll_control_index is None:
+                return None
+            return float(data.qpos[qpos_ids[tool_roll_control_index]])
+
+        def posture_reference_preserving_tool_roll(base: Optional[np.ndarray] = None) -> np.ndarray:
+            reference = np.array(q0_arm if base is None else base, copy=True)
+            if tool_roll_control_index is not None:
+                reference[tool_roll_control_index] = float(data.qpos[qpos_ids[tool_roll_control_index]])
+            return reference
+
+        def posture_reference_with_tool_roll(angle: float, base: Optional[np.ndarray] = None) -> np.ndarray:
+            reference = posture_reference_preserving_tool_roll(base)
+            if tool_roll_control_index is not None:
+                reference[tool_roll_control_index] = float(angle)
+            return reference
+
         def reset_motion_execution() -> None:
-            nonlocal stream_waypoints, stream_index, stream_last_time, stream_started, stream_wait_until, surface_scan_waypoints, arm_posture_reference
+            nonlocal stream_waypoints, stream_index, stream_last_time, stream_started, stream_wait_until, arm_posture_reference
             stream_waypoints = []
             stream_index = 0
             stream_last_time = 0.0
             stream_started = False
             stream_wait_until = 0.0
-            surface_scan.clear()
-            surface_scan_waypoints = []
             motion.clear()
-            arm_posture_reference = q0_arm.copy()
+            arm_posture_reference = posture_reference_preserving_tool_roll()
+
+        def rotate_quat_about_local_z(quat: np.ndarray, angle: float) -> np.ndarray:
+            delta_quat = quat_from_rpy(0.0, 0.0, float(angle))
+            out = np.zeros(4, dtype=float)
+            mujoco.mju_mulQuat(out, np.asarray(quat, dtype=float), delta_quat)
+            return out
+
+        def add_tool_roll_references_to_goals(
+            goals: list[PoseCommand],
+            target_angle: Optional[float],
+        ) -> tuple[list[PoseCommand], bool]:
+            if tool_roll_control_index is None:
+                return goals, False
+            start_angle = float(data.qpos[qpos_ids[tool_roll_control_index]])
+            has_explicit_target = target_angle is not None
+            final_angle = start_angle if target_angle is None else float(target_angle)
+            if not goals:
+                return [], has_explicit_target
+            referenced_goals: list[PoseCommand] = []
+            for index, goal in enumerate(goals, start=1):
+                alpha = index / len(goals)
+                angle = start_angle + (final_angle - start_angle) * alpha
+                referenced_goals.append(
+                    pose_command_with_posture_reference(
+                        goal,
+                        posture_reference_with_tool_roll(angle, arm_posture_reference),
+                    )
+                )
+            return referenced_goals, has_explicit_target
+
+        def start_tool_roll_motion(target_angle: float, active_mode: str = "tool_roll") -> str:
+            nonlocal arm_posture_reference, desired_tool_roll_angle
+            if tool_roll_control_index is None:
+                raise ValueError("当前模型中没有 gripper 连续自转轴 tool_roll_joint。")
+            start_angle = float(data.qpos[qpos_ids[tool_roll_control_index]])
+            target_angle = float(target_angle)
+            desired_tool_roll_angle = target_angle
+            delta = target_angle - start_angle
+            start_visible_pos = np.array(data.site(site_id).xpos, copy=True) - compensation_vec()
+            start_quat = np.zeros(4, dtype=float)
+            mujoco.mju_mat2Quat(start_quat, data.site(site_id).xmat)
+            step_count = max(1, int(math.ceil(abs(delta) / tool_roll_motion_step)))
+            qref_start = np.array(data.qpos[qpos_ids], copy=True)
+            goals: list[PoseCommand] = []
+            for index in range(1, step_count + 1):
+                alpha = index / step_count
+                angle = start_angle + delta * alpha
+                cmd = pose_command_from_position_quat(
+                    start_visible_pos,
+                    rotate_quat_about_local_z(start_quat, angle - start_angle),
+                )
+                qref = np.array(qref_start, copy=True)
+                qref[tool_roll_control_index] = angle
+                goals.append(pose_command_with_posture_reference(cmd, qref))
+            reset_motion_execution()
+            arm_posture_reference = np.array(goals[0].posture_reference, copy=True)
+            motion.active_mode = active_mode
+            motion.current_goal = goals[0]
+            motion.remaining_goals = goals[1:]
+            motion.active_goal_index = 1
+            motion.total_goal_count = len(goals)
+            set_mocap_pose(motion.current_goal)
+            return (
+                f"gripper 连续自转: {math.degrees(start_angle):.2f}deg -> "
+                f"{math.degrees(target_angle):.2f}deg，按 {step_count} 个展开角度 waypoint 执行"
+            )
+
+        def polishing_workflow1_pose(roll_deg: float) -> list[float]:
+            return [
+                float(polishing_workflow1_center[0]),
+                float(polishing_workflow1_center[1]),
+                float(polishing_workflow1_center[2]),
+                math.radians(float(roll_deg)),
+                math.radians(-90.0),
+                0.0,
+            ]
+
+        def polishing_workflow2_pose(roll_deg: float) -> list[float]:
+            return [
+                float(polishing_workflow2_center[0]),
+                float(polishing_workflow2_center[1]),
+                float(polishing_workflow2_center[2]),
+                math.radians(float(roll_deg)),
+                math.radians(-90.0),
+                0.0,
+            ]
+
+        def polishing_workflow3_pose(roll_deg: float) -> list[float]:
+            return [
+                float(polishing_workflow3_center[0]),
+                float(polishing_workflow3_center[1]),
+                float(polishing_workflow3_center[2]),
+                math.radians(float(roll_deg)),
+                math.radians(-90.0),
+                0.0,
+            ]
+
+        def polishing_workflow4_pose(roll_deg: float) -> list[float]:
+            return [
+                float(polishing_workflow4_center[0]),
+                float(polishing_workflow4_center[1]),
+                float(polishing_workflow4_center[2]),
+                math.radians(float(roll_deg)),
+                math.radians(-90.0),
+                0.0,
+            ]
+
+        def polishing_workflow5_pose(roll_deg: float) -> list[float]:
+            return [
+                float(polishing_workflow5_center[0]),
+                float(polishing_workflow5_center[1]),
+                float(polishing_workflow5_center[2]),
+                math.radians(float(roll_deg)),
+                math.radians(-90.0),
+                0.0,
+            ]
+
+        def start_locked_lens_center_motion(pose_values: list[float], active_mode: str) -> str:
+            nonlocal arm_posture_reference
+            force_workflow_roll_in_place = (
+                active_mode.startswith("polishing_workflow")
+                and ("_lens_roll_" in active_mode or "_lens_return_" in active_mode)
+            )
+            goals, uses_wheel_detour, in_place_orientation_change = build_locked_lens_center_move_goals(
+                pose_values,
+                workpiece_lock,
+                force_in_place_rotation=force_workflow_roll_in_place,
+            )
+            if not goals:
+                raise ValueError("凸透镜中心移动未生成有效目标。")
+            automatic_reconfiguration = False
+            if in_place_orientation_change:
+                try:
+                    goals = validate_in_place_continuous_path(goals)
+                except ValueError:
+                    if force_workflow_roll_in_place:
+                        # For scripted polishing sweeps, do not silently convert a roll return
+                        # into an XYZ retreat/re-approach.  Keep the motion classified as an
+                        # in-place roll; the user can then see a clear failure instead of an
+                        # unexpected translation.  Retry once with the current arm posture as seed.
+                        goals = solve_continuous_path_postures(
+                            goals,
+                            initial_q=np.array(data.qpos[qpos_ids], copy=True),
+                            failure_message="打磨流程强制原位 roll",
+                        )
+                    else:
+                        goals = build_contact_reconfiguration_goals(pose_values, workpiece_lock)
+                        automatic_reconfiguration = True
+                        uses_wheel_detour = True
+            elif uses_wheel_detour:
+                goals = solve_continuous_path_postures(
+                    goals,
+                    failure_message="分段安全转运",
+                )
+            if goals[0].posture_reference is not None:
+                safe_posture = np.array(goals[0].posture_reference, copy=True)
+            else:
+                safe_posture = solve_locked_pose_posture(goals[-1])
+            reset_motion_execution()
+            arm_posture_reference = safe_posture
+            motion.active_mode = active_mode
+            motion.protect_opposite_wheel_contact = in_place_orientation_change
+            motion.protected_wheel_clearance_reference = (
+                locked_polishing_wheel2_min_clearance(workpiece_lock)
+                if in_place_orientation_change
+                else None
+            )
+            motion.current_goal = goals[0]
+            motion.remaining_goals = goals[1:]
+            motion.active_goal_index = 1
+            motion.total_goal_count = len(goals)
+            set_mocap_pose(motion.current_goal)
+            action_text = (
+                "原位旋转超出当前连续 IK 范围，正在自动撤离、换支并回靠；"
+                if automatic_reconfiguration
+                else "接触中原位旋转按当前双轮压入量限制额外穿入；"
+                if in_place_orientation_change
+                else "正在分段平移、转姿并短距离靠近打磨中心；"
+                if uses_wheel_detour
+                else ""
+            )
+            return action_text + f"按凸透镜中心目标移动到 {format_pose(pose_values)}"
 
         while viewer.is_running() and running:
             step_start = time.time()
@@ -2458,14 +2757,32 @@ def run_controller(args: argparse.Namespace) -> int:
                 try:
                     ctype = command.get("type")
                     if ctype == "move":
-                        surface_scan.clear()
-                        surface_scan_waypoints = []
-                        scan_status_text = "inactive"
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow5.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
                         waypoints = parse_waypoints_rad(command.get("waypoints", []))
                         if waypoints:
                             mode = str(command.get("mode", "move"))
+                            tool_roll_target = (
+                                float(command["tool_roll_angle_rad"])
+                                if "tool_roll_angle_rad" in command
+                                else None
+                            )
+                            waypoints, require_tool_roll_target = add_tool_roll_references_to_goals(
+                                waypoints,
+                                tool_roll_target,
+                            )
+                            if require_tool_roll_target and tool_roll_target is not None:
+                                desired_tool_roll_angle = float(tool_roll_target)
                             motion.active_mode = mode
                             motion.total_goal_count = len(waypoints)
+                            motion.require_tool_roll_target = require_tool_roll_target
 
                             if mode == "function_path":
                                 # Function path is streamed in time instead of waiting for each
@@ -2490,9 +2807,20 @@ def run_controller(args: argparse.Namespace) -> int:
                                 motion.current_goal = waypoints[0]
                                 motion.active_goal_index = 1
                                 motion.remaining_goals = waypoints[1:]
+                                if motion.current_goal.posture_reference is not None:
+                                    arm_posture_reference = np.array(motion.current_goal.posture_reference, copy=True)
                                 set_mocap_pose(motion.current_goal)
                                 status = f"开始执行 {motion.active_mode}: waypoint {motion.active_goal_index}/{motion.total_goal_count}"
                     elif ctype == "align_workpiece_handle_step1":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow5.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
                         goals = build_align_step1_goals()
                         if goals:
                             reset_motion_execution()
@@ -2503,71 +2831,16 @@ def run_controller(args: argparse.Namespace) -> int:
                             motion.total_goal_count = len(goals)
                             set_mocap_pose(motion.current_goal)
                             status = f"开始执行对齐步骤1：移动到固定目标 {align_step1_fixed_pose_deg_text}"
-                    elif ctype == "ellipsoid_surface_scan":
-                        clearance = float(np.clip(float(command.get("surface_clearance", 0.0)), -0.020, 0.020))
-                        if workpiece_lock.mode != "locked":
-                            scan_status_text = "inactive"
-                            status = "圆周扫描失败：待磨件尚未 locked；请先执行步骤2。"
-                        else:
-                            goals, labels = build_surface_scan_goals(clearance, workpiece_lock)
-                            reset_motion_execution()
-                            surface_scan_waypoints = goals
-                            surface_scan.active = True
-                            surface_scan.streaming = False
-                            surface_scan.index = 0
-                            surface_scan.clearance = clearance
-                            surface_scan.labels = labels
-                            motion.active_mode = "ellipsoid_surface_scan"
-                            motion.current_goal = goals[0]
-                            motion.remaining_goals = []
-                            motion.active_goal_index = 1
-                            motion.total_goal_count = len(goals)
-                            set_mocap_pose(motion.current_goal)
-                            scan_status_text = (
-                                f"waiting_start, point 1/{len(goals)}, clearance={clearance:.4f}m"
-                            )
-                            status = f"圆周扫描准备中：等待第一个点到达，surface_clearance={clearance:.4f}m"
-                    elif ctype == "cap1_spiral_scan":
-                        clearance = float(np.clip(float(command.get("surface_clearance", 0.0)), -0.020, 0.020))
-                        arc_step = float(np.clip(float(command.get("arc_step", cap1_spiral_default_arc_step)), 0.0005, 0.0100))
-                        radial_spacing = float(np.clip(float(command.get("radial_spacing", cap1_spiral_default_radial_spacing)), 0.0010, 0.0300))
-                        max_normal_angle_deg = float(np.clip(float(command.get("max_normal_angle_deg", cap1_spiral_default_max_normal_angle_deg)), 0.25, 10.0))
-                        center_offset = float(np.clip(float(command.get("center_offset", cap1_sphere_center_offset_default)), 0.0, double_sphere_radius * 0.98))
-                        target_z_sign = 1.0 if float(command.get("target_z_sign", 1.0)) >= 0.0 else -1.0
-                        if workpiece_lock.mode != "locked":
-                            scan_status_text = "inactive"
-                            status = "cap1 螺线打磨失败：待磨件尚未 locked；请先执行步骤2。"
-                        else:
-                            goals, labels = build_cap1_spiral_scan_goals(
-                                clearance=clearance,
-                                arc_step=arc_step,
-                                radial_spacing=radial_spacing,
-                                max_normal_angle_deg=max_normal_angle_deg,
-                                center_offset=center_offset,
-                                target_z_sign=target_z_sign,
-                                lock_state=workpiece_lock,
-                            )
-                            reset_motion_execution()
-                            surface_scan_waypoints = goals
-                            surface_scan.active = True
-                            surface_scan.streaming = False
-                            surface_scan.index = 0
-                            surface_scan.clearance = clearance
-                            surface_scan.labels = labels
-                            motion.active_mode = "cap1_spiral_scan"
-                            motion.current_goal = goals[0]
-                            motion.remaining_goals = []
-                            motion.active_goal_index = 1
-                            motion.total_goal_count = len(goals)
-                            set_mocap_pose(motion.current_goal)
-                            scan_status_text = (
-                                f"cap1_spiral waiting_start, point 1/{len(goals)}, "
-                                f"clearance={clearance:.4f}m, arc_step={arc_step:.4f}m, "
-                                f"target红轴/接触法线≈{' +X' if target_z_sign > 0 else ' -X'}, "
-                                f"target蓝轴≈{' -Y' if target_z_sign > 0 else ' +Y'}"
-                            )
-                            status = f"cap1 螺线打磨准备中：共 {len(goals)} 点，等待第一个点到达；target 红轴法线和蓝轴方向已按选项生成。"
                     elif ctype == "align_workpiece_handle_step2":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow5.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
                         if ellipsoid_control is None:
                             workpiece_lock.clear()
                             status = "对齐步骤2失败：当前模型中没有可移动的待磨件 freejoint。"
@@ -2576,7 +2849,6 @@ def run_controller(args: argparse.Namespace) -> int:
                             # active_mode can remain "align_step1_fixed", blocking the
                             # locked workpiece mocap drag logic after the lock is captured.
                             reset_motion_execution()
-                            scan_status_text = "inactive"
                             if gripper_actuator_id is not None:
                                 lo, _ = model.actuator_ctrlrange[gripper_actuator_id]
                                 desired_gripper = float(lo)
@@ -2588,6 +2860,131 @@ def run_controller(args: argparse.Namespace) -> int:
                             gripper_stall_since = None
                             workpiece_lock.start_closing()
                             status = "对齐步骤2：正在关闭 gripper，等待闭合或受阻后锁定待磨件。"
+                    elif ctype == "polishing_workflow1":
+                        reset_motion_execution()
+                        polishing_workflow1.start()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow5.clear()
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        workpiece_lock.clear()
+                        desired_wheel_slider_spacing = wheel_slider_max_spacing
+                        if gripper_actuator_id is not None:
+                            _, hi = model.actuator_ctrlrange[gripper_actuator_id]
+                            desired_gripper = float(hi)
+                        else:
+                            desired_gripper = float(args.gripper_open)
+                        auto_gripper_close = False
+                        gripper_blocked = False
+                        gripper_close_limit = 0.0
+                        gripper_stall_since = None
+                        goals = build_align_step1_goals()
+                        motion.active_mode = "polishing_workflow1_align_step1"
+                        motion.current_goal = goals[0]
+                        motion.remaining_goals = goals[1:]
+                        motion.active_goal_index = 1
+                        motion.total_goal_count = len(goals)
+                        set_mocap_pose(motion.current_goal)
+                        polishing_workflow1_status_text = "步骤1/5: 滑块打开到最大，同时执行对齐步骤1"
+                        status = polishing_workflow1_status_text
+                    elif ctype == "polishing_workflow2":
+                        polishing_workflow1.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        reset_motion_execution()
+                        auto_close_sliders_after_center_motion = False
+                        if workpiece_lock.mode != "locked":
+                            polishing_workflow2.clear()
+                            polishing_workflow2_status_text = "failed: 待磨件尚未 locked，请先完成打磨步骤1或步骤2锁定"
+                            status = "打磨步骤2无法启动：待磨件尚未 locked。请先完成夹取/锁定。"
+                        else:
+                            polishing_workflow2.start()
+                            desired_wheel_slider_spacing = wheel_slider_max_spacing
+                            polishing_workflow2_status_text = "步骤2-1/6: 等待双 polishing wheel 张开到最大距离"
+                            status = polishing_workflow2_status_text
+                    elif ctype == "polishing_workflow3":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        reset_motion_execution()
+                        auto_close_sliders_after_center_motion = False
+                        if workpiece_lock.mode != "locked":
+                            polishing_workflow3.clear()
+                            polishing_workflow4.clear()
+                            polishing_workflow3_status_text = "failed: 待磨件尚未 locked，请先完成打磨步骤1/2或手动锁定"
+                            status = "打磨步骤3无法启动：待磨件尚未 locked。请先完成夹取/锁定。"
+                        else:
+                            polishing_workflow3.start()
+                            desired_wheel_slider_spacing = wheel_slider_max_spacing
+                            polishing_workflow3_status_text = "步骤3-1/6: 等待双 polishing wheel 张开到最大距离"
+                            status = polishing_workflow3_status_text
+                    elif ctype == "polishing_workflow4":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        reset_motion_execution()
+                        auto_close_sliders_after_center_motion = False
+                        if workpiece_lock.mode != "locked":
+                            polishing_workflow4.clear()
+                            polishing_workflow4_status_text = "failed: 待磨件尚未 locked，请先完成打磨步骤1/2/3或手动锁定"
+                            status = "打磨步骤4无法启动：待磨件尚未 locked。请先完成夹取/锁定。"
+                        else:
+                            polishing_workflow4.start()
+                            desired_wheel_slider_spacing = wheel_slider_max_spacing
+                            polishing_workflow4_status_text = "步骤4-1/7: 等待双 polishing wheel 张开到最大距离"
+                            status = polishing_workflow4_status_text
+                    elif ctype == "polishing_workflow5":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        reset_motion_execution()
+                        auto_close_sliders_after_center_motion = False
+                        if workpiece_lock.mode != "locked":
+                            polishing_workflow5.clear()
+                            polishing_workflow5_status_text = "failed: 待磨件尚未 locked，请先完成打磨步骤1/2/3/4或手动锁定"
+                            status = "打磨步骤5无法启动：待磨件尚未 locked。请先完成夹取/锁定。"
+                        else:
+                            polishing_workflow5.start()
+                            desired_wheel_slider_spacing = wheel_slider_max_spacing
+                            polishing_workflow5_status_text = "步骤5-1/6: 等待双 polishing wheel 张开到最大距离"
+                            status = polishing_workflow5_status_text
+                    elif ctype == "wheel_slider_spacing":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        auto_close_sliders_after_center_motion = False
+                        desired_wheel_slider_spacing = float(
+                            np.clip(
+                                float(command.get("spacing", desired_wheel_slider_spacing)),
+                                wheel_slider_min_spacing,
+                                wheel_slider_max_spacing,
+                            )
+                        )
+                        status = f"双滑块正在移动到目标圆心距离 {desired_wheel_slider_spacing:.4f} m。"
                     elif ctype == "stop":
                         stream_waypoints = []
                         stream_index = 0
@@ -2595,12 +2992,27 @@ def run_controller(args: argparse.Namespace) -> int:
                         stream_wait_until = 0.0
                         reset_trail_writer()
                         motion.clear()
-                        surface_scan.clear()
-                        surface_scan_waypoints = []
-                        scan_status_text = "inactive"
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        auto_close_sliders_after_center_motion = False
                         snap_mocap_to_site()
                         status = "已停止当前任务，并把 target 同步到当前末端位姿。"
                     elif ctype == "gripper":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        auto_close_sliders_after_center_motion = False
                         desired_gripper = float(command.get("value", desired_gripper))
                         auto_gripper_close = False
                     elif ctype == "gripper_open":
@@ -2614,12 +3026,26 @@ def run_controller(args: argparse.Namespace) -> int:
                         gripper_close_limit = 0.0
                         gripper_stall_since = None
                         workpiece_lock.clear()
-                        surface_scan.clear()
-                        surface_scan_waypoints = []
-                        scan_status_text = "inactive"
-                        arm_posture_reference = q0_arm.copy()
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        auto_close_sliders_after_center_motion = False
+                        arm_posture_reference = posture_reference_preserving_tool_roll()
                         status = "gripper open：完全打开"
                     elif ctype == "gripper_close":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
                         if gripper_actuator_id is not None:
                             lo, _ = model.actuator_ctrlrange[gripper_actuator_id]
                             desired_gripper = float(lo)
@@ -2630,6 +3056,19 @@ def run_controller(args: argparse.Namespace) -> int:
                         gripper_close_limit = 0.0
                         gripper_stall_since = None
                         status = "gripper close：正在关闭直到受阻或完全闭合"
+                    elif ctype == "tool_roll":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow5.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
+                        polishing_workflow5_status_text = "inactive"
+                        auto_close_sliders_after_center_motion = False
+                        status = start_tool_roll_motion(float(command.get("angle_rad", 0.0)))
                     elif ctype == "ee_axes":
                         shared.show_ee_axes = bool(command.get("visible", True))
                     elif ctype == "mocap":
@@ -2646,51 +3085,30 @@ def run_controller(args: argparse.Namespace) -> int:
                         shared.mocap_z_comp = float(command.get("mocap_z_comp", shared.mocap_z_comp))
                         status = f"mocap z 补偿 = {shared.mocap_z_comp:.4f} m"
                     elif ctype == "lens_center_pose":
+                        polishing_workflow1.clear()
+                        polishing_workflow2.clear()
+                        polishing_workflow3.clear()
+                        polishing_workflow4.clear()
+                        polishing_workflow1_status_text = "inactive"
+                        polishing_workflow2_status_text = "inactive"
+                        polishing_workflow3_status_text = "inactive"
+                        polishing_workflow4_status_text = "inactive"
                         pose_values = command.get("pose", [])
                         if workpiece_lock.mode == "closing":
                             status = "待磨件正在锁定；请等待步骤2完成后再移动凸透镜中心。"
                         elif workpiece_lock.mode == "locked":
-                            goals, uses_wheel_detour, in_place_orientation_change = build_locked_lens_center_move_goals(
-                                pose_values,
-                                workpiece_lock,
-                            )
-                            if not goals:
-                                raise ValueError("凸透镜中心移动未生成有效目标。")
-                            automatic_reconfiguration = False
-                            if in_place_orientation_change:
-                                try:
-                                    validate_in_place_continuous_path(goals)
-                                except ValueError:
-                                    goals = build_contact_reconfiguration_goals(pose_values, workpiece_lock)
-                                    automatic_reconfiguration = True
-                                    uses_wheel_detour = True
-                            if automatic_reconfiguration and goals[0].posture_reference is not None:
-                                safe_posture = np.array(goals[0].posture_reference, copy=True)
-                            else:
-                                safe_posture = solve_locked_pose_posture(goals[-1])
-                            reset_motion_execution()
-                            arm_posture_reference = safe_posture
-                            scan_status_text = "inactive"
-                            motion.active_mode = "locked_lens_center_pose"
-                            motion.protect_opposite_wheel_contact = in_place_orientation_change
-                            motion.current_goal = goals[0]
-                            motion.remaining_goals = goals[1:]
-                            motion.active_goal_index = 1
-                            motion.total_goal_count = len(goals)
-                            set_mocap_pose(motion.current_goal)
-                            status = (
-                                (
-                                    "locked：原位旋转超出当前连续 IK 范围，正在自动撤离 60mm、换支并回靠；"
-                                    if automatic_reconfiguration
-                                    else
-                                    "locked：接触中原位旋转已通过连续分支预检查，并启用防穿入监控；"
-                                    if in_place_orientation_change
-                                    else "locked：靠近打磨轮，正在安全撤离/转向/回靠；"
-                                    if uses_wheel_detour
-                                    else "locked："
-                                )
-                                + "已选择关节限位安全的 IK 分支，并按凸透镜中心目标移动到 "
-                                f"{format_pose(pose_values)}"
+                            target_values = [float(value) for value in pose_values]
+                            # Manual lens-center moves must NOT change the dual-slider spacing.
+                            # Earlier fixed versions opened the two polishing wheels whenever the
+                            # requested body pose was near polishing_workflow1_center.  That made
+                            # ordinary roll edits at the already-contacting center immediately push
+                            # the two wheels apart.  From now on, /lens_center_pose only moves the
+                            # locked workpiece/robot.  Wheel spacing is changed only by the slider
+                            # UI (/wheel_slider_spacing) or by polishing_workflow1's own stages.
+                            auto_close_sliders_after_center_motion = False
+                            status = "locked：" + start_locked_lens_center_motion(
+                                target_values,
+                                "locked_lens_center_pose",
                             )
                         else:
                             set_lens_center_pose(pose_values)
@@ -2699,6 +3117,11 @@ def run_controller(args: argparse.Namespace) -> int:
                         running = False
                 except Exception as exc:
                     status = f"命令执行失败：{exc}"
+
+            if tool_roll_control_index is not None and motion.current_goal is None and not stream_waypoints:
+                current_angle = float(data.qpos[qpos_ids[tool_roll_control_index]])
+                desired_tool_roll_angle = current_angle
+                arm_posture_reference[tool_roll_control_index] = current_angle
 
             with shared.lock:
                 show_ee = bool(shared.show_ee_axes)
@@ -2718,10 +3141,11 @@ def run_controller(args: argparse.Namespace) -> int:
                 data.ctrl[wheel_spin_opposite_actuator_id] = float(np.clip(2.0, lo, hi))
             if wheel_spin_opposite_mirror_actuator_id is not None:
                 lo, hi = model.actuator_ctrlrange[wheel_spin_opposite_mirror_actuator_id]
-                data.ctrl[wheel_spin_opposite_mirror_actuator_id] = float(np.clip(2.0, lo, hi))
+                data.ctrl[wheel_spin_opposite_mirror_actuator_id] = float(np.clip(-2.0, lo, hi))
 
             # For streamed function_path: first hold the current mocap pose for
             # stream_start_hold_time, then send the first sampled waypoint.
+            completed_motion_mode: Optional[str] = None
             if stream_waypoints and not stream_started:
                 now_for_stream = time.time()
                 if now_for_stream >= stream_wait_until:
@@ -2729,6 +3153,8 @@ def run_controller(args: argparse.Namespace) -> int:
                     stream_index = 0
                     motion.current_goal = stream_waypoints[0]
                     motion.active_goal_index = 1
+                    if motion.current_goal.posture_reference is not None:
+                        arm_posture_reference = np.array(motion.current_goal.posture_reference, copy=True)
                     set_mocap_pose(motion.current_goal)
                     stream_last_time = now_for_stream
                     status = f"开始执行函数轨迹：采样点 1/{motion.total_goal_count}"
@@ -2740,58 +3166,32 @@ def run_controller(args: argparse.Namespace) -> int:
                 pos_err_goal = float(np.linalg.norm(compensated_target_pos() - data.site(site_id).xpos))
                 ori_err_goal = orientation_error()
 
-                if motion.active_mode in {"ellipsoid_surface_scan", "cap1_spiral_scan"} and surface_scan.active and surface_scan_waypoints:
-                    now_for_scan = time.time()
-                    if not surface_scan.streaming:
-                        if pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance:
-                            surface_scan.streaming = True
-                            surface_scan.last_step_at = now_for_scan
-                            scan_status_text = (
-                                f"{surface_scan.label()}, point {surface_scan.index + 1}/{len(surface_scan_waypoints)}, "
-                                f"clearance={surface_scan.clearance:.4f}m"
-                            )
-                            status = f"表面扫描开始：{scan_status_text}"
-                        else:
-                            scan_status_text = (
-                                f"waiting_start, point 1/{len(surface_scan_waypoints)}, "
-                                f"clearance={surface_scan.clearance:.4f}m"
-                            )
-                            status = f"表面扫描准备中：等待第一个点到达。{scan_status_text}"
-                    elif surface_scan.index < len(surface_scan_waypoints) - 1:
-                        if now_for_scan - surface_scan.last_step_at >= surface_scan_step_time:
-                            surface_scan.index += 1
-                            motion.current_goal = surface_scan_waypoints[surface_scan.index]
-                            motion.active_goal_index = surface_scan.index + 1
-                            set_mocap_pose(motion.current_goal)
-                            surface_scan.last_step_at = now_for_scan
-                            scan_status_text = (
-                                f"{surface_scan.label()}, point {surface_scan.index + 1}/{len(surface_scan_waypoints)}, "
-                                f"clearance={surface_scan.clearance:.4f}m"
-                            )
-                            status = f"表面扫描执行中：{scan_status_text}"
-                    else:
-                        if pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance:
-                            scan_status_text = (
-                                f"finished, point {surface_scan.index + 1}/{len(surface_scan_waypoints)}, "
-                                f"clearance={surface_scan.clearance:.4f}m"
-                            )
-                            status = f"表面扫描完成：{scan_status_text}"
-                            surface_scan.clear()
-                            surface_scan_waypoints = []
-                            motion.clear()
-                elif motion.active_mode == "function_path" and stream_waypoints and stream_started:
+                if motion.active_mode == "function_path" and stream_waypoints and stream_started:
                     now_for_stream = time.time()
                     if stream_index < len(stream_waypoints) - 1 and now_for_stream - stream_last_time >= stream_step_time:
                         stream_index += 1
                         motion.current_goal = stream_waypoints[stream_index]
                         motion.active_goal_index = stream_index + 1
+                        if motion.current_goal.posture_reference is not None:
+                            arm_posture_reference = np.array(motion.current_goal.posture_reference, copy=True)
                         set_mocap_pose(motion.current_goal)
                         stream_last_time = now_for_stream
                         status = f"函数轨迹执行中：采样点 {motion.active_goal_index}/{motion.total_goal_count}"
                     elif stream_index >= len(stream_waypoints) - 1:
                         # After the final sampled point has been sent, wait until the
                         # robot actually catches up, then mark the path as complete.
-                        if pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance:
+                        reached_stream_goal = pos_err_goal < args.position_tolerance and ori_err_goal < args.orientation_tolerance
+                        if (
+                            reached_stream_goal
+                            and motion.require_tool_roll_target
+                            and tool_roll_control_index is not None
+                            and motion.current_goal is not None
+                            and motion.current_goal.posture_reference is not None
+                        ):
+                            tool_roll_target = float(motion.current_goal.posture_reference[tool_roll_control_index])
+                            tool_roll_error = abs(float(data.qpos[qpos_ids[tool_roll_control_index]]) - tool_roll_target)
+                            reached_stream_goal = tool_roll_error < tool_roll_position_tolerance
+                        if reached_stream_goal:
                             status = "函数轨迹执行完成。"
                             stream_waypoints = []
                             stream_index = 0
@@ -2799,7 +3199,7 @@ def run_controller(args: argparse.Namespace) -> int:
                             stream_wait_until = 0.0
                             motion.clear()
                 else:
-                    if motion.active_mode == "locked_lens_center_pose":
+                    if motion.active_mode == "locked_lens_center_pose" or motion.active_mode.startswith("polishing_workflow1_lens_") or motion.active_mode.startswith("polishing_workflow2_lens_") or motion.active_mode.startswith("polishing_workflow3_lens_") or motion.active_mode.startswith("polishing_workflow4_lens_") or motion.active_mode.startswith("polishing_workflow5_lens_"):
                         final_locked_goal = not motion.remaining_goals
                         position_tolerance = (
                             locked_move_position_tolerance
@@ -2815,6 +3215,35 @@ def run_controller(args: argparse.Namespace) -> int:
                         position_tolerance = args.position_tolerance
                         orientation_tolerance = args.orientation_tolerance
                     reached_goal = pos_err_goal < position_tolerance and ori_err_goal < orientation_tolerance
+                    if (
+                        (motion.active_mode == "tool_roll" or motion.require_tool_roll_target)
+                        and tool_roll_control_index is not None
+                        and motion.current_goal.posture_reference is not None
+                    ):
+                        tool_roll_target = float(motion.current_goal.posture_reference[tool_roll_control_index])
+                        tool_roll_error = abs(float(data.qpos[qpos_ids[tool_roll_control_index]]) - tool_roll_target)
+                        reached_goal = reached_goal and tool_roll_error < tool_roll_position_tolerance
+                    locked_motion_for_waypoint = (
+                        motion.active_mode == "locked_lens_center_pose"
+                        or motion.active_mode.startswith("polishing_workflow1_lens_") or motion.active_mode.startswith("polishing_workflow2_lens_") or motion.active_mode.startswith("polishing_workflow3_lens_") or motion.active_mode.startswith("polishing_workflow4_lens_") or motion.active_mode.startswith("polishing_workflow5_lens_")
+                    )
+                    # For locked workpiece transfers, intermediate waypoints are only guide points.
+                    # FR3 can stall on one guide point because the nullspace posture/reference is
+                    # close to a joint-limit branch, even though the rest of the path is feasible.
+                    # Do not apply this to the final goal; final contact pose still uses the normal
+                    # tolerance above.
+                    if (
+                        not reached_goal
+                        and locked_motion_for_waypoint
+                        and motion.remaining_goals
+                        and pos_err_goal < 0.035
+                        and ori_err_goal < 0.200
+                    ):
+                        reached_goal = True
+                        status = (
+                            f"中间 waypoint {motion.active_goal_index}/{motion.total_goal_count} "
+                            f"误差已足够小(pos={pos_err_goal:.4f}m, ori={ori_err_goal:.3f}rad)，自动跳过以避免卡住。"
+                        )
                     if reached_goal:
                         if motion.remaining_goals:
                             motion.current_goal = motion.remaining_goals.pop(0)
@@ -2824,13 +3253,476 @@ def run_controller(args: argparse.Namespace) -> int:
                             set_mocap_pose(motion.current_goal)
                             status = f"继续执行 waypoint {motion.active_goal_index}/{motion.total_goal_count}"
                         else:
+                            completed_motion_mode = motion.active_mode
                             if motion.active_mode == "align_step1_fixed":
                                 status = f"对齐步骤1执行完成：已移动到固定目标 {align_step1_fixed_pose_deg_text}"
                             elif motion.active_mode == "locked_lens_center_pose":
                                 status = "locked 凸透镜中心目标执行完成：机械臂已移动到反算末端目标。"
+                            elif motion.active_mode == "tool_roll" and tool_roll_control_index is not None:
+                                status = (
+                                    "gripper 连续自转完成：当前累计角度 "
+                                    f"{math.degrees(float(data.qpos[qpos_ids[tool_roll_control_index]])):.2f}deg。"
+                                )
                             else:
                                 status = f"{motion.active_mode} 执行完成。"
                             motion.clear()
+
+            if completed_motion_mode == "locked_lens_center_pose" and auto_close_sliders_after_center_motion:
+                desired_wheel_slider_spacing = polishing_workflow1_contact_spacing
+                auto_close_sliders_after_center_motion = False
+                status = (
+                    f"{status}；凸透镜中心已到位，双 polishing wheel 开始合拢到 "
+                    f"{polishing_workflow1_contact_spacing:.4f} m。"
+                )
+
+            if polishing_workflow1.active:
+                try:
+                    if (
+                        polishing_workflow1.stage == "opening_and_aligning"
+                        and completed_motion_mode == "polishing_workflow1_align_step1"
+                    ):
+                        polishing_workflow1.stage = "waiting_open_spacing"
+                        polishing_workflow1_status_text = "步骤1/5: 对齐完成，等待滑块达到最大距离"
+                        status = polishing_workflow1_status_text
+                    elif (
+                        polishing_workflow1.stage == "waiting_open_spacing"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                        and actual_gripper_value() >= 252.0
+                    ):
+                        reset_motion_execution()
+                        if gripper_actuator_id is not None:
+                            lo, _ = model.actuator_ctrlrange[gripper_actuator_id]
+                            desired_gripper = float(lo)
+                        else:
+                            desired_gripper = 0.0
+                        auto_gripper_close = True
+                        gripper_blocked = False
+                        gripper_close_limit = 0.0
+                        gripper_stall_since = None
+                        workpiece_lock.start_closing()
+                        polishing_workflow1.stage = "closing_and_locking"
+                        polishing_workflow1_status_text = "步骤1/5: 执行对齐步骤2，正在关闭并锁定"
+                        status = polishing_workflow1_status_text
+                    elif polishing_workflow1.stage == "closing_and_locking" and workpiece_lock.mode == "locked":
+                        if abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) > wheel_slider_completion_tolerance:
+                            desired_wheel_slider_spacing = wheel_slider_max_spacing
+                            polishing_workflow1_status_text = "步骤2/5: 已锁定，等待双 polishing wheel 完全打开后再进入打磨中心"
+                            status = polishing_workflow1_status_text
+                        else:
+                            status = start_locked_lens_center_motion(
+                                polishing_workflow1_pose(polishing_workflow1_roll_sequence_deg[0]),
+                                "polishing_workflow1_lens_center",
+                            )
+                            polishing_workflow1.stage = "moving_to_center"
+                            polishing_workflow1_status_text = "步骤2/5: 双轮保持打开，移动凸透镜中心到初始打磨姿态 roll=90deg"
+                            status = polishing_workflow1_status_text + "；" + status
+                    elif (
+                        polishing_workflow1.stage == "moving_to_center"
+                        and completed_motion_mode == "polishing_workflow1_lens_center"
+                    ):
+                        desired_wheel_slider_spacing = polishing_workflow1_contact_spacing
+                        polishing_workflow1.stage = "closing_sliders"
+                        polishing_workflow1_status_text = f"步骤2/5: 凸透镜中心到位后，双 polishing wheel 合拢到 {polishing_workflow1_contact_spacing:.4f}m"
+                        status = polishing_workflow1_status_text
+                    elif (
+                        polishing_workflow1.stage == "closing_sliders"
+                        and abs(actual_wheel_slider_spacing - polishing_workflow1_contact_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow1_pose(polishing_workflow1_roll_sequence_deg[1]),
+                            "polishing_workflow1_lens_roll_high",
+                        )
+                        polishing_workflow1.stage = "rotating_high"
+                        polishing_workflow1_status_text = f"步骤3/5: 凸透镜旋转到 roll={polishing_workflow1_roll_sequence_deg[1]:.0f}deg"
+                        status = polishing_workflow1_status_text + "；" + status
+                    elif (
+                        polishing_workflow1.stage == "rotating_high"
+                        and completed_motion_mode == "polishing_workflow1_lens_roll_high"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow1_pose(polishing_workflow1_roll_sequence_deg[2]),
+                            "polishing_workflow1_lens_return_high",
+                        )
+                        polishing_workflow1.stage = "returning_from_high"
+                        polishing_workflow1_status_text = f"步骤3/5: 从 roll={polishing_workflow1_roll_sequence_deg[1]:.0f}deg 返回 roll={polishing_workflow1_roll_sequence_deg[2]:.0f}deg"
+                        status = polishing_workflow1_status_text + "；" + status
+                    elif (
+                        polishing_workflow1.stage == "returning_from_high"
+                        and completed_motion_mode == "polishing_workflow1_lens_return_high"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow1_pose(polishing_workflow1_roll_sequence_deg[3]),
+                            "polishing_workflow1_lens_roll_low",
+                        )
+                        polishing_workflow1.stage = "rotating_low"
+                        polishing_workflow1_status_text = f"步骤4/5: 凸透镜旋转到 roll={polishing_workflow1_roll_sequence_deg[3]:.0f}deg"
+                        status = polishing_workflow1_status_text + "；" + status
+                    elif (
+                        polishing_workflow1.stage == "rotating_low"
+                        and completed_motion_mode == "polishing_workflow1_lens_roll_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow1_pose(polishing_workflow1_roll_sequence_deg[4]),
+                            "polishing_workflow1_lens_return_low",
+                        )
+                        polishing_workflow1.stage = "returning_from_low"
+                        polishing_workflow1_status_text = f"步骤4/5: 从 roll={polishing_workflow1_roll_sequence_deg[3]:.0f}deg 返回 roll={polishing_workflow1_roll_sequence_deg[4]:.0f}deg"
+                        status = polishing_workflow1_status_text + "；" + status
+                    elif (
+                        polishing_workflow1.stage == "returning_from_low"
+                        and completed_motion_mode == "polishing_workflow1_lens_return_low"
+                    ):
+                        desired_wheel_slider_spacing = wheel_slider_max_spacing
+                        polishing_workflow1.stage = "opening_sliders"
+                        polishing_workflow1_status_text = "步骤5/5: 打开双滑块到最大距离"
+                        status = polishing_workflow1_status_text
+                    elif (
+                        polishing_workflow1.stage == "opening_sliders"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        polishing_workflow1.active = False
+                        polishing_workflow1.stage = "finished"
+                        polishing_workflow1_status_text = "finished"
+                        status = "打磨流程1完成：双滑块已重新打开到最大距离。"
+                except Exception as exc:
+                    polishing_workflow1.clear()
+                    polishing_workflow1_status_text = "failed"
+                    status = f"打磨流程1失败：{exc}"
+
+            if polishing_workflow2.active:
+                try:
+                    if (
+                        polishing_workflow2.stage == "opening_sliders"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow2_pose(polishing_workflow2_roll_sequence_deg[0]),
+                            "polishing_workflow2_lens_lower_center",
+                        )
+                        polishing_workflow2.stage = "moving_lower_center"
+                        polishing_workflow2_status_text = "步骤2-2/6: 双轮保持张开，凸透镜中心原地下降到 z=0.410m，roll=90deg"
+                        status = polishing_workflow2_status_text + "；" + status
+                    elif (
+                        polishing_workflow2.stage == "moving_lower_center"
+                        and completed_motion_mode == "polishing_workflow2_lens_lower_center"
+                    ):
+                        desired_wheel_slider_spacing = polishing_workflow2_contact_spacing
+                        polishing_workflow2.stage = "closing_sliders"
+                        polishing_workflow2_status_text = f"步骤2-3/6: 双滑块圆心距离合拢到 {polishing_workflow2_contact_spacing:.4f}m"
+                        status = polishing_workflow2_status_text
+                    elif (
+                        polishing_workflow2.stage == "closing_sliders"
+                        and abs(actual_wheel_slider_spacing - polishing_workflow2_contact_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow2_pose(polishing_workflow2_roll_sequence_deg[1]),
+                            "polishing_workflow2_lens_roll_low",
+                        )
+                        polishing_workflow2.stage = "rotating_low"
+                        polishing_workflow2_status_text = f"步骤2-4/6: 凸透镜 roll={polishing_workflow2_roll_sequence_deg[0]:.0f}deg -> {polishing_workflow2_roll_sequence_deg[1]:.0f}deg"
+                        status = polishing_workflow2_status_text + "；" + status
+                    elif (
+                        polishing_workflow2.stage == "rotating_low"
+                        and completed_motion_mode == "polishing_workflow2_lens_roll_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow2_pose(polishing_workflow2_roll_sequence_deg[2]),
+                            "polishing_workflow2_lens_return_low",
+                        )
+                        polishing_workflow2.stage = "returning_from_low"
+                        polishing_workflow2_status_text = f"步骤2-4/6: roll={polishing_workflow2_roll_sequence_deg[1]:.0f}deg 返回 {polishing_workflow2_roll_sequence_deg[2]:.0f}deg"
+                        status = polishing_workflow2_status_text + "；" + status
+                    elif (
+                        polishing_workflow2.stage == "returning_from_low"
+                        and completed_motion_mode == "polishing_workflow2_lens_return_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow2_pose(polishing_workflow2_roll_sequence_deg[3]),
+                            "polishing_workflow2_lens_roll_high",
+                        )
+                        polishing_workflow2.stage = "rotating_high"
+                        polishing_workflow2_status_text = f"步骤2-5/6: 凸透镜 roll={polishing_workflow2_roll_sequence_deg[2]:.0f}deg -> {polishing_workflow2_roll_sequence_deg[3]:.0f}deg"
+                        status = polishing_workflow2_status_text + "；" + status
+                    elif (
+                        polishing_workflow2.stage == "rotating_high"
+                        and completed_motion_mode == "polishing_workflow2_lens_roll_high"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow2_pose(polishing_workflow2_roll_sequence_deg[4]),
+                            "polishing_workflow2_lens_return_high",
+                        )
+                        polishing_workflow2.stage = "returning_from_high"
+                        polishing_workflow2_status_text = f"步骤2-5/6: roll={polishing_workflow2_roll_sequence_deg[3]:.0f}deg 返回 {polishing_workflow2_roll_sequence_deg[4]:.0f}deg"
+                        status = polishing_workflow2_status_text + "；" + status
+                    elif (
+                        polishing_workflow2.stage == "returning_from_high"
+                        and completed_motion_mode == "polishing_workflow2_lens_return_high"
+                    ):
+                        polishing_workflow2.active = False
+                        polishing_workflow2.stage = "finished"
+                        polishing_workflow2_status_text = "finished"
+                        status = (
+                            "打磨步骤2完成：z=0.410m，roll 已按 90→20→90→150→90 执行完成；"
+                            f"双滑块保持在 {polishing_workflow2_contact_spacing:.4f}m。"
+                        )
+                except Exception as exc:
+                    polishing_workflow2.clear()
+                    polishing_workflow2_status_text = "failed"
+                    status = f"打磨步骤2失败：{exc}"
+
+
+
+            if polishing_workflow3.active:
+                try:
+                    if (
+                        polishing_workflow3.stage == "opening_sliders"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow3_pose(polishing_workflow3_roll_sequence_deg[0]),
+                            "polishing_workflow3_lens_raise_center",
+                        )
+                        polishing_workflow3.stage = "moving_raise_center"
+                        polishing_workflow3_status_text = "步骤3-2/6: 双轮保持张开，凸透镜中心原地上升到 z=0.460m，roll=90deg"
+                        status = polishing_workflow3_status_text + "；" + status
+                    elif (
+                        polishing_workflow3.stage == "moving_raise_center"
+                        and completed_motion_mode == "polishing_workflow3_lens_raise_center"
+                    ):
+                        desired_wheel_slider_spacing = polishing_workflow3_contact_spacing
+                        polishing_workflow3.stage = "closing_sliders"
+                        polishing_workflow3_status_text = f"步骤3-3/6: 双滑块圆心距离合拢到 {polishing_workflow3_contact_spacing:.4f}m"
+                        status = polishing_workflow3_status_text
+                    elif (
+                        polishing_workflow3.stage == "closing_sliders"
+                        and abs(actual_wheel_slider_spacing - polishing_workflow3_contact_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow3_pose(polishing_workflow3_roll_sequence_deg[1]),
+                            "polishing_workflow3_lens_roll_low",
+                        )
+                        polishing_workflow3.stage = "rotating_low"
+                        polishing_workflow3_status_text = f"步骤3-4/6: 凸透镜 roll={polishing_workflow3_roll_sequence_deg[0]:.0f}deg -> {polishing_workflow3_roll_sequence_deg[1]:.0f}deg"
+                        status = polishing_workflow3_status_text + "；" + status
+                    elif (
+                        polishing_workflow3.stage == "rotating_low"
+                        and completed_motion_mode == "polishing_workflow3_lens_roll_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow3_pose(polishing_workflow3_roll_sequence_deg[2]),
+                            "polishing_workflow3_lens_return_low",
+                        )
+                        polishing_workflow3.stage = "returning_from_low"
+                        polishing_workflow3_status_text = f"步骤3-4/6: roll={polishing_workflow3_roll_sequence_deg[1]:.0f}deg 返回 {polishing_workflow3_roll_sequence_deg[2]:.0f}deg"
+                        status = polishing_workflow3_status_text + "；" + status
+                    elif (
+                        polishing_workflow3.stage == "returning_from_low"
+                        and completed_motion_mode == "polishing_workflow3_lens_return_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow3_pose(polishing_workflow3_roll_sequence_deg[3]),
+                            "polishing_workflow3_lens_roll_high",
+                        )
+                        polishing_workflow3.stage = "rotating_high"
+                        polishing_workflow3_status_text = f"步骤3-5/6: 凸透镜 roll={polishing_workflow3_roll_sequence_deg[2]:.0f}deg -> {polishing_workflow3_roll_sequence_deg[3]:.0f}deg"
+                        status = polishing_workflow3_status_text + "；" + status
+                    elif (
+                        polishing_workflow3.stage == "rotating_high"
+                        and completed_motion_mode == "polishing_workflow3_lens_roll_high"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow3_pose(polishing_workflow3_roll_sequence_deg[4]),
+                            "polishing_workflow3_lens_return_high",
+                        )
+                        polishing_workflow3.stage = "returning_from_high"
+                        polishing_workflow3_status_text = f"步骤3-5/6: roll={polishing_workflow3_roll_sequence_deg[3]:.0f}deg 返回 {polishing_workflow3_roll_sequence_deg[4]:.0f}deg"
+                        status = polishing_workflow3_status_text + "；" + status
+                    elif (
+                        polishing_workflow3.stage == "returning_from_high"
+                        and completed_motion_mode == "polishing_workflow3_lens_return_high"
+                    ):
+                        polishing_workflow3.active = False
+                        polishing_workflow3.stage = "finished"
+                        polishing_workflow3_status_text = "finished"
+                        status = (
+                            "打磨步骤3完成：z=0.460m，roll 已按 90→20→90→150→90 执行完成；"
+                            f"双滑块保持在 {polishing_workflow3_contact_spacing:.4f}m。"
+                        )
+                except Exception as exc:
+                    polishing_workflow3.clear()
+                    polishing_workflow4.clear()
+                    polishing_workflow3_status_text = "failed"
+                    status = f"打磨步骤3失败：{exc}"
+
+            if polishing_workflow4.active:
+                try:
+                    if (
+                        polishing_workflow4.stage == "opening_sliders"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow4_pose(polishing_workflow4_roll_sequence_deg[0]),
+                            "polishing_workflow4_lens_raise_center",
+                        )
+                        polishing_workflow4.stage = "moving_raise_center"
+                        polishing_workflow4_status_text = "步骤4-2/7: 双轮保持张开，凸透镜中心原地上升到 z=0.500m，roll=90deg"
+                        status = polishing_workflow4_status_text + "；" + status
+                    elif (
+                        polishing_workflow4.stage == "moving_raise_center"
+                        and completed_motion_mode == "polishing_workflow4_lens_raise_center"
+                    ):
+                        desired_wheel_slider_spacing = polishing_workflow4_contact_spacing
+                        polishing_workflow4.stage = "closing_sliders"
+                        polishing_workflow4_status_text = f"步骤4-3/7: 双滑块圆心距离合拢到 {polishing_workflow4_contact_spacing:.4f}m"
+                        status = polishing_workflow4_status_text
+                    elif (
+                        polishing_workflow4.stage == "closing_sliders"
+                        and abs(actual_wheel_slider_spacing - polishing_workflow4_contact_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow4_pose(polishing_workflow4_roll_sequence_deg[1]),
+                            "polishing_workflow4_lens_roll_low",
+                        )
+                        polishing_workflow4.stage = "rotating_low"
+                        polishing_workflow4_status_text = f"步骤4-4/7: 凸透镜 roll={polishing_workflow4_roll_sequence_deg[0]:.0f}deg -> {polishing_workflow4_roll_sequence_deg[1]:.0f}deg"
+                        status = polishing_workflow4_status_text + "；" + status
+                    elif (
+                        polishing_workflow4.stage == "rotating_low"
+                        and completed_motion_mode == "polishing_workflow4_lens_roll_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow4_pose(polishing_workflow4_roll_sequence_deg[2]),
+                            "polishing_workflow4_lens_return_low",
+                        )
+                        polishing_workflow4.stage = "returning_from_low"
+                        polishing_workflow4_status_text = f"步骤4-4/7: roll={polishing_workflow4_roll_sequence_deg[1]:.0f}deg 返回 {polishing_workflow4_roll_sequence_deg[2]:.0f}deg"
+                        status = polishing_workflow4_status_text + "；" + status
+                    elif (
+                        polishing_workflow4.stage == "returning_from_low"
+                        and completed_motion_mode == "polishing_workflow4_lens_return_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow4_pose(polishing_workflow4_roll_sequence_deg[3]),
+                            "polishing_workflow4_lens_roll_high",
+                        )
+                        polishing_workflow4.stage = "rotating_high"
+                        polishing_workflow4_status_text = f"步骤4-5/7: 凸透镜 roll={polishing_workflow4_roll_sequence_deg[2]:.0f}deg -> {polishing_workflow4_roll_sequence_deg[3]:.0f}deg"
+                        status = polishing_workflow4_status_text + "；" + status
+                    elif (
+                        polishing_workflow4.stage == "rotating_high"
+                        and completed_motion_mode == "polishing_workflow4_lens_roll_high"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow4_pose(polishing_workflow4_roll_sequence_deg[4]),
+                            "polishing_workflow4_lens_return_high",
+                        )
+                        polishing_workflow4.stage = "returning_from_high"
+                        polishing_workflow4_status_text = f"步骤4-5/7: roll={polishing_workflow4_roll_sequence_deg[3]:.0f}deg 返回 {polishing_workflow4_roll_sequence_deg[4]:.0f}deg"
+                        status = polishing_workflow4_status_text + "；" + status
+                    elif (
+                        polishing_workflow4.stage == "returning_from_high"
+                        and completed_motion_mode == "polishing_workflow4_lens_return_high"
+                    ):
+                        desired_wheel_slider_spacing = wheel_slider_max_spacing
+                        polishing_workflow4.stage = "opening_sliders_after"
+                        polishing_workflow4_status_text = "步骤4-6/7: roll 序列完成，双滑块重新完全打开"
+                        status = polishing_workflow4_status_text
+                    elif (
+                        polishing_workflow4.stage == "opening_sliders_after"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        polishing_workflow4.active = False
+                        polishing_workflow4.stage = "finished"
+                        polishing_workflow4_status_text = "finished"
+                        status = (
+                            "打磨步骤4完成：z=0.500m，双滑块已按 0.1650m 接触执行 "
+                            "90→20→90→150→90，并已重新完全打开。"
+                        )
+                except Exception as exc:
+                    polishing_workflow4.clear()
+                    polishing_workflow4_status_text = "failed"
+                    status = f"打磨步骤4失败：{exc}"
+
+            if polishing_workflow5.active:
+                try:
+                    if (
+                        polishing_workflow5.stage == "opening_sliders"
+                        and abs(actual_wheel_slider_spacing - wheel_slider_max_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow5_pose(polishing_workflow5_roll_sequence_deg[0]),
+                            "polishing_workflow5_lens_lower_center",
+                        )
+                        polishing_workflow5.stage = "moving_lower_center"
+                        polishing_workflow5_status_text = "步骤5-2/6: 双轮保持张开，凸透镜中心原地下降到 z=0.380m，roll=90deg"
+                        status = polishing_workflow5_status_text + "；" + status
+                    elif (
+                        polishing_workflow5.stage == "moving_lower_center"
+                        and completed_motion_mode == "polishing_workflow5_lens_lower_center"
+                    ):
+                        desired_wheel_slider_spacing = polishing_workflow5_contact_spacing
+                        polishing_workflow5.stage = "closing_sliders"
+                        polishing_workflow5_status_text = f"步骤5-3/6: 双滑块圆心距离合拢到 {polishing_workflow5_contact_spacing:.4f}m"
+                        status = polishing_workflow5_status_text
+                    elif (
+                        polishing_workflow5.stage == "closing_sliders"
+                        and abs(actual_wheel_slider_spacing - polishing_workflow5_contact_spacing) <= wheel_slider_completion_tolerance
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow5_pose(polishing_workflow5_roll_sequence_deg[1]),
+                            "polishing_workflow5_lens_roll_low",
+                        )
+                        polishing_workflow5.stage = "rotating_low"
+                        polishing_workflow5_status_text = f"步骤5-4/6: 凸透镜 roll={polishing_workflow5_roll_sequence_deg[0]:.0f}deg -> {polishing_workflow5_roll_sequence_deg[1]:.0f}deg"
+                        status = polishing_workflow5_status_text + "；" + status
+                    elif (
+                        polishing_workflow5.stage == "rotating_low"
+                        and completed_motion_mode == "polishing_workflow5_lens_roll_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow5_pose(polishing_workflow5_roll_sequence_deg[2]),
+                            "polishing_workflow5_lens_return_low",
+                        )
+                        polishing_workflow5.stage = "returning_from_low"
+                        polishing_workflow5_status_text = f"步骤5-4/6: roll={polishing_workflow5_roll_sequence_deg[1]:.0f}deg 返回 {polishing_workflow5_roll_sequence_deg[2]:.0f}deg"
+                        status = polishing_workflow5_status_text + "；" + status
+                    elif (
+                        polishing_workflow5.stage == "returning_from_low"
+                        and completed_motion_mode == "polishing_workflow5_lens_return_low"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow5_pose(polishing_workflow5_roll_sequence_deg[3]),
+                            "polishing_workflow5_lens_roll_high",
+                        )
+                        polishing_workflow5.stage = "rotating_high"
+                        polishing_workflow5_status_text = f"步骤5-5/6: 凸透镜 roll={polishing_workflow5_roll_sequence_deg[2]:.0f}deg -> {polishing_workflow5_roll_sequence_deg[3]:.0f}deg"
+                        status = polishing_workflow5_status_text + "；" + status
+                    elif (
+                        polishing_workflow5.stage == "rotating_high"
+                        and completed_motion_mode == "polishing_workflow5_lens_roll_high"
+                    ):
+                        status = start_locked_lens_center_motion(
+                            polishing_workflow5_pose(polishing_workflow5_roll_sequence_deg[4]),
+                            "polishing_workflow5_lens_return_high",
+                        )
+                        polishing_workflow5.stage = "returning_from_high"
+                        polishing_workflow5_status_text = f"步骤5-5/6: roll={polishing_workflow5_roll_sequence_deg[3]:.0f}deg 返回 {polishing_workflow5_roll_sequence_deg[4]:.0f}deg"
+                        status = polishing_workflow5_status_text + "；" + status
+                    elif (
+                        polishing_workflow5.stage == "returning_from_high"
+                        and completed_motion_mode == "polishing_workflow5_lens_return_high"
+                    ):
+                        polishing_workflow5.active = False
+                        polishing_workflow5.stage = "finished"
+                        polishing_workflow5_status_text = "finished"
+                        status = (
+                            "打磨步骤5完成：z=0.380m，roll 已按 90→30→90→150→90 执行完成；"
+                            f"双滑块保持在 {polishing_workflow5_contact_spacing:.4f}m。"
+                        )
+                except Exception as exc:
+                    polishing_workflow5.clear()
+                    polishing_workflow5_status_text = "failed"
+                    status = f"打磨步骤5失败：{exc}"
 
             dx = compensated_target_pos() - data.site(site_id).xpos
             twist[:3] = Kpos * dx / integration_dt
@@ -2843,11 +3735,28 @@ def run_controller(args: argparse.Namespace) -> int:
             mujoco.mj_jacSite(model, data, jac_full[:3], jac_full[3:], site_id)
             jac = jac_full[:, dof_ids]
             try:
-                jac_dls = jac.T @ np.linalg.solve(jac @ jac.T + diag, np.eye(6))
-                dq_arm = jac_dls @ twist
-                q_arm = data.qpos[qpos_ids]
-                nullspace_projector = eye_arm - jac_dls @ jac
-                dq_arm += nullspace_projector @ (Kn * (arm_posture_reference - q_arm))
+                pure_tool_roll_angle = pure_tool_roll_local_z_error(dx)
+                if pure_tool_roll_angle is not None and tool_roll_control_index is not None:
+                    dq_arm = np.zeros(len(dof_ids))
+                    dq_arm[tool_roll_control_index] = Kori * pure_tool_roll_angle / integration_dt
+                else:
+                    weighted_jac_t = joint_metric_inverse[:, None] * jac.T
+                    jac_dls = weighted_jac_t @ np.linalg.solve(jac @ weighted_jac_t + diag, np.eye(6))
+                    dq_arm = jac_dls @ twist
+                    q_arm = data.qpos[qpos_ids]
+                    nullspace_projector = eye_arm - jac_dls @ jac
+                    locked_motion = (
+                        motion.active_mode == "locked_lens_center_pose"
+                        or motion.active_mode.startswith("polishing_workflow1_lens_") or motion.active_mode.startswith("polishing_workflow2_lens_") or motion.active_mode.startswith("polishing_workflow3_lens_") or motion.active_mode.startswith("polishing_workflow4_lens_") or motion.active_mode.startswith("polishing_workflow5_lens_")
+                    )
+                    release_locked_nullspace = (
+                        locked_motion
+                        and motion.current_goal is not None
+                        and float(np.linalg.norm(dx)) < locked_move_nullspace_release_position_error
+                        and orientation_error() < locked_move_nullspace_release_orientation_error
+                    )
+                    if not release_locked_nullspace:
+                        dq_arm += nullspace_projector @ (nullspace_gains * (arm_posture_reference - q_arm))
             except np.linalg.LinAlgError:
                 dq_arm = np.zeros(len(dof_ids))
                 status = "警告：Jacobian 求解失败，已跳过当前控制步。"
@@ -2868,6 +3777,12 @@ def run_controller(args: argparse.Namespace) -> int:
             )
             data.ctrl[actuator_ids] = q[qpos_ids]
             mujoco.mj_step(model, data)
+            spacing_delta = desired_wheel_slider_spacing - actual_wheel_slider_spacing
+            max_spacing_delta = wheel_slider_speed * dt
+            actual_wheel_slider_spacing = apply_wheel_slider_spacing(
+                actual_wheel_slider_spacing
+                + float(np.clip(spacing_delta, -max_spacing_delta, max_spacing_delta))
+            )
 
             actual_gripper = actual_gripper_value()
             now_for_gripper = time.time()
@@ -2924,8 +3839,14 @@ def run_controller(args: argparse.Namespace) -> int:
             last_gripper_sample_time = now_for_gripper
 
             if motion.protect_opposite_wheel_contact and guarded_arm_qpos is not None:
-                clearance = locked_opposite_wheel_clearance(workpiece_lock)
-                if clearance is not None and clearance < -locked_move_in_place_max_penetration:
+                clearance = locked_polishing_wheel2_min_clearance(workpiece_lock)
+                reference_clearance = motion.protected_wheel_clearance_reference
+                if (
+                    clearance is not None
+                    and reference_clearance is not None
+                    and clearance < reference_clearance - locked_move_in_place_max_penetration
+                ):
+                    additional_penetration = reference_clearance - clearance
                     data.qpos[qpos_ids] = guarded_arm_qpos
                     data.qvel[dof_ids] = 0.0
                     data.ctrl[actuator_ids] = guarded_arm_qpos
@@ -2934,10 +3855,16 @@ def run_controller(args: argparse.Namespace) -> int:
                     motion.clear()
                     arm_posture_reference = np.array(guarded_arm_qpos, copy=True)
                     status = (
-                        "接触原位旋转已安全停止：预测待磨件进入打磨轮 "
-                        f"{-clearance * 1000.0:.2f}mm，超过允许值 "
+                        "接触原位旋转已安全停止：相对启动时的双轮压入基准又增加 "
+                        f"{additional_penetration * 1000.0:.2f}mm，超过允许增量 "
                         f"{locked_move_in_place_max_penetration * 1000.0:.2f}mm。"
                     )
+                    if polishing_workflow1.active:
+                        polishing_workflow1.clear()
+                        polishing_workflow1_status_text = "failed: 旋转时额外压入超过限制"
+                    if polishing_workflow2.active:
+                        polishing_workflow2.clear()
+                        polishing_workflow2_status_text = "failed: 旋转时额外压入超过限制"
             apply_workpiece_lock(workpiece_lock)
 
             if show_trail:
@@ -2966,6 +3893,11 @@ def run_controller(args: argparse.Namespace) -> int:
                     gripper_blocked=bool(gripper_blocked),
                     gripper_close_limit=float(gripper_close_limit),
                     gripper_auto_closing=bool(auto_gripper_close),
+                    has_tool_roll=bool(tool_roll_control_index is not None),
+                    tool_roll_angle_rad=float(current_tool_roll_angle() or 0.0),
+                    tool_roll_angle_deg=float(math.degrees(current_tool_roll_angle() or 0.0)),
+                    tool_roll_target_angle_rad=float(desired_tool_roll_angle),
+                    tool_roll_target_angle_deg=float(math.degrees(desired_tool_roll_angle)),
                     mocap_z_comp=float(shared.mocap_z_comp),
                     viewer_running=True,
                     waypoint_index=int(motion.active_goal_index),
@@ -2977,7 +3909,13 @@ def run_controller(args: argparse.Namespace) -> int:
                     lens_center_pose_deg=lens_center_pose_deg,
                     align_step1_error_text=align_error_text,
                     workpiece_lock_status=workpiece_lock.mode,
-                    scan_status=scan_status_text,
+                    polishing_workflow1_status=polishing_workflow1_status_text,
+                    polishing_workflow2_status=polishing_workflow2_status_text,
+                    polishing_workflow3_status=polishing_workflow3_status_text,
+                    polishing_workflow4_status=polishing_workflow4_status_text,
+                    polishing_workflow5_status=polishing_workflow5_status_text,
+                    wheel_slider_spacing=float(actual_wheel_slider_spacing),
+                    wheel_slider_target_spacing=float(desired_wheel_slider_spacing),
                 )
                 last_state_time = now
 

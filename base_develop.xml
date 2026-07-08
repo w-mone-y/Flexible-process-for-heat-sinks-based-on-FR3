@@ -1,7 +1,8 @@
-<?xml version="1.0" ?>
-<mujoco model="fr3_with_gripper_full_close">
-  <compiler angle="radian" meshdir="assets" autolimits="true"/>
-  <option integrator="implicitfast" cone="elliptic" impratio="5" density="0" viscosity="0"/>
+<?xml version="1.0"?>
+<mujoco model="base_develop_fr3_mocap_follow">
+  <compiler angle="radian" meshdir="franka_fr3/assets" autolimits="true"/>
+  <option integrator="implicitfast" cone="elliptic" impratio="5" density="0" viscosity="0" gravity="0 0 0"/>
+
   <default>
     <default class="fr3">
       <joint damping="0.21" armature="0.195" frictionloss="1.137"/>
@@ -12,24 +13,19 @@
       <default class="collision">
         <geom type="mesh" group="3" mass="0" density="0"/>
         <default class="fingertip_pad_collision_1">
-          <geom contype="1" conaffinity="1" type="box" size="0.0085 0.004 0.0085" pos="0 0.0055 0.0445"
-                condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+          <geom contype="1" conaffinity="1" type="box" size="0.0085 0.004 0.0085" pos="0 0.0055 0.0445" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
         </default>
         <default class="fingertip_pad_collision_2">
-          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.003" pos="0.0055 0.002 0.05"
-                condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.003" pos="0.0055 0.002 0.05" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
         </default>
         <default class="fingertip_pad_collision_3">
-          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.003" pos="-0.0055 0.002 0.05"
-                condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.003" pos="-0.0055 0.002 0.05" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
         </default>
         <default class="fingertip_pad_collision_4">
-          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.0035" pos="0.0055 0.002 0.0395"
-                condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.0035" pos="0.0055 0.002 0.0395" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
         </default>
         <default class="fingertip_pad_collision_5">
-          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.0035" pos="-0.0055 0.002 0.0395"
-                condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.0035" pos="-0.0055 0.002 0.0395" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
         </default>
       </default>
       <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4"/>
@@ -38,7 +34,11 @@
       </default>
     </default>
   </default>
+
   <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
     <material name="black" rgba=".2 .2 .2 1"/>
     <material name="white" rgba="1 1 1 1"/>
     <material name="red" rgba="1 0.072272 0.039546 1"/>
@@ -46,6 +46,8 @@
     <material name="button_green" rgba="0.102241 0.571125 0.102242 1"/>
     <material name="button_red" rgba="0.520996 0.008023 0.013702 1"/>
     <material name="button_blue" rgba="0.024157 0.445201 0.737911 1"/>
+    <material name="off_white" rgba="0.901961 0.921569 0.929412 1"/>
+
     <mesh file="link0_0.obj"/>
     <mesh file="link0_1.obj"/>
     <mesh file="link0_2.obj"/>
@@ -82,7 +84,9 @@
     <mesh name="link5_coll" file="link5.stl"/>
     <mesh name="link6_coll" file="link6.stl"/>
     <mesh name="link7_coll" file="link7.stl"/>
-    <material name="off_white" rgba="0.901961 0.921569 0.929412 1"/>
+
+    <material name="grasp_ellipsoid_purple" rgba="0.55 0.20 0.90 1" specular="0.25" shininess="0.35"/>
+    <mesh name="double_sphere_overlap_mesh" file="../../双球重叠体.STL" scale="0.001 0.001 0.001"/>
     <mesh name="hand_c" file="hand.stl"/>
     <mesh name="hand_0" file="hand_0.obj"/>
     <mesh name="hand_1" file="hand_1.obj"/>
@@ -92,7 +96,25 @@
     <mesh name="finger_0" file="finger_0.obj"/>
     <mesh name="finger_1" file="finger_1.obj"/>
   </asset>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
   <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" friction="1.2 0.1 0.01"/>
+
+    <body name="target" pos="0.45 0 0.45" quat="0 1 0 0" mocap="true">
+      <geom name="target_box" type="box" size="0.025 0.025 0.025" contype="0" conaffinity="0" rgba="0.6 0.3 0.3 0.35" group="1"/>
+      <site name="target_site" type="sphere" size="0.007" rgba="0 0 1 1" group="1"/>
+      <geom name="target_axis_x" type="capsule" fromto="0 0 0 0.09 0 0" size="0.003" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="target_axis_y" type="capsule" fromto="0 0 0 0 0.09 0" size="0.003" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="target_axis_z" type="capsule" fromto="0 0 0 0 0 0.09" size="0.003" rgba="0 0.35 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+    </body>
+
     <body name="base" childclass="fr3">
       <body name="fr3_link0">
         <geom mesh="link0_0" material="black" class="visual"/>
@@ -152,32 +174,26 @@
                       <geom mesh="link7_2" material="white" class="visual"/>
                       <geom mesh="link7_3" material="black" class="visual"/>
                       <geom name="fr3_link7_collision" class="collision" mesh="link7_coll"/>
-                      <body name="hand" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
+                      <body name="wrist_spin_mount" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
+                        <joint name="wrist_spin" type="hinge" axis="0 0 1" limited="false" damping="0.05" armature="0.01"/>
+                        <body name="hand" pos="0 0 0" quat="1 0 0 0">
                         <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
-                        <joint name="tool_roll_joint" type="hinge" axis="0 0 1" limited="false"
-                               damping="0.02" armature="0.001" frictionloss="0"/>
                         <geom mesh="hand_0" material="off_white" class="visual"/>
                         <geom mesh="hand_1" material="black" class="visual"/>
                         <geom mesh="hand_2" material="black" class="visual"/>
                         <geom mesh="hand_3" material="white" class="visual"/>
                         <geom mesh="hand_4" material="off_white" class="visual"/>
                         <geom mesh="hand_c" class="collision"/>
-                        <site name="attachment_site" pos="0 0 0.107" type="sphere" size="0.007" rgba="1 1 0 1"/>
-                        <geom name="ee_axis_x" type="capsule" fromto="0 0 0.107 0.09 0 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
-                        <geom name="ee_axis_y" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                        <site name="attachment_site" pos="0 0 0.107" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
+                        <geom name="ee_axis_x" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                        <geom name="ee_axis_y" type="capsule" fromto="0 0 0.107 -0.09 0 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
                         <geom name="ee_axis_z" type="capsule" fromto="0 0 0.107 0 0 0.197" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
-
-                        <!--The virtual handle used with cylinder.
-                        The radius of it is slightly larger than the radius of the handle on the ellipsoid.
-                        -->
-                        <geom name="ee_axis_z_center_cylinder" type="cylinder" pos="0 0 0.127" size="0.006 0.05" rgba="0 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
                         <body name="left_finger" pos="0 0 0.0584">
                           <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
                           <joint name="finger_joint1" class="finger"/>
                           <geom mesh="finger_0" material="off_white" class="visual"/>
                           <geom mesh="finger_1" material="black" class="visual"/>
-                          <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1"
-                                solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                          <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
                           <geom class="fingertip_pad_collision_1"/>
                           <geom class="fingertip_pad_collision_2"/>
                           <geom class="fingertip_pad_collision_3"/>
@@ -189,15 +205,39 @@
                           <joint name="finger_joint2" class="finger"/>
                           <geom mesh="finger_0" material="off_white" class="visual"/>
                           <geom mesh="finger_1" material="black" class="visual"/>
-                          <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1"
-                                solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                          <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
                           <geom class="fingertip_pad_collision_1"/>
                           <geom class="fingertip_pad_collision_2"/>
                           <geom class="fingertip_pad_collision_3"/>
                           <geom class="fingertip_pad_collision_4"/>
                           <geom class="fingertip_pad_collision_5"/>
                         </body>
+
+                        <!-- Fixed workpiece grasp phase mount.
+                             This changes only the relative gripping phase around the common blue Z axis:
+                             object Z / handle remains collinear with the gripper blue axis, while object X/Y
+                             are rotated +90 deg relative to the gripper X/Y. -->
+                        <body name="grasp_direction_mount" pos="0 0 0" quat="0.7071068 0 0 0.7071068">
+                          <body name="attached_grasp_ellipsoid" pos="0 0 0.277" quat="1 0 0 0">
+                            <geom name="attached_grasp_ellipsoid_geom" type="ellipsoid" size="0.050 0.050 0.020" quat="0.7071068 0 -0.7071068 0"
+                                  material="grasp_ellipsoid_purple" rgba="0.55 0.20 0.90 0" density="0" contype="0" conaffinity="0"/>
+                            <geom name="attached_grasp_ellipsoid_visual_mesh" type="mesh" mesh="double_sphere_overlap_mesh"
+                                  pos="-0.02 -0.05 -0.05" quat="1 0 0 0"
+                                  material="grasp_ellipsoid_purple" density="0" contype="0" conaffinity="0" group="2"/>
+                            <geom name="attached_grasp_ellipsoid_axis_origin" type="sphere" size="0.006" rgba="1 1 1 1" density="0"
+                                  contype="0" conaffinity="0" group="1"/>
+                            <geom name="attached_grasp_ellipsoid_axis_x" type="capsule" fromto="0 0 0 0.080 0 0" size="0.005" density="0"
+                                  rgba="1 0 0 1" contype="0" conaffinity="0" group="1"/>
+                            <geom name="attached_grasp_ellipsoid_axis_y" type="capsule" fromto="0 0 0 0 0.080 0" size="0.005" density="0"
+                                  rgba="0 1 0 1" contype="0" conaffinity="0" group="1"/>
+                            <geom name="attached_grasp_ellipsoid_axis_z" type="capsule" fromto="0 0 0 0 0 0.080" size="0.005" density="0"
+                                  rgba="0 0.35 1 1" contype="0" conaffinity="0" group="1"/>
+                            <geom name="attached_grasp_ellipsoid_handle" type="cylinder" fromto="0 0 -0.17 0 0 0" size="0.004"
+                                  material="grasp_ellipsoid_purple" density="0" contype="0" conaffinity="0"/>
+                          </body>
+                        </body>
                       </body>
+                    </body>
                     </body>
                   </body>
                 </body>
@@ -208,15 +248,18 @@
       </body>
     </body>
   </worldbody>
+
   <tendon>
     <fixed name="split">
       <joint joint="finger_joint1" coef="0.5"/>
       <joint joint="finger_joint2" coef="0.5"/>
     </fixed>
   </tendon>
+
   <equality>
     <joint joint1="finger_joint1" joint2="finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
   </equality>
+
   <actuator>
     <position class="fr3" name="fr3_joint1" joint="fr3_joint1" kp="4500" kv="450"/>
     <position class="fr3" name="fr3_joint2" joint="fr3_joint2" kp="4500" kv="450"/>
@@ -225,18 +268,21 @@
     <position class="fr3" name="fr3_joint5" joint="fr3_joint5" kp="2000" kv="200"/>
     <position class="fr3" name="fr3_joint6" joint="fr3_joint6" kp="2000" kv="200"/>
     <position class="fr3" name="fr3_joint7" joint="fr3_joint7" kp="2000" kv="200"/>
-    <position name="tool_roll" joint="tool_roll_joint" kp="2000" kv="200"
-              forcerange="-12 12" ctrllimited="false"/>
+    <position name="wrist_spin" joint="wrist_spin" kp="800" kv="80" ctrlrange="-1000000 1000000" forcerange="-40 40"/>
     <general name="gripper" tendon="split" dyntype="none" gaintype="fixed" biastype="affine" forcerange="-500 500" ctrlrange="0 255" gainprm="0.01568627451 0 0" biasprm="0 -100 -10"/>
   </actuator>
+
   <contact>
     <exclude body1="fr3_link0" body2="fr3_link1"/>
+    <exclude body1="fr3_link7" body2="wrist_spin_mount"/>
+    <exclude body1="wrist_spin_mount" body2="hand"/>
     <exclude body1="fr3_link7" body2="hand"/>
     <exclude body1="hand" body2="left_finger"/>
     <exclude body1="hand" body2="right_finger"/>
     <exclude body1="left_finger" body2="right_finger"/>
   </contact>
+
   <keyframe>
-    <key name="home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04" ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 255"/>
+    <key name="home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0 0" ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 0"/>
   </keyframe>
 </mujoco>
