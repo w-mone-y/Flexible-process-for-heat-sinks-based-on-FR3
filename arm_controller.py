@@ -1,9 +1,10 @@
 """Single-arm controller for one prefixed FR3: 5D IK + deadband hold +
 wrist_spin decoupling + persistent setpoint + skill-step executor + parking.
 
-Tool support: if the model defines `{name}_screwdriver_tip` / `{name}_press_face`
-sites (rigidly mounted on the hand), their fixed offsets in the EE-site frame
-are read at init and exposed for tool-offset inverse pose generation.
+Tool support: `tool_offsets` maps a TCP name to its fixed offset in the
+EE-site frame. For arms with permanently mounted tools it can be filled at
+init; for Arm2 the offsets are (re)written by Arm2ToolManager whenever a
+quick-change tool is docked or returned.
 """
 from __future__ import annotations
 
@@ -84,18 +85,9 @@ class ArmController:
         self.mujoco.mju_mat2Quat(home_quat, data.site(self.site_id).xmat)
         self.home_pose = pose_cmd(np.array(data.site(self.site_id).xpos, copy=True), home_quat)
 
-        # Tool offsets in the EE-site frame (constant: tools are welded to the
-        # hand). Only present on arms whose XML defines the tool sites.
+        # TCP offsets in the EE-site frame. Empty until a tool provides them:
+        # for Arm2, Arm2ToolManager rewrites this dict on every dock/undock.
         self.tool_offsets: dict[str, np.ndarray] = {}
-        site_pos = np.asarray(data.site(self.site_id).xpos, dtype=float)
-        site_mat = np.asarray(data.site(self.site_id).xmat, dtype=float).reshape(3, 3)
-        for tool, site_name in (("screwdriver", p + "screwdriver_tip"), ("press", p + "press_face")):
-            try:
-                tid = int(model.site(site_name).id)
-            except KeyError:
-                continue
-            tool_pos = np.asarray(data.site(tid).xpos, dtype=float)
-            self.tool_offsets[tool] = site_mat.T @ (tool_pos - site_pos)
 
         # Skill executor state.
         self.steps: list[SkillStep] = []

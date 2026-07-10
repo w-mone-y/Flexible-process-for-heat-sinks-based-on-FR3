@@ -121,8 +121,8 @@ SCREW_TIGHT_RGBA = (0.1, 0.8, 0.2, 1.0)
 
 # Component lifecycle: raw (scattered on Table1) -> staged (in the type slot on
 # Table2) -> placed (dropped into the board slot) -> assembled (press-fitted)
-# -> pass / fail (inspection verdict).
-COMPONENT_STATES = ("raw", "staged", "placed", "assembled", "pass", "fail")
+# -> waiting_for_inspection -> pass / fail (inspection verdict).
+COMPONENT_STATES = ("raw", "staged", "placed", "assembled", "waiting_for_inspection", "pass", "fail")
 
 # Feed rack scatter region (Table1 top face, world frame).
 RACK_CENTER = np.asarray([-1.02, 0.35], dtype=float)
@@ -156,6 +156,69 @@ class ObjectManager:
         self.component_status: dict[str, str] = {name: "raw" for name in COMPONENT_INSTANCES}
         self.screw_state: dict[str, str] = {}
 
+        # Table3 positioning-fixture holding welds (design doc section 7): one
+        # `fixture_hold_<instance>` weld per component; active = the board
+        # fixture clamps the part so it survives Arm2's tool swap.
+        self.fixture_weld_ids: dict[str, int] = {}
+        for name in COMPONENT_INSTANCES:
+            try:
+                self.fixture_weld_ids[name] = int(model.equality(f"fixture_hold_{name}").id)
+            except KeyError as exc:
+                raise RuntimeError(f"XML incomplete: missing weld fixture_hold_{name}") from exc
+        self.fixture_station_body_id = int(model.body("assembly_station").id)
+
+        # Table2 buffer slots (design doc section 6): one slot per component type.
+        self.buffer_slots: dict[str, dict[str, Any]] = {
+            site: {
+                "slot_id": site,
+                "occupied": False,
+                "component_id": "",
+                "component_type": "",
+                "ready_for_arm2": False,
+            }
+            for site in TYPE_STAGING_SITE.values()
+        }
+
+    # -- Table2 buffer slots --------------------------------------------------
+    def mark_buffer_staged(self, component: str) -> None:
+        spec = self.spec_of(component)
+        site = TYPE_STAGING_SITE[spec.type_name]
+        self.buffer_slots[site] = {
+            "slot_id": site,
+            "occupied": True,
+            "component_id": component,
+            "component_type": spec.type_name,
+            "ready_for_arm2": True,
+        }
+
+    def mark_buffer_picked(self, component: str) -> None:
+        spec = self.spec_of(component)
+        site = TYPE_STAGING_SITE[spec.type_name]
+        if self.buffer_slots[site].get("component_id") == component:
+            self.buffer_slots[site] = {
+                "slot_id": site,
+                "occupied": False,
+                "component_id": "",
+                "component_type": "",
+                "ready_for_arm2": False,
+            }
+
+    def buffer_ready_for(self, component: str) -> bool:
+        spec = self.spec_of(component)
+        site = TYPE_STAGING_SITE[spec.type_name]
+        slot = self.buffer_slots.get(site, {})
+        return bool(slot.get("ready_for_arm2")) and slot.get("component_id") == component
+
+    def reset_buffer_slots(self) -> None:
+        for site in self.buffer_slots:
+            self.buffer_slots[site] = {
+                "slot_id": site,
+                "occupied": False,
+                "component_id": "",
+                "component_type": "",
+                "ready_for_arm2": False,
+            }
+
     # -- state machine ------------------------------------------------------
     def set_status(self, instance: str, status: str) -> None:
         if status not in COMPONENT_STATES:
@@ -168,6 +231,41 @@ class ObjectManager:
     def reset_statuses(self) -> None:
         for name in self.component_status:
             self.component_status[name] = "raw"
+        self.reset_buffer_slots()
+        self.fixture_release_all()
+
+    # -- Table3 positioning fixture (temporary holding) ------------------------
+    def fixture_hold(self, instance: str) -> None:
+        """Clamp the component at its CURRENT pose relative to the assembly
+        station (logic-weld simplification of the board fixture). Keeps the
+        part in place while Arm2 returns the gripper and fetches the driver."""
+        eq_id = self.fixture_weld_ids[instance]
+        st_pos = np.asarray(self.data.body(self.fixture_station_body_id).xpos, dtype=float)
+        st_mat = np.asarray(self.data.body(self.fixture_station_body_id).xmat, dtype=float).reshape(3, 3)
+        body_id = self.component_body_ids[instance]
+        obj_pos = np.asarray(self.data.body(body_id).xpos, dtype=float)
+        obj_mat = np.asarray(self.data.body(body_id).xmat, dtype=float).reshape(3, 3)
+        rel = st_mat.T @ (obj_pos - st_pos)
+        rel_mat = st_mat.T @ obj_mat
+        import mujoco
+
+        rel_quat = np.zeros(4, dtype=float)
+        mujoco.mju_mat2Quat(rel_quat, rel_mat.reshape(9))
+        self.model.eq_data[eq_id, :] = 0.0
+        self.model.eq_data[eq_id, 3:6] = rel
+        self.model.eq_data[eq_id, 6:10] = rel_quat
+        self.model.eq_data[eq_id, 10] = 1.0
+        self.data.eq_active[eq_id] = 1
+
+    def fixture_release(self, instance: str) -> None:
+        self.data.eq_active[self.fixture_weld_ids[instance]] = 0
+
+    def fixture_held(self, instance: str) -> bool:
+        return bool(self.data.eq_active[self.fixture_weld_ids[instance]])
+
+    def fixture_release_all(self) -> None:
+        for name in self.fixture_weld_ids:
+            self.fixture_release(name)
 
     # -- screws ---------------------------------------------------------------
     def set_screw_state(self, screw: str, state: str) -> None:
@@ -238,7 +336,9 @@ class ObjectManager:
 
     def perturb_component(self, instance: str, dx: float = 0.008, dy: float = 0.006, dyaw_deg: float = 10.0) -> None:
         """Misalignment fault injection: nudge an already-placed component so
-        the next inspection fails on position error and triggers re-pressing."""
+        the next inspection fails on position error and triggers re-pressing.
+        Models a fixture slip, so any holding weld is released first."""
+        self.fixture_release(instance)
         pos, yaw = self.perceive(instance)
         self.teleport(
             instance,

@@ -385,57 +385,23 @@
                       <body name="arm2_wrist_spin_mount" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
                         <joint name="arm2_wrist_spin" type="hinge" axis="0 0 1" limited="false" damping="0.05" armature="0.01"/>
                         <body name="arm2_hand" pos="0 0 0" quat="1 0 0 0">
-                          <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
-                          <geom mesh="hand_0" material="off_white" class="visual"/>
-                          <geom mesh="hand_1" material="black" class="visual"/>
-                          <geom mesh="hand_2" material="black" class="visual"/>
-                          <geom mesh="hand_3" material="white" class="visual"/>
-                          <geom mesh="hand_4" material="off_white" class="visual"/>
-                          <geom mesh="hand_c" class="collision"/>
+                          <!-- Arm2 has NO permanently mounted gripper: the
+                               flange carries an automatic tool changer MASTER
+                               plate. Quick-change tools (gripper-press combo /
+                               electric screwdriver, stored on arm2_tool_rack)
+                               dock here via equality welds; arm2_tool_mount_site
+                               is the docking reference. attachment_site stays at
+                               the legacy 0.107 TCP so the 5D IK is unchanged. -->
+                          <inertial mass="0.45" pos="0 0 0.01" diaginertia="0.0006 0.0006 0.0008"/>
                           <site name="arm2_attachment_site" pos="0 0 0.107" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
                           <geom name="arm2_ee_axis_x" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
                           <geom name="arm2_ee_axis_y" type="capsule" fromto="0 0 0.107 -0.09 0 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
                           <geom name="arm2_ee_axis_z" type="capsule" fromto="0 0 0.107 0 0 0.197" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
-                          <!-- Arm2 composite end effector (core process arm):
-                               electric screwdriver (side-mounted, tip site for
-                               tool-offset alignment) + press head (opposite
-                               side, face site). Visual-only geoms; masses are
-                               negligible and contacts disabled so the control
-                               law and gripper are unaffected. -->
-                          <body name="arm2_tool_mount" pos="0 0 0">
-                            <geom name="arm2_driver_bracket" type="capsule" fromto="0.030 0 0.055 0.070 0 0.070" size="0.006" rgba="0.25 0.25 0.28 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <geom name="arm2_screwdriver_body" type="cylinder" size="0.0075 0.032" pos="0.070 0 0.102" rgba="0.15 0.35 0.75 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <geom name="arm2_screwdriver_collar" type="cylinder" size="0.009 0.004" pos="0.070 0 0.136" rgba="0.9 0.75 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <geom name="arm2_screwdriver_bit" type="cylinder" size="0.0022 0.011" pos="0.070 0 0.148" rgba="0.85 0.85 0.88 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <site name="arm2_screwdriver_tip" type="sphere" size="0.003" pos="0.070 0 0.159" rgba="1 0.6 0.1 0.9" group="1"/>
-                            <geom name="arm2_press_bracket" type="capsule" fromto="-0.030 0 0.055 -0.070 0 0.070" size="0.006" rgba="0.25 0.25 0.28 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <geom name="arm2_press_shaft" type="cylinder" size="0.005 0.030" pos="-0.070 0 0.102" rgba="0.30 0.32 0.35 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <geom name="arm2_press_plate" type="box" size="0.014 0.014 0.004" pos="-0.070 0 0.138" rgba="0.93 0.88 0.76 1" density="0" contype="0" conaffinity="0" group="1"/>
-                            <site name="arm2_press_face" type="sphere" size="0.003" pos="-0.070 0 0.143" rgba="0.2 0.9 0.6 0.9" group="1"/>
-                          </body>
-                          <body name="arm2_left_finger" pos="0 0 0.0584">
-                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
-                            <joint name="arm2_finger_joint1" class="finger"/>
-                            <geom mesh="finger_0" material="off_white" class="visual"/>
-                            <geom mesh="finger_1" material="black" class="visual"/>
-                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
-                            <geom class="fingertip_pad_collision_1"/>
-                            <geom class="fingertip_pad_collision_2"/>
-                            <geom class="fingertip_pad_collision_3"/>
-                            <geom class="fingertip_pad_collision_4"/>
-                            <geom class="fingertip_pad_collision_5"/>
-                          </body>
-                          <body name="arm2_right_finger" pos="0 0 0.0584" quat="0 0 0 1">
-                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
-                            <joint name="arm2_finger_joint2" class="finger"/>
-                            <geom mesh="finger_0" material="off_white" class="visual"/>
-                            <geom mesh="finger_1" material="black" class="visual"/>
-                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
-                            <geom class="fingertip_pad_collision_1"/>
-                            <geom class="fingertip_pad_collision_2"/>
-                            <geom class="fingertip_pad_collision_3"/>
-                            <geom class="fingertip_pad_collision_4"/>
-                            <geom class="fingertip_pad_collision_5"/>
+                          <body name="arm2_tool_changer_master" pos="0 0 0">
+                            <geom name="arm2_tool_master_ring" type="cylinder" size="0.030 0.002" pos="0 0 0.002" rgba="0.35 0.37 0.40 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_tool_master_plate" type="cylinder" size="0.024 0.002" pos="0 0 0.006" rgba="0.55 0.57 0.60 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_tool_master_pin" type="cylinder" size="0.004 0.0012" pos="0.016 0 0.0092" rgba="0.9 0.75 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <site name="arm2_tool_mount_site" type="sphere" size="0.004" pos="0 0 0.010" rgba="0.9 0.5 0.1 0.8" group="1"/>
                           </body>
                         </body>
                       </body>
@@ -592,6 +558,72 @@
       <geom name="breaker_1_vis_top" class="component_visual" type="box" size="0.012 0.009 0.002" pos="0 0 0.026" material="off_white"/>
     </body>
 
+    <!-- Arm2 tool rack: holds the two quick-change tools adapter-side UP so
+         the flange master plate can dock top-down. Geoms are contactless
+         (docking exclusivity is owned by the tool-changer logic, matching the
+         zone-mutex philosophy of the rest of the cell). -->
+    <body name="arm2_tool_rack" pos="-0.05 0.56 0">
+      <geom name="arm2_tool_rack_base" type="box" size="0.135 0.05 0.02" pos="0 0 0.02" rgba="0.35 0.37 0.40 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_tool_rack_post_a" type="box" size="0.011 0.011 0.078" pos="-0.08 0.045 0.118" rgba="0.45 0.47 0.50 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_tool_rack_arm_a" type="box" size="0.008 0.028 0.004" pos="-0.08 0.017 0.192" rgba="0.45 0.47 0.50 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_tool_rack_post_b" type="box" size="0.011 0.011 0.078" pos="0.08 0.045 0.118" rgba="0.45 0.47 0.50 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_tool_rack_arm_b" type="box" size="0.008 0.028 0.004" pos="0.08 0.017 0.192" rgba="0.45 0.47 0.50 1" contype="0" conaffinity="0" group="1"/>
+      <site name="arm2_gripper_press_rack_site" type="sphere" size="0.004" pos="-0.08 0 0.20" rgba="0.2 0.8 0.9 0.7" group="1"/>
+      <site name="arm2_screwdriver_rack_site" type="sphere" size="0.004" pos="0.08 0 0.20" rgba="0.2 0.8 0.9 0.7" group="1"/>
+    </body>
+
+    <!-- Tool A: grip + press-fit combo tool. Local +z runs from the adapter
+         face (z=0, docks onto arm2_tool_mount_site) toward the fingertips at
+         z=0.097. Docked, the grasp TCP therefore lands exactly on the legacy
+         arm2_attachment_site TCP (flange+0.107) so all pick/place math is
+         unchanged. Two TCPs: arm2_grasp_tcp (finger closing center) and
+         arm2_press_tcp (spring-loaded press anvil between the fingers; the
+         5 mm anvil-to-fingertip offset stands in for the axial compliance).
+         Parked on the rack flipped (quat 0 1 0 0) adapter-up. Geoms are
+         contactless: grasping/pressing are weld+logic simulated. -->
+    <body name="arm2_gripper_press_tool" pos="-0.13 0.56 0.20" quat="0 1 0 0" gravcomp="1">
+      <freejoint name="arm2_gripper_press_tool_free"/>
+      <inertial mass="0.25" pos="0 0 0.03" diaginertia="0.0004 0.0004 0.0002"/>
+      <site name="arm2_gripper_press_mount_site" type="sphere" size="0.003" pos="0 0 0" rgba="0.95 0.55 0.1 0.9" group="1"/>
+      <geom name="arm2_gp_adapter" type="cylinder" size="0.024 0.003" pos="0 0 0.003" rgba="0.62 0.64 0.67 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_gp_body" type="box" size="0.020 0.027 0.018" pos="0 0 0.026" rgba="0.20 0.24 0.30 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_gp_press_spring" type="cylinder" size="0.0055 0.006" pos="0 0 0.050" rgba="0.75 0.65 0.25 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_gp_press_rod" type="cylinder" size="0.004 0.017" pos="0 0 0.071" rgba="0.45 0.47 0.50 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_gp_press_plate" type="cylinder" size="0.010 0.002" pos="0 0 0.090" rgba="0.93 0.88 0.76 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="arm2_press_tcp" type="sphere" size="0.0025" pos="0 0 0.092" rgba="0.2 0.9 0.6 0.9" group="1"/>
+      <site name="arm2_grasp_tcp" type="sphere" size="0.0025" pos="0 0 0.097" rgba="0.2 0.7 0.95 0.9" group="1"/>
+      <body name="arm2_gripper_left_finger" pos="0 0 0.052">
+        <inertial mass="0.01" pos="0 0.0065 0.0225" diaginertia="2e-6 2e-6 1e-6"/>
+        <joint name="arm2_gripper_finger_joint1" class="finger"/>
+        <geom name="arm2_gp_left_finger" type="box" size="0.0045 0.003 0.0225" pos="0 0.0045 0.0225" rgba="0.88 0.90 0.92 1" density="0" contype="0" conaffinity="0" group="1"/>
+        <geom name="arm2_gp_left_tip" type="box" size="0.0045 0.002 0.006" pos="0 0.002 0.039" rgba="0.25 0.25 0.28 1" density="0" contype="0" conaffinity="0" group="1"/>
+      </body>
+      <body name="arm2_gripper_right_finger" pos="0 0 0.052" quat="0 0 0 1">
+        <inertial mass="0.01" pos="0 0.0065 0.0225" diaginertia="2e-6 2e-6 1e-6"/>
+        <joint name="arm2_gripper_finger_joint2" class="finger"/>
+        <geom name="arm2_gp_right_finger" type="box" size="0.0045 0.003 0.0225" pos="0 0.0045 0.0225" rgba="0.88 0.90 0.92 1" density="0" contype="0" conaffinity="0" group="1"/>
+        <geom name="arm2_gp_right_tip" type="box" size="0.0045 0.002 0.006" pos="0 0.002 0.039" rgba="0.25 0.25 0.28 1" density="0" contype="0" conaffinity="0" group="1"/>
+      </body>
+    </body>
+
+    <!-- Tool B: automatic electric screwdriver. On-axis spindle: the bit tip
+         (arm2_screwdriver_tcp) lies on the tool z axis, so the wrist_spin
+         joint turns the bit in place (no orbit compensation needed); the red
+         side marker makes the spindle rotation visible. Axial float is a
+         logical simplification (fixed tip clearance handled in the skill). -->
+    <body name="arm2_screwdriver_tool" pos="0.03 0.56 0.20" quat="0 1 0 0" gravcomp="1">
+      <freejoint name="arm2_screwdriver_tool_free"/>
+      <inertial mass="0.2" pos="0 0 0.05" diaginertia="0.0004 0.0004 0.0001"/>
+      <site name="arm2_screwdriver_mount_site" type="sphere" size="0.003" pos="0 0 0" rgba="0.95 0.55 0.1 0.9" group="1"/>
+      <geom name="arm2_sd_adapter" type="cylinder" size="0.024 0.003" pos="0 0 0.003" rgba="0.62 0.64 0.67 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_screwdriver_body" type="cylinder" size="0.011 0.026" pos="0 0 0.032" rgba="0.15 0.35 0.75 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_screwdriver_collar" type="cylinder" size="0.0125 0.003" pos="0 0 0.061" rgba="0.9 0.75 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_screwdriver_marker" type="box" size="0.005 0.0015 0.002" pos="0.013 0 0.055" rgba="0.9 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_screwdriver_shaft" type="cylinder" size="0.0035 0.021" pos="0 0 0.085" rgba="0.30 0.32 0.35 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_screwdriver_bit" type="cylinder" size="0.0022 0.008" pos="0 0 0.114" rgba="0.85 0.85 0.88 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="arm2_screwdriver_tcp" type="sphere" size="0.002" pos="0 0 0.1225" rgba="1 0.6 0.1 0.9" group="1"/>
+    </body>
+
   </worldbody>
 
   <tendon>
@@ -601,9 +633,10 @@
       <joint joint="arm1_finger_joint2" coef="0.5"/>
     </fixed>
 
+    <!-- arm2 gripper actuator drives the quick-change tool A fingers. -->
     <fixed name="arm2_split">
-      <joint joint="arm2_finger_joint1" coef="0.5"/>
-      <joint joint="arm2_finger_joint2" coef="0.5"/>
+      <joint joint="arm2_gripper_finger_joint1" coef="0.5"/>
+      <joint joint="arm2_gripper_finger_joint2" coef="0.5"/>
     </fixed>
 
     <fixed name="arm3_split">
@@ -620,12 +653,26 @@
     <weld name="arm1_grasp_terminal_1" body1="arm1_hand" body2="terminal_1" active="false" solref="0.004 1"/>
     <weld name="arm1_grasp_button_1" body1="arm1_hand" body2="button_1" active="false" solref="0.004 1"/>
     <weld name="arm1_grasp_breaker_1" body1="arm1_hand" body2="breaker_1" active="false" solref="0.004 1"/>
-    <joint joint1="arm2_finger_joint1" joint2="arm2_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <joint joint1="arm2_gripper_finger_joint1" joint2="arm2_gripper_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
     <weld name="arm2_grasp_relay_1" body1="arm2_hand" body2="relay_1" active="false" solref="0.004 1"/>
     <weld name="arm2_grasp_relay_2" body1="arm2_hand" body2="relay_2" active="false" solref="0.004 1"/>
     <weld name="arm2_grasp_terminal_1" body1="arm2_hand" body2="terminal_1" active="false" solref="0.004 1"/>
     <weld name="arm2_grasp_button_1" body1="arm2_hand" body2="button_1" active="false" solref="0.004 1"/>
     <weld name="arm2_grasp_breaker_1" body1="arm2_hand" body2="breaker_1" active="false" solref="0.004 1"/>
+    <!-- Automatic tool changer welds: tool<->flange master (mounted state) and
+         tool<->rack slot (parked state). Exactly one of each pair is active at
+         any time; Arm2ToolManager flips them at dock/undock events. -->
+    <weld name="arm2_toolchange_gripper_press" body1="arm2_hand" body2="arm2_gripper_press_tool" active="false" solref="0.004 1"/>
+    <weld name="arm2_toolchange_screwdriver" body1="arm2_hand" body2="arm2_screwdriver_tool" active="false" solref="0.004 1"/>
+    <weld name="arm2_rack_gripper_press" body1="arm2_tool_rack" body2="arm2_gripper_press_tool" active="true" solref="0.004 1"/>
+    <weld name="arm2_rack_screwdriver" body1="arm2_tool_rack" body2="arm2_screwdriver_tool" active="true" solref="0.004 1"/>
+    <!-- Table3 fixture holding welds: activated after press-fit so the part
+         stays put while Arm2 swaps to the screwdriver (plan section 7). -->
+    <weld name="fixture_hold_relay_1" body1="assembly_station" body2="relay_1" active="false" solref="0.004 1"/>
+    <weld name="fixture_hold_relay_2" body1="assembly_station" body2="relay_2" active="false" solref="0.004 1"/>
+    <weld name="fixture_hold_terminal_1" body1="assembly_station" body2="terminal_1" active="false" solref="0.004 1"/>
+    <weld name="fixture_hold_button_1" body1="assembly_station" body2="button_1" active="false" solref="0.004 1"/>
+    <weld name="fixture_hold_breaker_1" body1="assembly_station" body2="breaker_1" active="false" solref="0.004 1"/>
     <joint joint1="arm3_finger_joint1" joint2="arm3_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
     <weld name="arm3_grasp_relay_1" body1="arm3_hand" body2="relay_1" active="false" solref="0.004 1"/>
     <weld name="arm3_grasp_relay_2" body1="arm3_hand" body2="relay_2" active="false" solref="0.004 1"/>
@@ -683,9 +730,6 @@
     <exclude body1="arm2_fr3_link7" body2="arm2_wrist_spin_mount"/>
     <exclude body1="arm2_wrist_spin_mount" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link7" body2="arm2_hand"/>
-    <exclude body1="arm2_hand" body2="arm2_left_finger"/>
-    <exclude body1="arm2_hand" body2="arm2_right_finger"/>
-    <exclude body1="arm2_left_finger" body2="arm2_right_finger"/>
 
     <exclude body1="arm3_fr3_link0" body2="arm3_fr3_link1"/>
     <exclude body1="arm3_fr3_link7" body2="arm3_wrist_spin_mount"/>
@@ -705,11 +749,7 @@
     <exclude body1="arm1_fr3_link7" body2="arm2_fr3_link7"/>
     <exclude body1="arm1_wrist_spin_mount" body2="arm2_wrist_spin_mount"/>
     <exclude body1="arm1_hand" body2="arm2_hand"/>
-    <exclude body1="arm1_left_finger" body2="arm2_left_finger"/>
-    <exclude body1="arm1_right_finger" body2="arm2_right_finger"/>
-    <exclude body1="arm1_hand" body2="arm2_left_finger"/>
     <exclude body1="arm2_hand" body2="arm1_left_finger"/>
-    <exclude body1="arm1_hand" body2="arm2_right_finger"/>
     <exclude body1="arm2_hand" body2="arm1_right_finger"/>
     <exclude body1="arm1_hand" body2="arm2_fr3_link5"/>
     <exclude body1="arm2_hand" body2="arm1_fr3_link5"/>
@@ -720,34 +760,18 @@
     <exclude body1="arm1_hand" body2="arm2_wrist_spin_mount"/>
     <exclude body1="arm2_hand" body2="arm1_wrist_spin_mount"/>
     <exclude body1="arm1_left_finger" body2="arm2_hand"/>
-    <exclude body1="arm2_left_finger" body2="arm1_hand"/>
-    <exclude body1="arm1_left_finger" body2="arm2_right_finger"/>
-    <exclude body1="arm2_left_finger" body2="arm1_right_finger"/>
     <exclude body1="arm1_left_finger" body2="arm2_fr3_link5"/>
-    <exclude body1="arm2_left_finger" body2="arm1_fr3_link5"/>
     <exclude body1="arm1_left_finger" body2="arm2_fr3_link6"/>
-    <exclude body1="arm2_left_finger" body2="arm1_fr3_link6"/>
     <exclude body1="arm1_left_finger" body2="arm2_fr3_link7"/>
-    <exclude body1="arm2_left_finger" body2="arm1_fr3_link7"/>
     <exclude body1="arm1_left_finger" body2="arm2_wrist_spin_mount"/>
-    <exclude body1="arm2_left_finger" body2="arm1_wrist_spin_mount"/>
     <exclude body1="arm1_right_finger" body2="arm2_hand"/>
-    <exclude body1="arm2_right_finger" body2="arm1_hand"/>
-    <exclude body1="arm1_right_finger" body2="arm2_left_finger"/>
-    <exclude body1="arm2_right_finger" body2="arm1_left_finger"/>
     <exclude body1="arm1_right_finger" body2="arm2_fr3_link5"/>
-    <exclude body1="arm2_right_finger" body2="arm1_fr3_link5"/>
     <exclude body1="arm1_right_finger" body2="arm2_fr3_link6"/>
-    <exclude body1="arm2_right_finger" body2="arm1_fr3_link6"/>
     <exclude body1="arm1_right_finger" body2="arm2_fr3_link7"/>
-    <exclude body1="arm2_right_finger" body2="arm1_fr3_link7"/>
     <exclude body1="arm1_right_finger" body2="arm2_wrist_spin_mount"/>
-    <exclude body1="arm2_right_finger" body2="arm1_wrist_spin_mount"/>
     <exclude body1="arm1_fr3_link5" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link5" body2="arm1_hand"/>
-    <exclude body1="arm1_fr3_link5" body2="arm2_left_finger"/>
     <exclude body1="arm2_fr3_link5" body2="arm1_left_finger"/>
-    <exclude body1="arm1_fr3_link5" body2="arm2_right_finger"/>
     <exclude body1="arm2_fr3_link5" body2="arm1_right_finger"/>
     <exclude body1="arm1_fr3_link5" body2="arm2_fr3_link6"/>
     <exclude body1="arm2_fr3_link5" body2="arm1_fr3_link6"/>
@@ -757,9 +781,7 @@
     <exclude body1="arm2_fr3_link5" body2="arm1_wrist_spin_mount"/>
     <exclude body1="arm1_fr3_link6" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link6" body2="arm1_hand"/>
-    <exclude body1="arm1_fr3_link6" body2="arm2_left_finger"/>
     <exclude body1="arm2_fr3_link6" body2="arm1_left_finger"/>
-    <exclude body1="arm1_fr3_link6" body2="arm2_right_finger"/>
     <exclude body1="arm2_fr3_link6" body2="arm1_right_finger"/>
     <exclude body1="arm1_fr3_link6" body2="arm2_fr3_link5"/>
     <exclude body1="arm2_fr3_link6" body2="arm1_fr3_link5"/>
@@ -769,9 +791,7 @@
     <exclude body1="arm2_fr3_link6" body2="arm1_wrist_spin_mount"/>
     <exclude body1="arm1_fr3_link7" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link7" body2="arm1_hand"/>
-    <exclude body1="arm1_fr3_link7" body2="arm2_left_finger"/>
     <exclude body1="arm2_fr3_link7" body2="arm1_left_finger"/>
-    <exclude body1="arm1_fr3_link7" body2="arm2_right_finger"/>
     <exclude body1="arm2_fr3_link7" body2="arm1_right_finger"/>
     <exclude body1="arm1_fr3_link7" body2="arm2_fr3_link5"/>
     <exclude body1="arm2_fr3_link7" body2="arm1_fr3_link5"/>
@@ -873,12 +893,8 @@
     <exclude body1="arm2_fr3_link7" body2="arm3_fr3_link7"/>
     <exclude body1="arm2_wrist_spin_mount" body2="arm3_wrist_spin_mount"/>
     <exclude body1="arm2_hand" body2="arm3_hand"/>
-    <exclude body1="arm2_left_finger" body2="arm3_left_finger"/>
-    <exclude body1="arm2_right_finger" body2="arm3_right_finger"/>
     <exclude body1="arm2_hand" body2="arm3_left_finger"/>
-    <exclude body1="arm3_hand" body2="arm2_left_finger"/>
     <exclude body1="arm2_hand" body2="arm3_right_finger"/>
-    <exclude body1="arm3_hand" body2="arm2_right_finger"/>
     <exclude body1="arm2_hand" body2="arm3_fr3_link5"/>
     <exclude body1="arm3_hand" body2="arm2_fr3_link5"/>
     <exclude body1="arm2_hand" body2="arm3_fr3_link6"/>
@@ -887,36 +903,20 @@
     <exclude body1="arm3_hand" body2="arm2_fr3_link7"/>
     <exclude body1="arm2_hand" body2="arm3_wrist_spin_mount"/>
     <exclude body1="arm3_hand" body2="arm2_wrist_spin_mount"/>
-    <exclude body1="arm2_left_finger" body2="arm3_hand"/>
     <exclude body1="arm3_left_finger" body2="arm2_hand"/>
-    <exclude body1="arm2_left_finger" body2="arm3_right_finger"/>
-    <exclude body1="arm3_left_finger" body2="arm2_right_finger"/>
-    <exclude body1="arm2_left_finger" body2="arm3_fr3_link5"/>
     <exclude body1="arm3_left_finger" body2="arm2_fr3_link5"/>
-    <exclude body1="arm2_left_finger" body2="arm3_fr3_link6"/>
     <exclude body1="arm3_left_finger" body2="arm2_fr3_link6"/>
-    <exclude body1="arm2_left_finger" body2="arm3_fr3_link7"/>
     <exclude body1="arm3_left_finger" body2="arm2_fr3_link7"/>
-    <exclude body1="arm2_left_finger" body2="arm3_wrist_spin_mount"/>
     <exclude body1="arm3_left_finger" body2="arm2_wrist_spin_mount"/>
-    <exclude body1="arm2_right_finger" body2="arm3_hand"/>
     <exclude body1="arm3_right_finger" body2="arm2_hand"/>
-    <exclude body1="arm2_right_finger" body2="arm3_left_finger"/>
-    <exclude body1="arm3_right_finger" body2="arm2_left_finger"/>
-    <exclude body1="arm2_right_finger" body2="arm3_fr3_link5"/>
     <exclude body1="arm3_right_finger" body2="arm2_fr3_link5"/>
-    <exclude body1="arm2_right_finger" body2="arm3_fr3_link6"/>
     <exclude body1="arm3_right_finger" body2="arm2_fr3_link6"/>
-    <exclude body1="arm2_right_finger" body2="arm3_fr3_link7"/>
     <exclude body1="arm3_right_finger" body2="arm2_fr3_link7"/>
-    <exclude body1="arm2_right_finger" body2="arm3_wrist_spin_mount"/>
     <exclude body1="arm3_right_finger" body2="arm2_wrist_spin_mount"/>
     <exclude body1="arm2_fr3_link5" body2="arm3_hand"/>
     <exclude body1="arm3_fr3_link5" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link5" body2="arm3_left_finger"/>
-    <exclude body1="arm3_fr3_link5" body2="arm2_left_finger"/>
     <exclude body1="arm2_fr3_link5" body2="arm3_right_finger"/>
-    <exclude body1="arm3_fr3_link5" body2="arm2_right_finger"/>
     <exclude body1="arm2_fr3_link5" body2="arm3_fr3_link6"/>
     <exclude body1="arm3_fr3_link5" body2="arm2_fr3_link6"/>
     <exclude body1="arm2_fr3_link5" body2="arm3_fr3_link7"/>
@@ -926,9 +926,7 @@
     <exclude body1="arm2_fr3_link6" body2="arm3_hand"/>
     <exclude body1="arm3_fr3_link6" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link6" body2="arm3_left_finger"/>
-    <exclude body1="arm3_fr3_link6" body2="arm2_left_finger"/>
     <exclude body1="arm2_fr3_link6" body2="arm3_right_finger"/>
-    <exclude body1="arm3_fr3_link6" body2="arm2_right_finger"/>
     <exclude body1="arm2_fr3_link6" body2="arm3_fr3_link5"/>
     <exclude body1="arm3_fr3_link6" body2="arm2_fr3_link5"/>
     <exclude body1="arm2_fr3_link6" body2="arm3_fr3_link7"/>
@@ -938,9 +936,7 @@
     <exclude body1="arm2_fr3_link7" body2="arm3_hand"/>
     <exclude body1="arm3_fr3_link7" body2="arm2_hand"/>
     <exclude body1="arm2_fr3_link7" body2="arm3_left_finger"/>
-    <exclude body1="arm3_fr3_link7" body2="arm2_left_finger"/>
     <exclude body1="arm2_fr3_link7" body2="arm3_right_finger"/>
-    <exclude body1="arm3_fr3_link7" body2="arm2_right_finger"/>
     <exclude body1="arm2_fr3_link7" body2="arm3_fr3_link5"/>
     <exclude body1="arm3_fr3_link7" body2="arm2_fr3_link5"/>
     <exclude body1="arm2_fr3_link7" body2="arm3_fr3_link6"/>
@@ -951,11 +947,15 @@
   </contact>
 
   <keyframe>
+    <!-- qpos layout: arm1 (7+spin+2 fingers) | arm2 (7+spin, NO fingers: the
+         gripper lives on quick-change tool A) | arm3 (7+spin+2 fingers) |
+         5 free components (7 each) | tool A free+2 fingers | tool B free. -->
     <key name="home"
          qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
+               0 0 0 -1.57079 0 1.57079 -0.7853 0
                0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
-               0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
-               -1.08 0.29 0.121 1 0 0 0  -1.08 0.41 0.121 1 0 0 0  -0.96 0.41 0.111 0.7071068 0 0 0.7071068  -0.96 0.29 0.112 1 0 0 0  -1.02 0.35 0.126 1 0 0 0"
+               -1.08 0.29 0.121 1 0 0 0  -1.08 0.41 0.121 1 0 0 0  -0.96 0.41 0.111 0.7071068 0 0 0.7071068  -0.96 0.29 0.112 1 0 0 0  -1.02 0.35 0.126 1 0 0 0
+               -0.13 0.56 0.20 0 1 0 0 0.04 0.04  0.03 0.56 0.20 0 1 0 0"
          ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 255
                0 0 0 -1.57079 0 1.57079 -0.7853 0 255
                0 0 0 -1.57079 0 1.57079 -0.7853 0 255"/>

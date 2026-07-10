@@ -3,7 +3,8 @@
 Layout (project plan section 3.2):
   left   Table1 feed rack (scattered parts) -> Arm1 (camera-guided feeding)
   center shared space                        -> Arm2 (core process arm:
-                                                gripper + press head + driver)
+                                                quick-change gripper-press +
+                                                electric screwdriver)
   right  inspection/rework                   -> Arm3 (inspection, rework)
 
 Per-component process chain (plan sections 5.1-5.4):
@@ -14,6 +15,7 @@ Modules:
   object_manager.py  component specs/orders/state machine + simulated camera
   skill_library.py   pose math + skill-step generators (incl. tool offsets)
   arm_controller.py  single-arm control law + skill executor + parking
+  arm2_tool_manager.py  Arm2 quick-change tool welds + get/return skills
   (this file)        shared state, HTTP/UI/terminal, scheduler, main loop
 
 Run:  mjpython multi_arm_line.py [--seed 42]
@@ -37,6 +39,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from arm2_tool_manager import Arm2ToolManager
 from arm_controller import ArmController
 from object_manager import (
     COMPONENT_INSTANCES,
@@ -73,10 +76,11 @@ MAX_REWORK_ROUNDS = 2
 # ---------------------------------------------------------------------------
 @dataclass
 class Stage:
-    name: str                  # feed_pick/feed_place/assemble_pick/assemble_place/press/screw/inspect
+    name: str                  # feed_pick/.../get_tool/return_tool/press/screw/inspect
     arm: str
     tokens: tuple[str, ...] = ()
     screw: str = ""
+    tool: str = ""             # gripper_press | screwdriver (tool-change stages)
     status: str = "pending"    # pending -> active -> done
 
 
@@ -107,15 +111,22 @@ class Job:
 
 
 def build_job_stages(job: Job) -> list[Stage]:
+    """Arm2 quick-change flow (design doc sections 5, 8):
+    get gripper_press -> pick/place/press/release/fixture -> return gripper_press
+    -> get screwdriver -> tighten screws -> return screwdriver -> inspect."""
     stages = [
         Stage("feed_pick", "arm1"),
         Stage("feed_place", "arm1", tokens=(ZONE_STAGING,)),
+        Stage("get_tool", "arm2", tool="gripper_press"),
         Stage("assemble_pick", "arm2", tokens=(ZONE_STAGING,)),
         Stage("assemble_place", "arm2", tokens=(ZONE_CENTRAL,)),
         Stage("press", "arm2", tokens=(ZONE_CENTRAL,)),
+        Stage("return_tool", "arm2", tool="gripper_press"),
+        Stage("get_tool", "arm2", tool="screwdriver"),
     ]
     for screw in job.screws:
         stages.append(Stage("screw", "arm2", tokens=(ZONE_CENTRAL,), screw=screw))
+    stages.append(Stage("return_tool", "arm2", tool="screwdriver"))
     if job.inspect:
         stages.append(Stage("inspect", "arm3", tokens=(ZONE_CENTRAL,)))
     return stages
@@ -544,6 +555,8 @@ class PipelineWorld:
                 self.slot_site_ids[name] = int(i)
         self.staging_site_ids = {name: int(model.site(name).id) for name in TYPE_STAGING_SITE.values()}
 
+        self.tool_mgr = Arm2ToolManager(model, data, arms["arm2"])
+
         self.jobs: list[Job] = []
         self.zone_owner: dict[str, str] = {ZONE_CENTRAL: "", ZONE_STAGING: ""}
         self.staging_owner: dict[str, str] = {name: "" for name in TYPE_STAGING_SITE.values()}
@@ -634,6 +647,9 @@ class PipelineWorld:
         self.jobs = []
         self.zone_owner = {ZONE_CENTRAL: "", ZONE_STAGING: ""}
         self.staging_owner = {name: "" for name in TYPE_STAGING_SITE.values()}
+        self.tool_mgr.reset_to_rack()
+        self.objects.fixture_release_all()
+        self.objects.reset_buffer_slots()
         self.order_id = ""
         self.order_done = False
         self.status = "stopped; all tasks cleared"
@@ -651,6 +667,12 @@ class PipelineWorld:
     # -- stage step builders -----------------------------------------------------
     def build_stage_steps(self, job: Job, stage: Stage) -> list[SkillStep]:
         spec = self.objects.spec_of(job.component)
+        if stage.name == "get_tool":
+            return self.tool_mgr.change_tool_steps(stage.tool)
+        if stage.name == "return_tool":
+            if self.tool_mgr.state["current_tool"] != stage.tool:
+                return []
+            return self.tool_mgr.return_tool_steps()
         if stage.name == "feed_pick":
             # Simulated camera perception of the scattered part on Table1.
             pos, yaw = self.objects.perceive(job.component)
@@ -666,25 +688,45 @@ class PipelineWorld:
                 job.component, spec, lambda: self.site_pose(site_id), job.attach_feed, loose_tol=True, release_dwell_s=0.4
             )
         if stage.name == "assemble_pick":
+            if self.tool_mgr.state["current_tool"] != "gripper_press":
+                raise RuntimeError("assemble_pick requires gripper_press tool")
+            site_name = TYPE_STAGING_SITE[spec.type_name]
+            print(f"[Arm2] Pick {job.component} from {site_name}", flush=True)
             pos, yaw = self.objects.perceive(job.component)
             steps, record = pick_steps(job.component, spec, pos, yaw)
             job.attach_asm = record
             return steps
         if stage.name == "assemble_place":
+            if self.tool_mgr.state["current_tool"] != "gripper_press":
+                raise RuntimeError("assemble_place requires gripper_press tool")
+            print(f"[Arm2] Move {job.component} to {job.slot}", flush=True)
             site_id = self.slot_site_ids[job.slot]
-            return place_steps(job.component, spec, lambda: self.site_pose(site_id), job.attach_asm)
+            return place_steps(job.component, spec, lambda: self.site_pose(site_id), job.attach_asm, keep_grip=True)
         if stage.name == "press":
             arm = self.arms[stage.arm]
+            if self.tool_mgr.state["current_tool"] != "gripper_press":
+                raise RuntimeError("press requires gripper_press tool")
             if "press" not in arm.tool_offsets:
                 raise RuntimeError(f"{stage.arm} has no press tool site")
             pos, _ = self.objects.perceive(job.component)
             _, slot_yaw = self.site_pose(self.slot_site_ids[job.slot])
             top = pos + np.asarray([0.0, 0.0, float(spec.half_height)])
-            return press_steps(job.component, top, slot_yaw, arm.tool_offsets["press"], (job.component, job.slot))
+            holding = arm.held_component == job.component
+            return press_steps(
+                job.component,
+                top,
+                slot_yaw,
+                arm.tool_offsets["press"],
+                (job.component, job.slot),
+                release_after=holding,
+            )
         if stage.name == "screw":
             arm = self.arms[stage.arm]
+            if self.tool_mgr.state["current_tool"] != "screwdriver":
+                raise RuntimeError("screw requires screwdriver tool")
             if "screwdriver" not in arm.tool_offsets:
                 raise RuntimeError(f"{stage.arm} has no screwdriver tool site")
+            print(f"[Arm2] Tighten {stage.screw}", flush=True)
             pos, yaw = self.site_pose(self.objects.screw_site_ids[stage.screw])
             return screw_steps(pos, yaw, arm.tool_offsets["screwdriver"])
         if stage.name == "inspect":
@@ -706,6 +748,9 @@ class PipelineWorld:
             owner = self.staging_owner[site_name]
             if owner and owner != job.job_id:
                 return False
+        if stage.name == "assemble_pick":
+            if not self.objects.buffer_ready_for(job.component):
+                return False
         for token in stage.tokens:
             if self.zone_owner[token] and self.zone_owner[token] != stage.arm:
                 return False
@@ -717,6 +762,10 @@ class PipelineWorld:
             arm.cancel()
         arm.manual_hold = False
         steps = self.build_stage_steps(job, stage)
+        if not steps:
+            stage.status = "done"
+            self.finish_stage(job, stage)
+            return
         for token in stage.tokens:
             self.zone_owner[token] = stage.arm
         stage.status = "active"
@@ -733,13 +782,22 @@ class PipelineWorld:
 
         if stage.name == "feed_place":
             self.objects.set_status(job.component, "staged")
-        elif stage.name == "assemble_pick" and job.staging_site:
-            self.staging_owner[job.staging_site] = ""
-            job.staging_site = ""
+            self.objects.mark_buffer_staged(job.component)
+        elif stage.name == "assemble_pick":
+            if job.staging_site:
+                self.staging_owner[job.staging_site] = ""
+                job.staging_site = ""
+            self.objects.mark_buffer_picked(job.component)
+            print("[Arm2] Component grasped", flush=True)
         elif stage.name == "assemble_place":
             self.objects.set_status(job.component, "placed")
+            print(f"[Arm2] Insert complete", flush=True)
         elif stage.name == "press":
             self.objects.set_status(job.component, "assembled")
+            print(f"[Arm2] Press-fit complete", flush=True)
+        elif stage.name == "return_tool" and stage.tool == "screwdriver":
+            self.objects.set_status(job.component, "waiting_for_inspection")
+            print("[Arm2] Assembly complete, waiting for Arm3 inspection", flush=True)
         elif stage.name == "screw":
             if stage.screw in self.fault_screws:
                 self.fault_screws.discard(stage.screw)
@@ -747,6 +805,7 @@ class PipelineWorld:
                 self.status = f"screw {stage.screw} fastening FAILED (injected fault)"
             else:
                 self.objects.set_screw_state(stage.screw, "tightened")
+                print(f"[Arm2] {stage.screw} tightened", flush=True)
         elif stage.name == "inspect":
             self.evaluate_inspection(job)
 
@@ -800,9 +859,14 @@ class PipelineWorld:
         insert_at = job.stage_idx + 1
         rework: list[Stage] = []
         if misaligned:
+            rework.append(Stage("get_tool", "arm2", tool="gripper_press"))
             rework.append(Stage("press", "arm2", tokens=(ZONE_CENTRAL,)))
-        for screw in loose:
-            rework.append(Stage("screw", "arm2", tokens=(ZONE_CENTRAL,), screw=screw))
+            rework.append(Stage("return_tool", "arm2", tool="gripper_press"))
+        if loose:
+            rework.append(Stage("get_tool", "arm2", tool="screwdriver"))
+            for screw in loose:
+                rework.append(Stage("screw", "arm2", tokens=(ZONE_CENTRAL,), screw=screw))
+            rework.append(Stage("return_tool", "arm2", tool="screwdriver"))
         rework.append(Stage("inspect", "arm3", tokens=(ZONE_CENTRAL,)))
         job.stages[insert_at:insert_at] = rework
 
@@ -822,6 +886,14 @@ class PipelineWorld:
             elif step.action == "press_seat":
                 component, slot = step.action_arg
                 self.press_seat(component, slot)
+            elif step.action == "tool_dock":
+                self.tool_mgr.dock(str(step.action_arg))
+            elif step.action == "tool_undock":
+                self.tool_mgr.undock(str(step.action_arg))
+            elif step.action == "fixture_hold":
+                instance = str(step.action_arg)
+                self.objects.fixture_hold(instance)
+                print("[Arm2] Component fixed by board fixture", flush=True)
 
         # 1. Advance running skills; finish stages.
         for name, arm in self.arms.items():

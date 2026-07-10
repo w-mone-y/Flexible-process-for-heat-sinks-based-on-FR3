@@ -196,6 +196,7 @@ class SkillStep:
     pose: Optional[PoseCommand] = None
     pose_factory: Optional[Callable[[], PoseCommand]] = None
     action: str = ""            # "" | close_gripper | open_gripper | attach | release | press_seat
+                                # | tool_dock | tool_undock | fixture_hold
     action_arg: Any = None
     spin_rad: float = 0.0       # rotate about the tool z axis after arrival
     spin_center: Optional[np.ndarray] = None  # world xy point of the spin axis (tool tip)
@@ -278,9 +279,13 @@ def place_steps(
     attach_record: dict[str, Any],
     loose_tol: bool = False,
     release_dwell_s: Optional[float] = None,
+    keep_grip: bool = False,
 ) -> list[SkillStep]:
-    """transfer -> place -> release -> retreat. Target pose is deferred so the
-    placement follows the site even if perception updates later."""
+    """transfer -> place -> [release] -> retreat. Target pose is deferred so the
+    placement follows the site even if perception updates later.
+
+    When keep_grip is True the gripper stays closed after placement (Arm2
+    insert-then-press flow: release happens in press_steps)."""
 
     def place_ee_pose() -> tuple[np.ndarray, np.ndarray]:
         target_pos, target_yaw = target_pose_getter()
@@ -297,12 +302,16 @@ def place_steps(
 
     dwell = float(spec.release_dwell_s) if release_dwell_s is None else float(release_dwell_s)
     pos_tol = 0.005 if loose_tol else 0.003
-    return [
+    steps = [
         SkillStep("transfer", pose_factory=transfer_pose_cmd),
         SkillStep("place", pose_factory=place_pose_cmd, pos_tol=pos_tol),
-        SkillStep("release", pose_factory=place_pose_cmd, action="release", action_arg=instance, dwell_s=dwell),
-        SkillStep("retreat", pose_factory=transfer_pose_cmd, dwell_s=0.2),
     ]
+    if not keep_grip:
+        steps.append(
+            SkillStep("release", pose_factory=place_pose_cmd, action="release", action_arg=instance, dwell_s=dwell)
+        )
+    steps.append(SkillStep("retreat", pose_factory=transfer_pose_cmd, dwell_s=0.2))
+    return steps
 
 
 def press_steps(
@@ -311,24 +320,49 @@ def press_steps(
     slot_yaw: float,
     press_offset_site: np.ndarray,
     snap_arg: Any,
+    release_after: bool = False,
 ) -> list[SkillStep]:
     """Press-fit process (plan: independent stage using the press head).
 
     The press face (a tool rigidly mounted next to the gripper) is aligned to
     the component top center, pushed down PRESS_DEPTH, held, then retracted.
     On the hold step the positioning-fixture snap action seats the component.
-    """
+
+    When release_after is True (Arm2 quick-change flow) the gripper opens,
+    the part is detached, and the board fixture weld is activated so the
+    component survives the subsequent tool swap."""
     quat = top_down_ee_quat(slot_yaw)
     top = np.asarray(component_top_pos, dtype=float)
     hover_ee = compute_tool_ee_pose(top + np.asarray([0.0, 0.0, PRESS_HOVER]), quat, press_offset_site)
     touch_ee = compute_tool_ee_pose(top + np.asarray([0.0, 0.0, 0.001]), quat, press_offset_site)
     press_ee = compute_tool_ee_pose(top - np.asarray([0.0, 0.0, PRESS_DEPTH]), quat, press_offset_site)
-    return [
+    steps = [
         SkillStep("press_approach", pose=pose_cmd(hover_ee, quat)),
         SkillStep("press_descend", pose=pose_cmd(touch_ee, quat), pos_tol=0.003),
-        SkillStep("press_hold", pose=pose_cmd(press_ee, quat), action="press_seat", action_arg=snap_arg, dwell_s=PRESS_HOLD_S, pos_tol=0.003),
+        SkillStep("press_hold", pose=pose_cmd(press_ee, quat), action="press_seat", action_arg=snap_arg, dwell_s=PRESS_HOLD_S, pos_tol=0.006, ori_tol=0.03),
         SkillStep("press_retreat", pose=pose_cmd(hover_ee, quat), dwell_s=0.1),
     ]
+    if release_after:
+        steps.extend(
+            [
+                SkillStep("press_release_open", pose=pose_cmd(hover_ee, quat), action="open_gripper", dwell_s=0.35),
+                SkillStep(
+                    "press_release_detach",
+                    pose=pose_cmd(hover_ee, quat),
+                    action="release",
+                    action_arg=instance,
+                    dwell_s=0.15,
+                ),
+                SkillStep(
+                    "fixture_hold",
+                    pose=pose_cmd(hover_ee, quat),
+                    action="fixture_hold",
+                    action_arg=instance,
+                    dwell_s=0.1,
+                ),
+            ]
+        )
+    return steps
 
 
 def screw_steps(
@@ -336,16 +370,18 @@ def screw_steps(
     screw_yaw: float,
     driver_offset_site: np.ndarray,
 ) -> list[SkillStep]:
-    """Electric-screwdriver fastening: the driver TIP (not the EE center) is
-    aligned over the screw, lowered onto it, then the wrist spins 2.5 turns
-    while the EE orbits so the tip stays on the screw axis."""
+    """Electric-screwdriver fastening: the driver TCP (bit tip) is aligned
+    over the screw, lowered onto it, then the wrist spins 2.5 turns. With the
+    quick-change screwdriver the bit is coaxial with the tool z axis, so the
+    spin turns the bit in place; spin_center still guards against any radial
+    TCP offset."""
     quat = top_down_ee_quat(screw_yaw)
     tip_touch = np.asarray(screw_pos, dtype=float) + np.asarray([0.0, 0.0, SCREW_TIP_CLEARANCE])
     hover_ee = compute_tool_ee_pose(tip_touch + np.asarray([0.0, 0.0, SCREW_HOVER]), quat, driver_offset_site)
     touch_ee = compute_tool_ee_pose(tip_touch, quat, driver_offset_site)
     center = np.asarray([float(screw_pos[0]), float(screw_pos[1])], dtype=float)
     return [
-        SkillStep("screw_approach", pose=pose_cmd(hover_ee, quat), action="close_gripper", action_arg=0.0),
+        SkillStep("screw_approach", pose=pose_cmd(hover_ee, quat)),
         SkillStep("screw_descend", pose=pose_cmd(touch_ee, quat), pos_tol=0.003),
         SkillStep(
             "screw_spin",
@@ -355,7 +391,7 @@ def screw_steps(
             dwell_s=0.2,
             pos_tol=0.003,
         ),
-        SkillStep("screw_retreat", pose=pose_cmd(hover_ee, quat), action="open_gripper", dwell_s=0.1),
+        SkillStep("screw_retreat", pose=pose_cmd(hover_ee, quat), dwell_s=0.1),
     ]
 
 
