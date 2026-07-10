@@ -1,0 +1,963 @@
+<?xml version="1.0"?>
+<mujoco model="multi_arm_line_fr3">
+  <compiler angle="radian" meshdir="franka_fr3/assets" autolimits="true"/>
+  <option integrator="implicitfast" cone="elliptic" impratio="5" density="0" viscosity="0" gravity="0 0 -9.81"/>
+
+  <default>
+    <default class="fr3">
+      <joint damping="0.21" armature="0.195" frictionloss="1.137"/>
+      <position inheritrange="1"/>
+      <default class="visual">
+        <geom type="mesh" group="2" contype="0" conaffinity="0"/>
+      </default>
+      <default class="collision">
+        <geom type="mesh" group="3" mass="0" density="0"/>
+        <default class="fingertip_pad_collision_1">
+          <geom contype="1" conaffinity="1" type="box" size="0.0085 0.004 0.0085" pos="0 0.0055 0.0445" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+        </default>
+        <default class="fingertip_pad_collision_2">
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.003" pos="0.0055 0.002 0.05" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+        </default>
+        <default class="fingertip_pad_collision_3">
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.003" pos="-0.0055 0.002 0.05" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+        </default>
+        <default class="fingertip_pad_collision_4">
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.0035" pos="0.0055 0.002 0.0395" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+        </default>
+        <default class="fingertip_pad_collision_5">
+          <geom contype="1" conaffinity="1" type="box" size="0.003 0.002 0.0035" pos="-0.0055 0.002 0.0395" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+        </default>
+      </default>
+      <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4"/>
+      <default class="finger">
+        <joint axis="0 1 0" type="slide" range="0 0.04" damping="10" armature="0.01" frictionloss="0"/>
+      </default>
+    </default>
+    <default class="workcell">
+      <geom type="box" contype="3" conaffinity="3" friction="1.0 0.005 0.0001"/>
+    </default>
+    <default class="component_collision">
+      <geom contype="2" conaffinity="2" condim="4" friction="1.0 0.005 0.0001" group="3"/>
+    </default>
+    <default class="component_visual">
+      <geom density="0" contype="0" conaffinity="0" group="2"/>
+    </default>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="black" rgba=".2 .2 .2 1"/>
+    <material name="white" rgba="1 1 1 1"/>
+    <material name="red" rgba="1 0.072272 0.039546 1"/>
+    <material name="gray" rgba="0.863156 0.863156 0.863157 1"/>
+    <material name="button_green" rgba="0.102241 0.571125 0.102242 1"/>
+    <material name="button_red" rgba="0.520996 0.008023 0.013702 1"/>
+    <material name="button_blue" rgba="0.024157 0.445201 0.737911 1"/>
+    <material name="off_white" rgba="0.901961 0.921569 0.929412 1"/>
+
+    <material name="rack_surface" rgba="0.55 0.42 0.28 1"/>
+    <material name="staging_surface" rgba="0.42 0.48 0.58 1"/>
+    <material name="station_surface" rgba="0.42 0.44 0.48 1"/>
+    <material name="rework_surface" rgba="0.55 0.30 0.25 1"/>
+    <material name="board_green" rgba="0.16 0.35 0.22 1" specular="0.2" shininess="0.3"/>
+    <material name="relay_blue" rgba="0.16 0.38 0.80 1"/>
+    <material name="relay_blue_light" rgba="0.35 0.55 0.90 1"/>
+    <material name="terminal_gray" rgba="0.72 0.72 0.74 1"/>
+    <material name="button_module_red" rgba="0.80 0.12 0.10 1"/>
+    <material name="breaker_gray" rgba="0.35 0.35 0.38 1"/>
+
+    <mesh file="link0_0.obj"/>
+    <mesh file="link0_1.obj"/>
+    <mesh file="link0_2.obj"/>
+    <mesh file="link0_3.obj"/>
+    <mesh file="link0_4.obj"/>
+    <mesh file="link0_5.obj"/>
+    <mesh file="link0_6.obj"/>
+    <mesh file="link1.obj"/>
+    <mesh file="link2.obj"/>
+    <mesh file="link3_0.obj"/>
+    <mesh file="link3_1.obj"/>
+    <mesh file="link4_0.obj"/>
+    <mesh file="link4_1.obj"/>
+    <mesh file="link5_0.obj"/>
+    <mesh file="link5_1.obj"/>
+    <mesh file="link5_2.obj"/>
+    <mesh file="link6_0.obj"/>
+    <mesh file="link6_1.obj"/>
+    <mesh file="link6_2.obj"/>
+    <mesh file="link6_3.obj"/>
+    <mesh file="link6_4.obj"/>
+    <mesh file="link6_5.obj"/>
+    <mesh file="link6_6.obj"/>
+    <mesh file="link6_7.obj"/>
+    <mesh file="link7_0.obj"/>
+    <mesh file="link7_1.obj"/>
+    <mesh file="link7_2.obj"/>
+    <mesh file="link7_3.obj"/>
+    <mesh name="link0_coll" file="link0.stl"/>
+    <mesh name="link1_coll" file="link1.stl"/>
+    <mesh name="link2_coll" file="link2.stl"/>
+    <mesh name="link3_coll" file="link3.stl"/>
+    <mesh name="link4_coll" file="link4.stl"/>
+    <mesh name="link5_coll" file="link5.stl"/>
+    <mesh name="link6_coll" file="link6.stl"/>
+    <mesh name="link7_coll" file="link7.stl"/>
+
+    <mesh name="hand_c" file="hand.stl"/>
+    <mesh name="hand_0" file="hand_0.obj"/>
+    <mesh name="hand_1" file="hand_1.obj"/>
+    <mesh name="hand_2" file="hand_2.obj"/>
+    <mesh name="hand_3" file="hand_3.obj"/>
+    <mesh name="hand_4" file="hand_4.obj"/>
+    <mesh name="finger_0" file="finger_0.obj"/>
+    <mesh name="finger_1" file="finger_1.obj"/>
+  </asset>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="90" elevation="-30"/>
+  </visual>
+
+  <worldbody>
+    <light pos="0 0.4 2.0" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" friction="1.2 0.1 0.01" contype="3" conaffinity="3"/>
+
+    <!-- Shared-space zone markers (visual only; mutex enforced in software). -->
+    <site name="zone_board" type="box" size="0.30 0.26 0.0008" pos="0.375 0.36 0.001" rgba="0.9 0.9 0.3 0.10" group="1"/>
+    <site name="zone_staging" type="box" size="0.20 0.20 0.0008" pos="-0.375 0.38 0.001" rgba="0.3 0.7 0.9 0.10" group="1"/>
+
+    <body name="arm1_target" pos="-0.75 0.45 0.45" quat="0 1 0 0" mocap="true">
+      <geom name="arm1_target_box" type="box" size="0.02 0.02 0.02" contype="0" conaffinity="0" rgba="0.6 0.3 0.3 0.3" group="1"/>
+      <site name="arm1_target_site" type="sphere" size="0.006" rgba="0 0 1 1" group="1"/>
+      <geom name="arm1_target_axis_x" type="capsule" fromto="0 0 0 0.07 0 0" size="0.0025" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm1_target_axis_y" type="capsule" fromto="0 0 0 0 0.07 0" size="0.0025" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm1_target_axis_z" type="capsule" fromto="0 0 0 0 0 0.07" size="0.0025" rgba="0 0.35 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+    </body>
+
+    <body name="arm2_target" pos="0 0.45 0.45" quat="0 1 0 0" mocap="true">
+      <geom name="arm2_target_box" type="box" size="0.02 0.02 0.02" contype="0" conaffinity="0" rgba="0.6 0.3 0.3 0.3" group="1"/>
+      <site name="arm2_target_site" type="sphere" size="0.006" rgba="0 0 1 1" group="1"/>
+      <geom name="arm2_target_axis_x" type="capsule" fromto="0 0 0 0.07 0 0" size="0.0025" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_target_axis_y" type="capsule" fromto="0 0 0 0 0.07 0" size="0.0025" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm2_target_axis_z" type="capsule" fromto="0 0 0 0 0 0.07" size="0.0025" rgba="0 0.35 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+    </body>
+
+    <body name="arm3_target" pos="0.75 0.45 0.45" quat="0 1 0 0" mocap="true">
+      <geom name="arm3_target_box" type="box" size="0.02 0.02 0.02" contype="0" conaffinity="0" rgba="0.6 0.3 0.3 0.3" group="1"/>
+      <site name="arm3_target_site" type="sphere" size="0.006" rgba="0 0 1 1" group="1"/>
+      <geom name="arm3_target_axis_x" type="capsule" fromto="0 0 0 0.07 0 0" size="0.0025" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm3_target_axis_y" type="capsule" fromto="0 0 0 0 0.07 0" size="0.0025" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <geom name="arm3_target_axis_z" type="capsule" fromto="0 0 0 0 0 0.07" size="0.0025" rgba="0 0.35 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+    </body>
+
+    <!-- Left: component feed rack (Arm1 territory). -->
+    <body name="feed_rack" pos="-1.02 0.35 0">
+      <geom name="feed_rack_top" class="workcell" size="0.13 0.11 0.05" pos="0 0 0.05" material="rack_surface"/>
+    </body>
+
+    <!-- Handover staging table between Arm1 and Arm2: a positioning fixture
+         with one dedicated slot per component type (colors match the parts).
+         Arm1 drops the scattered part here; Arm2 picks from a standard pose. -->
+    <body name="staging_table" pos="-0.375 0.38 0">
+      <geom name="staging_table_top" class="workcell" size="0.11 0.09 0.05" pos="0 0 0.05" material="staging_surface"/>
+      <site name="staging_relay" type="box" size="0.042 0.030 0.0008" pos="-0.058 0.042 0.101" rgba="0.16 0.38 0.80 0.45" group="1"/>
+      <site name="staging_terminal" type="box" size="0.048 0.022 0.0008" pos="0.055 0.042 0.101" rgba="0.72 0.72 0.74 0.5" group="1"/>
+      <site name="staging_button" type="box" size="0.032 0.030 0.0008" pos="-0.058 -0.042 0.101" rgba="0.80 0.12 0.10 0.45" group="1"/>
+      <site name="staging_breaker" type="box" size="0.036 0.030 0.0008" pos="0.055 -0.042 0.101" rgba="0.30 0.30 0.34 0.55" group="1"/>
+    </body>
+
+    <!-- Central shared space: pedestal + low-voltage board, slots, screw points,
+         inspection markers. slot_4 / slot_6 are rotated 90 deg. -->
+    <body name="assembly_station" pos="0.375 0.36 0">
+      <geom name="assembly_pedestal" class="workcell" size="0.16 0.13 0.05" pos="0 0 0.05" material="station_surface"/>
+      <geom name="electrical_board" class="workcell" size="0.135 0.105 0.005" pos="0 0 0.105" material="board_green"/>
+      <site name="slot_1" type="box" size="0.045 0.020 0.0008" pos="-0.065 0.035 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <geom name="g_screw_slot_1_a" type="cylinder" size="0.0045 0.0045" pos="-0.1150 0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_1_a" type="sphere" size="0.002" pos="-0.1150 0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <geom name="g_screw_slot_1_b" type="cylinder" size="0.0045 0.0045" pos="-0.0150 0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_1_b" type="sphere" size="0.002" pos="-0.0150 0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <site name="slot_2" type="box" size="0.045 0.020 0.0008" pos="0.0 0.035 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <geom name="g_screw_slot_2_a" type="cylinder" size="0.0045 0.0045" pos="-0.0500 0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_2_a" type="sphere" size="0.002" pos="-0.0500 0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <geom name="g_screw_slot_2_b" type="cylinder" size="0.0045 0.0045" pos="0.0500 0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_2_b" type="sphere" size="0.002" pos="0.0500 0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <site name="slot_3" type="box" size="0.045 0.020 0.0008" pos="0.065 0.035 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <geom name="g_screw_slot_3_a" type="cylinder" size="0.0045 0.0045" pos="0.0150 0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_3_a" type="sphere" size="0.002" pos="0.0150 0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <geom name="g_screw_slot_3_b" type="cylinder" size="0.0045 0.0045" pos="0.1150 0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_3_b" type="sphere" size="0.002" pos="0.1150 0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <site name="slot_4" type="box" size="0.045 0.020 0.0008" pos="-0.065 -0.035 0.111" quat="0.7071068 0 0 0.7071068" rgba="0.9 0.8 0.2 0.35" group="1"/>
+      <geom name="g_screw_slot_4_a" type="cylinder" size="0.0045 0.0045" pos="-0.0650 -0.0850 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_4_a" type="sphere" size="0.002" pos="-0.0650 -0.0850 0.119" rgba="1 1 1 0.5" group="1"/>
+      <geom name="g_screw_slot_4_b" type="cylinder" size="0.0045 0.0045" pos="-0.0650 0.0150 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_4_b" type="sphere" size="0.002" pos="-0.0650 0.0150 0.119" rgba="1 1 1 0.5" group="1"/>
+      <site name="slot_5" type="box" size="0.045 0.020 0.0008" pos="0.0 -0.035 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <geom name="g_screw_slot_5_a" type="cylinder" size="0.0045 0.0045" pos="-0.0500 -0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_5_a" type="sphere" size="0.002" pos="-0.0500 -0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <geom name="g_screw_slot_5_b" type="cylinder" size="0.0045 0.0045" pos="0.0500 -0.0350 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_5_b" type="sphere" size="0.002" pos="0.0500 -0.0350 0.119" rgba="1 1 1 0.5" group="1"/>
+      <site name="slot_6" type="box" size="0.045 0.020 0.0008" pos="0.065 -0.035 0.111" quat="0.7071068 0 0 0.7071068" rgba="0.9 0.8 0.2 0.35" group="1"/>
+      <geom name="g_screw_slot_6_a" type="cylinder" size="0.0045 0.0045" pos="0.0650 -0.0850 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_6_a" type="sphere" size="0.002" pos="0.0650 -0.0850 0.119" rgba="1 1 1 0.5" group="1"/>
+      <geom name="g_screw_slot_6_b" type="cylinder" size="0.0045 0.0045" pos="0.0650 0.0150 0.1145" rgba="0.8 0.15 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+      <site name="screw_slot_6_b" type="sphere" size="0.002" pos="0.0650 0.0150 0.119" rgba="1 1 1 0.5" group="1"/>
+      <site name="inspect_1" type="sphere" size="0.008" pos="-0.065 0.09 0.111" rgba="0.1 0.85 0.95 0.8" group="1"/>
+      <site name="inspect_2" type="sphere" size="0.008" pos="0.065 0.09 0.111" rgba="0.1 0.85 0.95 0.8" group="1"/>
+    </body>
+
+    <!-- Right: inspection & rework area (Arm3 territory). -->
+    <body name="rework_bin" pos="1.05 0.35 0">
+      <geom name="rework_bin_top" class="workcell" size="0.10 0.08 0.05" pos="0 0 0.05" material="rework_surface"/>
+      <site name="rework_drop" type="box" size="0.06 0.05 0.0008" pos="0 0 0.101" rgba="0.95 0.5 0.3 0.4" group="1"/>
+    </body>
+
+    <body name="arm1_base" childclass="fr3" pos="-0.75 0 0" quat="0.7071068 0 0 0.7071068">
+      <body name="arm1_fr3_link0">
+        <geom mesh="link0_0" material="black" class="visual"/>
+        <geom mesh="link0_1" material="white" class="visual"/>
+        <geom mesh="link0_2" material="white" class="visual"/>
+        <geom mesh="link0_3" material="white" class="visual"/>
+        <geom mesh="link0_4" material="white" class="visual"/>
+        <geom mesh="link0_5" material="red" class="visual"/>
+        <geom mesh="link0_6" material="black" class="visual"/>
+        <geom name="arm1_fr3_link0_collision" mesh="link0_coll" class="collision"/>
+        <body name="arm1_fr3_link1" pos="0 0 0.333">
+          <inertial pos="4.128e-07 -0.0181251 -0.0386036" quat="0.998098 -0.0605364 0.00380499 0.0110109" mass="2.92747" diaginertia="0.0239286 0.0227246 0.00610634"/>
+          <joint name="arm1_fr3_joint1" axis="0 0 1" range="-2.90 2.90" actuatorfrcrange="-87 87"/>
+          <geom name="arm1_fr3_link1_collision" class="collision" mesh="link1_coll"/>
+          <geom material="white" mesh="link1" class="visual"/>
+          <body name="arm1_fr3_link2" quat="1 -1 0 0">
+            <inertial pos="0.00318289 -0.0743222 0.00881461" quat="0.502599 0.584437 -0.465998 0.434366" mass="2.93554" diaginertia="0.0629567 0.0411924 0.0246371"/>
+            <joint name="arm1_fr3_joint2" axis="0 0 1" range="-1.83 1.83" actuatorfrcrange="-87 87"/>
+            <geom material="white" mesh="link2" class="visual"/>
+            <geom name="arm1_fr3_link2_collision" class="collision" mesh="link2_coll"/>
+            <body name="arm1_fr3_link3" pos="0 -0.316 0" quat="1 1 0 0">
+              <inertial pos="0.0407016 -0.00482006 -0.0289731" quat="0.921025 -0.244161 0.155272 0.260745" mass="2.2449" diaginertia="0.0267409 0.0189869 0.0171587"/>
+              <joint name="arm1_fr3_joint3" axis="0 0 1" range="-2.90 2.90" actuatorfrcrange="-87 87"/>
+              <geom mesh="link3_0" material="white" class="visual"/>
+              <geom mesh="link3_1" material="black" class="visual"/>
+              <geom name="arm1_fr3_link3_collision" class="collision" mesh="link3_coll"/>
+              <body name="arm1_fr3_link4" pos="0.0825 0 0" quat="1 1 0 0">
+                <inertial pos="-0.0459101 0.0630493 -0.00851879" quat="0.438018 0.803311 0.00937812 0.403414" mass="2.6156" diaginertia="0.05139 0.0372717 0.0160047"/>
+                <joint name="arm1_fr3_joint4" axis="0 0 1" range="-3.07 -0.12" actuatorfrcrange="-87 87"/>
+                <geom mesh="link4_0" material="white" class="visual"/>
+                <geom mesh="link4_1" material="black" class="visual"/>
+                <geom name="arm1_fr3_link4_collision" class="collision" mesh="link4_coll"/>
+                <body name="arm1_fr3_link5" pos="-0.0825 0.384 0" quat="1 -1 0 0">
+                  <inertial pos="-0.00160396 0.0292536 -0.0972966" quat="0.919031 0.125604 0.0751531 -0.366003" mass="2.32712" diaginertia="0.0579335 0.0449144 0.0130634"/>
+                  <joint name="arm1_fr3_joint5" axis="0 0 1" range="-2.88 2.88" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.763"/>
+                  <geom mesh="link5_0" material="white" class="visual"/>
+                  <geom mesh="link5_1" material="white" class="visual"/>
+                  <geom mesh="link5_2" material="black" class="visual"/>
+                  <geom name="arm1_fr3_link5_collision" class="collision" mesh="link5_coll"/>
+                  <body name="arm1_fr3_link6" quat="1 1 0 0">
+                    <inertial pos="0.0597131 -0.0410295 -0.0101693" quat="0.621301 0.552665 0.510011 0.220081" mass="1.81704" diaginertia="0.0175039 0.0161123 0.00193529"/>
+                    <joint name="arm1_fr3_joint6" axis="0 0 1" range="0.44 4.63" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.44"/>
+                    <geom mesh="link6_0" material="button_green" class="visual"/>
+                    <geom mesh="link6_1" material="white" class="visual"/>
+                    <geom mesh="link6_2" material="white" class="visual"/>
+                    <geom mesh="link6_3" material="gray" class="visual"/>
+                    <geom mesh="link6_4" material="button_red" class="visual"/>
+                    <geom mesh="link6_5" material="white" class="visual"/>
+                    <geom mesh="link6_6" material="black" class="visual"/>
+                    <geom mesh="link6_7" material="button_blue" class="visual"/>
+                    <geom name="arm1_fr3_link6_collision" class="collision" mesh="link6_coll"/>
+                    <body name="arm1_fr3_link7" pos="0.088 0 0" quat="1 1 0 0">
+                      <inertial pos="0.00452258 0.00862619 -0.0161633" quat="0.727579 0.0978688 -0.24906 0.63168" mass="0.627143" diaginertia="0.000223836 0.000223642 5.64132e-07"/>
+                      <joint name="arm1_fr3_joint7" axis="0 0 1" range="-3.05 3.05" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.248"/>
+                      <geom mesh="link7_0" material="black" class="visual"/>
+                      <geom mesh="link7_1" material="white" class="visual"/>
+                      <geom mesh="link7_2" material="white" class="visual"/>
+                      <geom mesh="link7_3" material="black" class="visual"/>
+                      <geom name="arm1_fr3_link7_collision" class="collision" mesh="link7_coll"/>
+                      <body name="arm1_wrist_spin_mount" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
+                        <joint name="arm1_wrist_spin" type="hinge" axis="0 0 1" limited="false" damping="0.05" armature="0.01"/>
+                        <body name="arm1_hand" pos="0 0 0" quat="1 0 0 0">
+                          <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
+                          <geom mesh="hand_0" material="off_white" class="visual"/>
+                          <geom mesh="hand_1" material="black" class="visual"/>
+                          <geom mesh="hand_2" material="black" class="visual"/>
+                          <geom mesh="hand_3" material="white" class="visual"/>
+                          <geom mesh="hand_4" material="off_white" class="visual"/>
+                          <geom mesh="hand_c" class="collision"/>
+                          <site name="arm1_attachment_site" pos="0 0 0.107" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
+                          <geom name="arm1_ee_axis_x" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm1_ee_axis_y" type="capsule" fromto="0 0 0.107 -0.09 0 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm1_ee_axis_z" type="capsule" fromto="0 0 0.107 0 0 0.197" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <body name="arm1_left_finger" pos="0 0 0.0584">
+                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                            <joint name="arm1_finger_joint1" class="finger"/>
+                            <geom mesh="finger_0" material="off_white" class="visual"/>
+                            <geom mesh="finger_1" material="black" class="visual"/>
+                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                            <geom class="fingertip_pad_collision_1"/>
+                            <geom class="fingertip_pad_collision_2"/>
+                            <geom class="fingertip_pad_collision_3"/>
+                            <geom class="fingertip_pad_collision_4"/>
+                            <geom class="fingertip_pad_collision_5"/>
+                          </body>
+                          <body name="arm1_right_finger" pos="0 0 0.0584" quat="0 0 0 1">
+                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                            <joint name="arm1_finger_joint2" class="finger"/>
+                            <geom mesh="finger_0" material="off_white" class="visual"/>
+                            <geom mesh="finger_1" material="black" class="visual"/>
+                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                            <geom class="fingertip_pad_collision_1"/>
+                            <geom class="fingertip_pad_collision_2"/>
+                            <geom class="fingertip_pad_collision_3"/>
+                            <geom class="fingertip_pad_collision_4"/>
+                            <geom class="fingertip_pad_collision_5"/>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <body name="arm2_base" childclass="fr3" pos="0 0 0" quat="0.7071068 0 0 0.7071068">
+      <body name="arm2_fr3_link0">
+        <geom mesh="link0_0" material="black" class="visual"/>
+        <geom mesh="link0_1" material="white" class="visual"/>
+        <geom mesh="link0_2" material="white" class="visual"/>
+        <geom mesh="link0_3" material="white" class="visual"/>
+        <geom mesh="link0_4" material="white" class="visual"/>
+        <geom mesh="link0_5" material="red" class="visual"/>
+        <geom mesh="link0_6" material="black" class="visual"/>
+        <geom name="arm2_fr3_link0_collision" mesh="link0_coll" class="collision"/>
+        <body name="arm2_fr3_link1" pos="0 0 0.333">
+          <inertial pos="4.128e-07 -0.0181251 -0.0386036" quat="0.998098 -0.0605364 0.00380499 0.0110109" mass="2.92747" diaginertia="0.0239286 0.0227246 0.00610634"/>
+          <joint name="arm2_fr3_joint1" axis="0 0 1" range="-2.90 2.90" actuatorfrcrange="-87 87"/>
+          <geom name="arm2_fr3_link1_collision" class="collision" mesh="link1_coll"/>
+          <geom material="white" mesh="link1" class="visual"/>
+          <body name="arm2_fr3_link2" quat="1 -1 0 0">
+            <inertial pos="0.00318289 -0.0743222 0.00881461" quat="0.502599 0.584437 -0.465998 0.434366" mass="2.93554" diaginertia="0.0629567 0.0411924 0.0246371"/>
+            <joint name="arm2_fr3_joint2" axis="0 0 1" range="-1.83 1.83" actuatorfrcrange="-87 87"/>
+            <geom material="white" mesh="link2" class="visual"/>
+            <geom name="arm2_fr3_link2_collision" class="collision" mesh="link2_coll"/>
+            <body name="arm2_fr3_link3" pos="0 -0.316 0" quat="1 1 0 0">
+              <inertial pos="0.0407016 -0.00482006 -0.0289731" quat="0.921025 -0.244161 0.155272 0.260745" mass="2.2449" diaginertia="0.0267409 0.0189869 0.0171587"/>
+              <joint name="arm2_fr3_joint3" axis="0 0 1" range="-2.90 2.90" actuatorfrcrange="-87 87"/>
+              <geom mesh="link3_0" material="white" class="visual"/>
+              <geom mesh="link3_1" material="black" class="visual"/>
+              <geom name="arm2_fr3_link3_collision" class="collision" mesh="link3_coll"/>
+              <body name="arm2_fr3_link4" pos="0.0825 0 0" quat="1 1 0 0">
+                <inertial pos="-0.0459101 0.0630493 -0.00851879" quat="0.438018 0.803311 0.00937812 0.403414" mass="2.6156" diaginertia="0.05139 0.0372717 0.0160047"/>
+                <joint name="arm2_fr3_joint4" axis="0 0 1" range="-3.07 -0.12" actuatorfrcrange="-87 87"/>
+                <geom mesh="link4_0" material="white" class="visual"/>
+                <geom mesh="link4_1" material="black" class="visual"/>
+                <geom name="arm2_fr3_link4_collision" class="collision" mesh="link4_coll"/>
+                <body name="arm2_fr3_link5" pos="-0.0825 0.384 0" quat="1 -1 0 0">
+                  <inertial pos="-0.00160396 0.0292536 -0.0972966" quat="0.919031 0.125604 0.0751531 -0.366003" mass="2.32712" diaginertia="0.0579335 0.0449144 0.0130634"/>
+                  <joint name="arm2_fr3_joint5" axis="0 0 1" range="-2.88 2.88" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.763"/>
+                  <geom mesh="link5_0" material="white" class="visual"/>
+                  <geom mesh="link5_1" material="white" class="visual"/>
+                  <geom mesh="link5_2" material="black" class="visual"/>
+                  <geom name="arm2_fr3_link5_collision" class="collision" mesh="link5_coll"/>
+                  <body name="arm2_fr3_link6" quat="1 1 0 0">
+                    <inertial pos="0.0597131 -0.0410295 -0.0101693" quat="0.621301 0.552665 0.510011 0.220081" mass="1.81704" diaginertia="0.0175039 0.0161123 0.00193529"/>
+                    <joint name="arm2_fr3_joint6" axis="0 0 1" range="0.44 4.63" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.44"/>
+                    <geom mesh="link6_0" material="button_green" class="visual"/>
+                    <geom mesh="link6_1" material="white" class="visual"/>
+                    <geom mesh="link6_2" material="white" class="visual"/>
+                    <geom mesh="link6_3" material="gray" class="visual"/>
+                    <geom mesh="link6_4" material="button_red" class="visual"/>
+                    <geom mesh="link6_5" material="white" class="visual"/>
+                    <geom mesh="link6_6" material="black" class="visual"/>
+                    <geom mesh="link6_7" material="button_blue" class="visual"/>
+                    <geom name="arm2_fr3_link6_collision" class="collision" mesh="link6_coll"/>
+                    <body name="arm2_fr3_link7" pos="0.088 0 0" quat="1 1 0 0">
+                      <inertial pos="0.00452258 0.00862619 -0.0161633" quat="0.727579 0.0978688 -0.24906 0.63168" mass="0.627143" diaginertia="0.000223836 0.000223642 5.64132e-07"/>
+                      <joint name="arm2_fr3_joint7" axis="0 0 1" range="-3.05 3.05" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.248"/>
+                      <geom mesh="link7_0" material="black" class="visual"/>
+                      <geom mesh="link7_1" material="white" class="visual"/>
+                      <geom mesh="link7_2" material="white" class="visual"/>
+                      <geom mesh="link7_3" material="black" class="visual"/>
+                      <geom name="arm2_fr3_link7_collision" class="collision" mesh="link7_coll"/>
+                      <body name="arm2_wrist_spin_mount" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
+                        <joint name="arm2_wrist_spin" type="hinge" axis="0 0 1" limited="false" damping="0.05" armature="0.01"/>
+                        <body name="arm2_hand" pos="0 0 0" quat="1 0 0 0">
+                          <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
+                          <geom mesh="hand_0" material="off_white" class="visual"/>
+                          <geom mesh="hand_1" material="black" class="visual"/>
+                          <geom mesh="hand_2" material="black" class="visual"/>
+                          <geom mesh="hand_3" material="white" class="visual"/>
+                          <geom mesh="hand_4" material="off_white" class="visual"/>
+                          <geom mesh="hand_c" class="collision"/>
+                          <site name="arm2_attachment_site" pos="0 0 0.107" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
+                          <geom name="arm2_ee_axis_x" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm2_ee_axis_y" type="capsule" fromto="0 0 0.107 -0.09 0 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm2_ee_axis_z" type="capsule" fromto="0 0 0.107 0 0 0.197" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <!-- Arm2 composite end effector (core process arm):
+                               electric screwdriver (side-mounted, tip site for
+                               tool-offset alignment) + press head (opposite
+                               side, face site). Visual-only geoms; masses are
+                               negligible and contacts disabled so the control
+                               law and gripper are unaffected. -->
+                          <body name="arm2_tool_mount" pos="0 0 0">
+                            <geom name="arm2_driver_bracket" type="capsule" fromto="0.030 0 0.055 0.070 0 0.070" size="0.006" rgba="0.25 0.25 0.28 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_screwdriver_body" type="cylinder" size="0.0075 0.032" pos="0.070 0 0.102" rgba="0.15 0.35 0.75 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_screwdriver_collar" type="cylinder" size="0.009 0.004" pos="0.070 0 0.136" rgba="0.9 0.75 0.1 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_screwdriver_bit" type="cylinder" size="0.0022 0.011" pos="0.070 0 0.148" rgba="0.85 0.85 0.88 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <site name="arm2_screwdriver_tip" type="sphere" size="0.003" pos="0.070 0 0.159" rgba="1 0.6 0.1 0.9" group="1"/>
+                            <geom name="arm2_press_bracket" type="capsule" fromto="-0.030 0 0.055 -0.070 0 0.070" size="0.006" rgba="0.25 0.25 0.28 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_press_shaft" type="cylinder" size="0.005 0.030" pos="-0.070 0 0.102" rgba="0.30 0.32 0.35 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <geom name="arm2_press_plate" type="box" size="0.014 0.014 0.004" pos="-0.070 0 0.138" rgba="0.93 0.88 0.76 1" density="0" contype="0" conaffinity="0" group="1"/>
+                            <site name="arm2_press_face" type="sphere" size="0.003" pos="-0.070 0 0.143" rgba="0.2 0.9 0.6 0.9" group="1"/>
+                          </body>
+                          <body name="arm2_left_finger" pos="0 0 0.0584">
+                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                            <joint name="arm2_finger_joint1" class="finger"/>
+                            <geom mesh="finger_0" material="off_white" class="visual"/>
+                            <geom mesh="finger_1" material="black" class="visual"/>
+                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                            <geom class="fingertip_pad_collision_1"/>
+                            <geom class="fingertip_pad_collision_2"/>
+                            <geom class="fingertip_pad_collision_3"/>
+                            <geom class="fingertip_pad_collision_4"/>
+                            <geom class="fingertip_pad_collision_5"/>
+                          </body>
+                          <body name="arm2_right_finger" pos="0 0 0.0584" quat="0 0 0 1">
+                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                            <joint name="arm2_finger_joint2" class="finger"/>
+                            <geom mesh="finger_0" material="off_white" class="visual"/>
+                            <geom mesh="finger_1" material="black" class="visual"/>
+                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                            <geom class="fingertip_pad_collision_1"/>
+                            <geom class="fingertip_pad_collision_2"/>
+                            <geom class="fingertip_pad_collision_3"/>
+                            <geom class="fingertip_pad_collision_4"/>
+                            <geom class="fingertip_pad_collision_5"/>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <body name="arm3_base" childclass="fr3" pos="0.75 0 0" quat="0.7071068 0 0 0.7071068">
+      <body name="arm3_fr3_link0">
+        <geom mesh="link0_0" material="black" class="visual"/>
+        <geom mesh="link0_1" material="white" class="visual"/>
+        <geom mesh="link0_2" material="white" class="visual"/>
+        <geom mesh="link0_3" material="white" class="visual"/>
+        <geom mesh="link0_4" material="white" class="visual"/>
+        <geom mesh="link0_5" material="red" class="visual"/>
+        <geom mesh="link0_6" material="black" class="visual"/>
+        <geom name="arm3_fr3_link0_collision" mesh="link0_coll" class="collision"/>
+        <body name="arm3_fr3_link1" pos="0 0 0.333">
+          <inertial pos="4.128e-07 -0.0181251 -0.0386036" quat="0.998098 -0.0605364 0.00380499 0.0110109" mass="2.92747" diaginertia="0.0239286 0.0227246 0.00610634"/>
+          <joint name="arm3_fr3_joint1" axis="0 0 1" range="-2.90 2.90" actuatorfrcrange="-87 87"/>
+          <geom name="arm3_fr3_link1_collision" class="collision" mesh="link1_coll"/>
+          <geom material="white" mesh="link1" class="visual"/>
+          <body name="arm3_fr3_link2" quat="1 -1 0 0">
+            <inertial pos="0.00318289 -0.0743222 0.00881461" quat="0.502599 0.584437 -0.465998 0.434366" mass="2.93554" diaginertia="0.0629567 0.0411924 0.0246371"/>
+            <joint name="arm3_fr3_joint2" axis="0 0 1" range="-1.83 1.83" actuatorfrcrange="-87 87"/>
+            <geom material="white" mesh="link2" class="visual"/>
+            <geom name="arm3_fr3_link2_collision" class="collision" mesh="link2_coll"/>
+            <body name="arm3_fr3_link3" pos="0 -0.316 0" quat="1 1 0 0">
+              <inertial pos="0.0407016 -0.00482006 -0.0289731" quat="0.921025 -0.244161 0.155272 0.260745" mass="2.2449" diaginertia="0.0267409 0.0189869 0.0171587"/>
+              <joint name="arm3_fr3_joint3" axis="0 0 1" range="-2.90 2.90" actuatorfrcrange="-87 87"/>
+              <geom mesh="link3_0" material="white" class="visual"/>
+              <geom mesh="link3_1" material="black" class="visual"/>
+              <geom name="arm3_fr3_link3_collision" class="collision" mesh="link3_coll"/>
+              <body name="arm3_fr3_link4" pos="0.0825 0 0" quat="1 1 0 0">
+                <inertial pos="-0.0459101 0.0630493 -0.00851879" quat="0.438018 0.803311 0.00937812 0.403414" mass="2.6156" diaginertia="0.05139 0.0372717 0.0160047"/>
+                <joint name="arm3_fr3_joint4" axis="0 0 1" range="-3.07 -0.12" actuatorfrcrange="-87 87"/>
+                <geom mesh="link4_0" material="white" class="visual"/>
+                <geom mesh="link4_1" material="black" class="visual"/>
+                <geom name="arm3_fr3_link4_collision" class="collision" mesh="link4_coll"/>
+                <body name="arm3_fr3_link5" pos="-0.0825 0.384 0" quat="1 -1 0 0">
+                  <inertial pos="-0.00160396 0.0292536 -0.0972966" quat="0.919031 0.125604 0.0751531 -0.366003" mass="2.32712" diaginertia="0.0579335 0.0449144 0.0130634"/>
+                  <joint name="arm3_fr3_joint5" axis="0 0 1" range="-2.88 2.88" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.763"/>
+                  <geom mesh="link5_0" material="white" class="visual"/>
+                  <geom mesh="link5_1" material="white" class="visual"/>
+                  <geom mesh="link5_2" material="black" class="visual"/>
+                  <geom name="arm3_fr3_link5_collision" class="collision" mesh="link5_coll"/>
+                  <body name="arm3_fr3_link6" quat="1 1 0 0">
+                    <inertial pos="0.0597131 -0.0410295 -0.0101693" quat="0.621301 0.552665 0.510011 0.220081" mass="1.81704" diaginertia="0.0175039 0.0161123 0.00193529"/>
+                    <joint name="arm3_fr3_joint6" axis="0 0 1" range="0.44 4.63" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.44"/>
+                    <geom mesh="link6_0" material="button_green" class="visual"/>
+                    <geom mesh="link6_1" material="white" class="visual"/>
+                    <geom mesh="link6_2" material="white" class="visual"/>
+                    <geom mesh="link6_3" material="gray" class="visual"/>
+                    <geom mesh="link6_4" material="button_red" class="visual"/>
+                    <geom mesh="link6_5" material="white" class="visual"/>
+                    <geom mesh="link6_6" material="black" class="visual"/>
+                    <geom mesh="link6_7" material="button_blue" class="visual"/>
+                    <geom name="arm3_fr3_link6_collision" class="collision" mesh="link6_coll"/>
+                    <body name="arm3_fr3_link7" pos="0.088 0 0" quat="1 1 0 0">
+                      <inertial pos="0.00452258 0.00862619 -0.0161633" quat="0.727579 0.0978688 -0.24906 0.63168" mass="0.627143" diaginertia="0.000223836 0.000223642 5.64132e-07"/>
+                      <joint name="arm3_fr3_joint7" axis="0 0 1" range="-3.05 3.05" actuatorfrcrange="-12 12" armature="0.074" frictionloss="0.248"/>
+                      <geom mesh="link7_0" material="black" class="visual"/>
+                      <geom mesh="link7_1" material="white" class="visual"/>
+                      <geom mesh="link7_2" material="white" class="visual"/>
+                      <geom mesh="link7_3" material="black" class="visual"/>
+                      <geom name="arm3_fr3_link7_collision" class="collision" mesh="link7_coll"/>
+                      <body name="arm3_wrist_spin_mount" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
+                        <joint name="arm3_wrist_spin" type="hinge" axis="0 0 1" limited="false" damping="0.05" armature="0.01"/>
+                        <body name="arm3_hand" pos="0 0 0" quat="1 0 0 0">
+                          <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
+                          <geom mesh="hand_0" material="off_white" class="visual"/>
+                          <geom mesh="hand_1" material="black" class="visual"/>
+                          <geom mesh="hand_2" material="black" class="visual"/>
+                          <geom mesh="hand_3" material="white" class="visual"/>
+                          <geom mesh="hand_4" material="off_white" class="visual"/>
+                          <geom mesh="hand_c" class="collision"/>
+                          <site name="arm3_attachment_site" pos="0 0 0.107" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
+                          <geom name="arm3_ee_axis_x" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_ee_axis_y" type="capsule" fromto="0 0 0.107 -0.09 0 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_ee_axis_z" type="capsule" fromto="0 0 0.107 0 0 0.197" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <body name="arm3_left_finger" pos="0 0 0.0584">
+                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                            <joint name="arm3_finger_joint1" class="finger"/>
+                            <geom mesh="finger_0" material="off_white" class="visual"/>
+                            <geom mesh="finger_1" material="black" class="visual"/>
+                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                            <geom class="fingertip_pad_collision_1"/>
+                            <geom class="fingertip_pad_collision_2"/>
+                            <geom class="fingertip_pad_collision_3"/>
+                            <geom class="fingertip_pad_collision_4"/>
+                            <geom class="fingertip_pad_collision_5"/>
+                          </body>
+                          <body name="arm3_right_finger" pos="0 0 0.0584" quat="0 0 0 1">
+                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
+                            <joint name="arm3_finger_joint2" class="finger"/>
+                            <geom mesh="finger_0" material="off_white" class="visual"/>
+                            <geom mesh="finger_1" material="black" class="visual"/>
+                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
+                            <geom class="fingertip_pad_collision_1"/>
+                            <geom class="fingertip_pad_collision_2"/>
+                            <geom class="fingertip_pad_collision_3"/>
+                            <geom class="fingertip_pad_collision_4"/>
+                            <geom class="fingertip_pad_collision_5"/>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Free components on the feed rack. Declared last so their freejoint qpos
+         sit at the end of the keyframe (3 x 10 robot values first). -->
+
+    <body name="relay_1" pos="-1.08 0.29 0.121">
+      <freejoint name="relay_1_free"/>
+      <geom name="relay_1_col" class="component_collision" type="box" size="0.015 0.012 0.020" mass="0.06"/>
+      <geom name="relay_1_vis" class="component_visual" type="box" size="0.015 0.012 0.020" material="relay_blue"/>
+      <geom name="relay_1_vis_top" class="component_visual" type="box" size="0.010 0.008 0.002" pos="0 0 0.021" material="off_white"/>
+    </body>
+    <body name="relay_2" pos="-1.08 0.41 0.121">
+      <freejoint name="relay_2_free"/>
+      <geom name="relay_2_col" class="component_collision" type="box" size="0.015 0.012 0.020" mass="0.06"/>
+      <geom name="relay_2_vis" class="component_visual" type="box" size="0.015 0.012 0.020" material="relay_blue_light"/>
+      <geom name="relay_2_vis_top" class="component_visual" type="box" size="0.010 0.008 0.002" pos="0 0 0.021" material="off_white"/>
+    </body>
+    <body name="terminal_1" pos="-0.96 0.41 0.111" quat="0.7071068 0 0 0.7071068">
+      <freejoint name="terminal_1_free"/>
+      <geom name="terminal_1_col" class="component_collision" type="box" size="0.040 0.008 0.010" mass="0.04"/>
+      <geom name="terminal_1_vis" class="component_visual" type="box" size="0.040 0.008 0.010" material="terminal_gray"/>
+      <geom name="terminal_1_vis_top" class="component_visual" type="box" size="0.036 0.005 0.002" pos="0 0 0.011" material="black"/>
+    </body>
+    <body name="button_1" pos="-0.96 0.29 0.112">
+      <freejoint name="button_1_free"/>
+      <geom name="button_1_col" class="component_collision" type="box" size="0.016 0.016 0.011" mass="0.02" friction="1.4 0.01 0.001"/>
+      <geom name="button_1_vis" class="component_visual" type="cylinder" size="0.011 0.009" pos="0 0 0.002" material="button_module_red"/>
+      <geom name="button_1_vis_top" class="component_visual" type="cylinder" size="0.007 0.002" pos="0 0 0.012" material="off_white"/>
+    </body>
+    <body name="breaker_1" pos="-1.02 0.35 0.126">
+      <freejoint name="breaker_1_free"/>
+      <geom name="breaker_1_col" class="component_collision" type="box" size="0.018 0.014 0.025" mass="0.08"/>
+      <geom name="breaker_1_vis" class="component_visual" type="box" size="0.018 0.014 0.025" material="breaker_gray"/>
+      <geom name="breaker_1_vis_top" class="component_visual" type="box" size="0.012 0.009 0.002" pos="0 0 0.026" material="off_white"/>
+    </body>
+
+  </worldbody>
+
+  <tendon>
+
+    <fixed name="arm1_split">
+      <joint joint="arm1_finger_joint1" coef="0.5"/>
+      <joint joint="arm1_finger_joint2" coef="0.5"/>
+    </fixed>
+
+    <fixed name="arm2_split">
+      <joint joint="arm2_finger_joint1" coef="0.5"/>
+      <joint joint="arm2_finger_joint2" coef="0.5"/>
+    </fixed>
+
+    <fixed name="arm3_split">
+      <joint joint="arm3_finger_joint1" coef="0.5"/>
+      <joint joint="arm3_finger_joint2" coef="0.5"/>
+    </fixed>
+
+  </tendon>
+
+  <equality>
+    <joint joint1="arm1_finger_joint1" joint2="arm1_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <weld name="arm1_grasp_relay_1" body1="arm1_hand" body2="relay_1" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_relay_2" body1="arm1_hand" body2="relay_2" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_terminal_1" body1="arm1_hand" body2="terminal_1" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_button_1" body1="arm1_hand" body2="button_1" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_breaker_1" body1="arm1_hand" body2="breaker_1" active="false" solref="0.004 1"/>
+    <joint joint1="arm2_finger_joint1" joint2="arm2_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <weld name="arm2_grasp_relay_1" body1="arm2_hand" body2="relay_1" active="false" solref="0.004 1"/>
+    <weld name="arm2_grasp_relay_2" body1="arm2_hand" body2="relay_2" active="false" solref="0.004 1"/>
+    <weld name="arm2_grasp_terminal_1" body1="arm2_hand" body2="terminal_1" active="false" solref="0.004 1"/>
+    <weld name="arm2_grasp_button_1" body1="arm2_hand" body2="button_1" active="false" solref="0.004 1"/>
+    <weld name="arm2_grasp_breaker_1" body1="arm2_hand" body2="breaker_1" active="false" solref="0.004 1"/>
+    <joint joint1="arm3_finger_joint1" joint2="arm3_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <weld name="arm3_grasp_relay_1" body1="arm3_hand" body2="relay_1" active="false" solref="0.004 1"/>
+    <weld name="arm3_grasp_relay_2" body1="arm3_hand" body2="relay_2" active="false" solref="0.004 1"/>
+    <weld name="arm3_grasp_terminal_1" body1="arm3_hand" body2="terminal_1" active="false" solref="0.004 1"/>
+    <weld name="arm3_grasp_button_1" body1="arm3_hand" body2="button_1" active="false" solref="0.004 1"/>
+    <weld name="arm3_grasp_breaker_1" body1="arm3_hand" body2="breaker_1" active="false" solref="0.004 1"/>
+
+  </equality>
+
+  <actuator>
+
+    <position class="fr3" name="arm1_fr3_joint1" joint="arm1_fr3_joint1" kp="4500" kv="450"/>
+    <position class="fr3" name="arm1_fr3_joint2" joint="arm1_fr3_joint2" kp="4500" kv="450"/>
+    <position class="fr3" name="arm1_fr3_joint3" joint="arm1_fr3_joint3" kp="3500" kv="350"/>
+    <position class="fr3" name="arm1_fr3_joint4" joint="arm1_fr3_joint4" kp="3500" kv="350"/>
+    <position class="fr3" name="arm1_fr3_joint5" joint="arm1_fr3_joint5" kp="2000" kv="200"/>
+    <position class="fr3" name="arm1_fr3_joint6" joint="arm1_fr3_joint6" kp="2000" kv="200"/>
+    <position class="fr3" name="arm1_fr3_joint7" joint="arm1_fr3_joint7" kp="2000" kv="200"/>
+    <position name="arm1_wrist_spin" joint="arm1_wrist_spin" kp="800" kv="80" ctrlrange="-1000000 1000000" forcerange="-40 40"/>
+    <general name="arm1_gripper" tendon="arm1_split" dyntype="none" gaintype="fixed" biastype="affine" forcerange="-500 500" ctrlrange="0 255" gainprm="0.01568627451 0 0" biasprm="0 -100 -10"/>
+
+    <position class="fr3" name="arm2_fr3_joint1" joint="arm2_fr3_joint1" kp="4500" kv="450"/>
+    <position class="fr3" name="arm2_fr3_joint2" joint="arm2_fr3_joint2" kp="4500" kv="450"/>
+    <position class="fr3" name="arm2_fr3_joint3" joint="arm2_fr3_joint3" kp="3500" kv="350"/>
+    <position class="fr3" name="arm2_fr3_joint4" joint="arm2_fr3_joint4" kp="3500" kv="350"/>
+    <position class="fr3" name="arm2_fr3_joint5" joint="arm2_fr3_joint5" kp="2000" kv="200"/>
+    <position class="fr3" name="arm2_fr3_joint6" joint="arm2_fr3_joint6" kp="2000" kv="200"/>
+    <position class="fr3" name="arm2_fr3_joint7" joint="arm2_fr3_joint7" kp="2000" kv="200"/>
+    <position name="arm2_wrist_spin" joint="arm2_wrist_spin" kp="800" kv="80" ctrlrange="-1000000 1000000" forcerange="-40 40"/>
+    <general name="arm2_gripper" tendon="arm2_split" dyntype="none" gaintype="fixed" biastype="affine" forcerange="-500 500" ctrlrange="0 255" gainprm="0.01568627451 0 0" biasprm="0 -100 -10"/>
+
+    <position class="fr3" name="arm3_fr3_joint1" joint="arm3_fr3_joint1" kp="4500" kv="450"/>
+    <position class="fr3" name="arm3_fr3_joint2" joint="arm3_fr3_joint2" kp="4500" kv="450"/>
+    <position class="fr3" name="arm3_fr3_joint3" joint="arm3_fr3_joint3" kp="3500" kv="350"/>
+    <position class="fr3" name="arm3_fr3_joint4" joint="arm3_fr3_joint4" kp="3500" kv="350"/>
+    <position class="fr3" name="arm3_fr3_joint5" joint="arm3_fr3_joint5" kp="2000" kv="200"/>
+    <position class="fr3" name="arm3_fr3_joint6" joint="arm3_fr3_joint6" kp="2000" kv="200"/>
+    <position class="fr3" name="arm3_fr3_joint7" joint="arm3_fr3_joint7" kp="2000" kv="200"/>
+    <position name="arm3_wrist_spin" joint="arm3_wrist_spin" kp="800" kv="80" ctrlrange="-1000000 1000000" forcerange="-40 40"/>
+    <general name="arm3_gripper" tendon="arm3_split" dyntype="none" gaintype="fixed" biastype="affine" forcerange="-500 500" ctrlrange="0 255" gainprm="0.01568627451 0 0" biasprm="0 -100 -10"/>
+
+  </actuator>
+
+  <contact>
+
+    <exclude body1="arm1_fr3_link0" body2="arm1_fr3_link1"/>
+    <exclude body1="arm1_fr3_link7" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_wrist_spin_mount" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link7" body2="arm1_hand"/>
+    <exclude body1="arm1_hand" body2="arm1_left_finger"/>
+    <exclude body1="arm1_hand" body2="arm1_right_finger"/>
+    <exclude body1="arm1_left_finger" body2="arm1_right_finger"/>
+
+    <exclude body1="arm2_fr3_link0" body2="arm2_fr3_link1"/>
+    <exclude body1="arm2_fr3_link7" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_wrist_spin_mount" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link7" body2="arm2_hand"/>
+    <exclude body1="arm2_hand" body2="arm2_left_finger"/>
+    <exclude body1="arm2_hand" body2="arm2_right_finger"/>
+    <exclude body1="arm2_left_finger" body2="arm2_right_finger"/>
+
+    <exclude body1="arm3_fr3_link0" body2="arm3_fr3_link1"/>
+    <exclude body1="arm3_fr3_link7" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_wrist_spin_mount" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link7" body2="arm3_hand"/>
+    <exclude body1="arm3_hand" body2="arm3_left_finger"/>
+    <exclude body1="arm3_hand" body2="arm3_right_finger"/>
+    <exclude body1="arm3_left_finger" body2="arm3_right_finger"/>
+    <!-- Cross-arm contact disabled: software zone mutex owns exclusivity. -->
+    <exclude body1="arm1_fr3_link0" body2="arm2_fr3_link0"/>
+    <exclude body1="arm1_fr3_link1" body2="arm2_fr3_link1"/>
+    <exclude body1="arm1_fr3_link2" body2="arm2_fr3_link2"/>
+    <exclude body1="arm1_fr3_link3" body2="arm2_fr3_link3"/>
+    <exclude body1="arm1_fr3_link4" body2="arm2_fr3_link4"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_fr3_link5"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_fr3_link6"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_fr3_link7"/>
+    <exclude body1="arm1_wrist_spin_mount" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm1_hand" body2="arm2_hand"/>
+    <exclude body1="arm1_left_finger" body2="arm2_left_finger"/>
+    <exclude body1="arm1_right_finger" body2="arm2_right_finger"/>
+    <exclude body1="arm1_hand" body2="arm2_left_finger"/>
+    <exclude body1="arm2_hand" body2="arm1_left_finger"/>
+    <exclude body1="arm1_hand" body2="arm2_right_finger"/>
+    <exclude body1="arm2_hand" body2="arm1_right_finger"/>
+    <exclude body1="arm1_hand" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_hand" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_hand" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_hand" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_hand" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_hand" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_hand" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_hand" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_left_finger" body2="arm2_hand"/>
+    <exclude body1="arm2_left_finger" body2="arm1_hand"/>
+    <exclude body1="arm1_left_finger" body2="arm2_right_finger"/>
+    <exclude body1="arm2_left_finger" body2="arm1_right_finger"/>
+    <exclude body1="arm1_left_finger" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_left_finger" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_left_finger" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_left_finger" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_left_finger" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_left_finger" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_left_finger" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_left_finger" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_right_finger" body2="arm2_hand"/>
+    <exclude body1="arm2_right_finger" body2="arm1_hand"/>
+    <exclude body1="arm1_right_finger" body2="arm2_left_finger"/>
+    <exclude body1="arm2_right_finger" body2="arm1_left_finger"/>
+    <exclude body1="arm1_right_finger" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_right_finger" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_right_finger" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_right_finger" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_right_finger" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_right_finger" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_right_finger" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_right_finger" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link5" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_left_finger"/>
+    <exclude body1="arm2_fr3_link5" body2="arm1_left_finger"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_right_finger"/>
+    <exclude body1="arm2_fr3_link5" body2="arm1_right_finger"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_fr3_link5" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_fr3_link5" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_fr3_link5" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link5" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link6" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_left_finger"/>
+    <exclude body1="arm2_fr3_link6" body2="arm1_left_finger"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_right_finger"/>
+    <exclude body1="arm2_fr3_link6" body2="arm1_right_finger"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_fr3_link6" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_fr3_link6" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_fr3_link6" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link6" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link7" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_left_finger"/>
+    <exclude body1="arm2_fr3_link7" body2="arm1_left_finger"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_right_finger"/>
+    <exclude body1="arm2_fr3_link7" body2="arm1_right_finger"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_fr3_link7" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_fr3_link7" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_fr3_link7" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link7" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link0" body2="arm3_fr3_link0"/>
+    <exclude body1="arm1_fr3_link1" body2="arm3_fr3_link1"/>
+    <exclude body1="arm1_fr3_link2" body2="arm3_fr3_link2"/>
+    <exclude body1="arm1_fr3_link3" body2="arm3_fr3_link3"/>
+    <exclude body1="arm1_fr3_link4" body2="arm3_fr3_link4"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_fr3_link5"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_fr3_link6"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_fr3_link7"/>
+    <exclude body1="arm1_wrist_spin_mount" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm1_hand" body2="arm3_hand"/>
+    <exclude body1="arm1_left_finger" body2="arm3_left_finger"/>
+    <exclude body1="arm1_right_finger" body2="arm3_right_finger"/>
+    <exclude body1="arm1_hand" body2="arm3_left_finger"/>
+    <exclude body1="arm3_hand" body2="arm1_left_finger"/>
+    <exclude body1="arm1_hand" body2="arm3_right_finger"/>
+    <exclude body1="arm3_hand" body2="arm1_right_finger"/>
+    <exclude body1="arm1_hand" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_hand" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_hand" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_hand" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_hand" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_hand" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_hand" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_hand" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_left_finger" body2="arm3_hand"/>
+    <exclude body1="arm3_left_finger" body2="arm1_hand"/>
+    <exclude body1="arm1_left_finger" body2="arm3_right_finger"/>
+    <exclude body1="arm3_left_finger" body2="arm1_right_finger"/>
+    <exclude body1="arm1_left_finger" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_left_finger" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_left_finger" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_left_finger" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_left_finger" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_left_finger" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_left_finger" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_left_finger" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_right_finger" body2="arm3_hand"/>
+    <exclude body1="arm3_right_finger" body2="arm1_hand"/>
+    <exclude body1="arm1_right_finger" body2="arm3_left_finger"/>
+    <exclude body1="arm3_right_finger" body2="arm1_left_finger"/>
+    <exclude body1="arm1_right_finger" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_right_finger" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_right_finger" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_right_finger" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_right_finger" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_right_finger" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_right_finger" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_right_finger" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link5" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_left_finger"/>
+    <exclude body1="arm3_fr3_link5" body2="arm1_left_finger"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_right_finger"/>
+    <exclude body1="arm3_fr3_link5" body2="arm1_right_finger"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_fr3_link5" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_fr3_link5" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_fr3_link5" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_fr3_link5" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link6" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_left_finger"/>
+    <exclude body1="arm3_fr3_link6" body2="arm1_left_finger"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_right_finger"/>
+    <exclude body1="arm3_fr3_link6" body2="arm1_right_finger"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_fr3_link6" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_fr3_link6" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_fr3_link6" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_fr3_link6" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link7" body2="arm1_hand"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_left_finger"/>
+    <exclude body1="arm3_fr3_link7" body2="arm1_left_finger"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_right_finger"/>
+    <exclude body1="arm3_fr3_link7" body2="arm1_right_finger"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_fr3_link7" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_fr3_link7" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_fr3_link7" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_fr3_link7" body2="arm1_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link0" body2="arm3_fr3_link0"/>
+    <exclude body1="arm2_fr3_link1" body2="arm3_fr3_link1"/>
+    <exclude body1="arm2_fr3_link2" body2="arm3_fr3_link2"/>
+    <exclude body1="arm2_fr3_link3" body2="arm3_fr3_link3"/>
+    <exclude body1="arm2_fr3_link4" body2="arm3_fr3_link4"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_fr3_link5"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_fr3_link6"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_fr3_link7"/>
+    <exclude body1="arm2_wrist_spin_mount" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm2_hand" body2="arm3_hand"/>
+    <exclude body1="arm2_left_finger" body2="arm3_left_finger"/>
+    <exclude body1="arm2_right_finger" body2="arm3_right_finger"/>
+    <exclude body1="arm2_hand" body2="arm3_left_finger"/>
+    <exclude body1="arm3_hand" body2="arm2_left_finger"/>
+    <exclude body1="arm2_hand" body2="arm3_right_finger"/>
+    <exclude body1="arm3_hand" body2="arm2_right_finger"/>
+    <exclude body1="arm2_hand" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_hand" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_hand" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_hand" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_hand" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_hand" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_hand" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_hand" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_left_finger" body2="arm3_hand"/>
+    <exclude body1="arm3_left_finger" body2="arm2_hand"/>
+    <exclude body1="arm2_left_finger" body2="arm3_right_finger"/>
+    <exclude body1="arm3_left_finger" body2="arm2_right_finger"/>
+    <exclude body1="arm2_left_finger" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_left_finger" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_left_finger" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_left_finger" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_left_finger" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_left_finger" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_left_finger" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_left_finger" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_right_finger" body2="arm3_hand"/>
+    <exclude body1="arm3_right_finger" body2="arm2_hand"/>
+    <exclude body1="arm2_right_finger" body2="arm3_left_finger"/>
+    <exclude body1="arm3_right_finger" body2="arm2_left_finger"/>
+    <exclude body1="arm2_right_finger" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_right_finger" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_right_finger" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_right_finger" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_right_finger" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_right_finger" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_right_finger" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_right_finger" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link5" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_left_finger"/>
+    <exclude body1="arm3_fr3_link5" body2="arm2_left_finger"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_right_finger"/>
+    <exclude body1="arm3_fr3_link5" body2="arm2_right_finger"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_fr3_link5" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_fr3_link5" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_fr3_link5" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_fr3_link5" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link6" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_left_finger"/>
+    <exclude body1="arm3_fr3_link6" body2="arm2_left_finger"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_right_finger"/>
+    <exclude body1="arm3_fr3_link6" body2="arm2_right_finger"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_fr3_link6" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_fr3_link6" body2="arm2_fr3_link7"/>
+    <exclude body1="arm2_fr3_link6" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_fr3_link6" body2="arm2_wrist_spin_mount"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_hand"/>
+    <exclude body1="arm3_fr3_link7" body2="arm2_hand"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_left_finger"/>
+    <exclude body1="arm3_fr3_link7" body2="arm2_left_finger"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_right_finger"/>
+    <exclude body1="arm3_fr3_link7" body2="arm2_right_finger"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_fr3_link7" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_fr3_link7" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_fr3_link7" body2="arm3_wrist_spin_mount"/>
+    <exclude body1="arm3_fr3_link7" body2="arm2_wrist_spin_mount"/>
+
+  </contact>
+
+  <keyframe>
+    <key name="home"
+         qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
+               0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
+               0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
+               -1.08 0.29 0.121 1 0 0 0  -1.08 0.41 0.121 1 0 0 0  -0.96 0.41 0.111 0.7071068 0 0 0.7071068  -0.96 0.29 0.112 1 0 0 0  -1.02 0.35 0.126 1 0 0 0"
+         ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 255
+               0 0 0 -1.57079 0 1.57079 -0.7853 0 255
+               0 0 0 -1.57079 0 1.57079 -0.7853 0 255"/>
+  </keyframe>
+</mujoco>

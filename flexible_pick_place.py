@@ -13,22 +13,217 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
 
 SITE_NAME = "attachment_site"
 MOCAP_NAME = "target"
+HAND_BODY_NAME = "hand"
 JOINT_NAMES = tuple(f"fr3_joint{i}" for i in range(1, 8))
 ACTUATOR_NAMES = tuple(f"fr3_joint{i}" for i in range(1, 8))
 GRIPPER_ACTUATOR_NAME = "gripper"
 WRIST_SPIN_JOINT_NAME = "wrist_spin"
 WRIST_SPIN_ACTUATOR_NAME = "wrist_spin"
-GRIPPER_CLOSED_CTRL = 0.0
+GRIPPER_OPEN_CTRL = 255.0
+# The gripper actuator settles at fingertip position = ctrl * GRIPPER_CTRL_TO_WIDTH
+# per finger (tendon equilibrium of the affine bias actuator).
+GRIPPER_CTRL_PER_FINGER_M = 0.01568627451 / 100.0
 # Anti-windup band for the persistent arm control setpoint: the commanded joint
 # targets may never leave this distance (rad) from the measured joint angles.
 SETPOINT_TRACKING_BAND = 0.05
+
+# ---------------------------------------------------------------------------
+# Flexible pick-place knowledge base.
+#
+# Flexibility principle: grasp knowledge is attached to the component TYPE, not
+# to taught waypoints. Instance poses are perceived at task start, so components
+# may lie anywhere in reach with any yaw and the same spec still applies.
+# ---------------------------------------------------------------------------
+APPROACH_CLEARANCE = 0.10   # hover height above grasp/place poses, m
+LIFT_HEIGHT = 0.12          # vertical retreat after grasping, m
+PLACE_DROP = 0.002          # release the part this far above its seated pose, m
+GRASP_FINGER_MARGIN = 0.0015  # visual finger closing margin per side, m
+
+
+@dataclass(frozen=True)
+class ComponentSpec:
+    """Type-level grasp knowledge for one electrical component family."""
+
+    type_name: str
+    grip_width: float            # component width along the gripper closing axis, m
+    half_height: float           # component center to top face, m
+    grasp_depth: float           # how deep below the top face the EE site aims, m
+    grasp_yaw_in_object: float   # EE x-axis yaw relative to the object x-axis, rad
+    yaw_symmetry_rad: float      # placement yaw symmetry (0 = any yaw is fine)
+    place_drop: float = PLACE_DROP
+    seat_press_m: float = 0.0    # extra downward travel while still attached, before release
+    release_dwell_s: float = 0.5
+
+
+COMPONENT_SPECS: dict[str, ComponentSpec] = {
+    "relay": ComponentSpec(
+        type_name="relay",
+        grip_width=0.024,
+        half_height=0.020,
+        grasp_depth=0.012,
+        grasp_yaw_in_object=math.pi / 2.0,
+        yaw_symmetry_rad=math.pi,
+    ),
+    "terminal": ComponentSpec(
+        type_name="terminal",
+        grip_width=0.016,
+        half_height=0.010,
+        grasp_depth=0.008,
+        grasp_yaw_in_object=math.pi / 2.0,
+        yaw_symmetry_rad=math.pi,
+    ),
+    "button": ComponentSpec(
+        type_name="button",
+        grip_width=0.020,
+        half_height=0.011,
+        grasp_depth=0.010,
+        grasp_yaw_in_object=0.0,
+        yaw_symmetry_rad=math.pi,
+        place_drop=0.0,
+        seat_press_m=0.004,
+        release_dwell_s=1.2,
+    ),
+}
+
+# Instance registry: which bodies in the scene belong to which component type.
+COMPONENT_INSTANCES: dict[str, str] = {
+    "relay_1": "relay",
+    "relay_2": "relay",
+    "terminal_1": "terminal",
+    "button_1": "button",
+}
+
+# Demo orders in the project-plan JSON dialect. "instance" may be omitted, in
+# which case the executor picks a free instance of the requested type.
+ORDER_PRESETS: dict[str, list[dict[str, str]]] = {
+    "A": [
+        {"type": "relay", "instance": "relay_1", "target_slot": "slot_1"},
+        {"type": "terminal", "instance": "terminal_1", "target_slot": "slot_5"},
+    ],
+    "B": [
+        {"type": "relay", "instance": "relay_2", "target_slot": "slot_3"},
+        {"type": "button", "instance": "button_1", "target_slot": "slot_2"},
+        {"type": "terminal", "instance": "terminal_1", "target_slot": "slot_6"},
+    ],
+    # Full 4-piece assembly: all component instances, slot_4 (first use), both
+    # 90-deg rotated slots (slot_3 / slot_6), and the button seat-press path.
+    "C": [
+        {"type": "relay", "instance": "relay_2", "target_slot": "slot_1"},
+        {"type": "button", "instance": "button_1", "target_slot": "slot_4"},
+        {"type": "relay", "instance": "relay_1", "target_slot": "slot_3"},
+        {"type": "terminal", "instance": "terminal_1", "target_slot": "slot_6"},
+    ],
+}
+
+
+@dataclass(frozen=True)
+class PickPlaceTask:
+    component: str
+    slot: str
+
+
+def gripper_close_ctrl_for_width(grip_width: float) -> float:
+    """Gripper ctrl value whose finger equilibrium visually pinches the part."""
+    finger_target = max(grip_width / 2.0 - GRASP_FINGER_MARGIN, 0.0)
+    return float(np.clip(finger_target / GRIPPER_CTRL_PER_FINGER_M, 0.0, 255.0))
+
+
+def quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = np.asarray(q1, dtype=float)
+    w2, x2, y2, z2 = np.asarray(q2, dtype=float)
+    return normalize_quat(
+        np.asarray(
+            [
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            ],
+            dtype=float,
+        )
+    )
+
+
+def mat_to_quat(mat: np.ndarray) -> np.ndarray:
+    import mujoco
+
+    quat = np.zeros(4, dtype=float)
+    mujoco.mju_mat2Quat(quat, np.asarray(mat, dtype=float).reshape(9))
+    return normalize_quat(quat)
+
+
+def yaw_from_mat(mat: np.ndarray) -> float:
+    r = np.asarray(mat, dtype=float).reshape(3, 3)
+    return float(math.atan2(r[1, 0], r[0, 0]))
+
+
+def rot_z_mat(angle_rad: float) -> np.ndarray:
+    c = math.cos(float(angle_rad))
+    s = math.sin(float(angle_rad))
+    return np.asarray([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+
+
+def top_down_ee_quat(world_yaw: float) -> np.ndarray:
+    # Roll 180 deg puts the EE blue axis straight down; yaw sets the world-frame
+    # heading of the EE x-axis, which is the finger closing direction.
+    return quat_from_rpy(math.pi, 0.0, world_yaw)
+
+
+def compute_grasp_ee_pose(
+    object_pos: np.ndarray,
+    object_yaw: float,
+    spec: ComponentSpec,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Top-down grasp EE (site) pose from the perceived object pose."""
+    ee_yaw = float(object_yaw) + float(spec.grasp_yaw_in_object)
+    grasp_z = float(object_pos[2]) + float(spec.half_height) - float(spec.grasp_depth)
+    pos = np.asarray([float(object_pos[0]), float(object_pos[1]), grasp_z], dtype=float)
+    return pos, top_down_ee_quat(ee_yaw)
+
+
+def compute_place_ee_pose(
+    object_target_pos: np.ndarray,
+    object_target_yaw: float,
+    attach_pos_site_obj: np.ndarray,
+    attach_mat_site_obj: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Invert the recorded grasp transform: T_WS = T_WO_target * inv(T_SO).
+
+    attach_pos/mat_site_obj is the object pose in the EE-site frame captured at
+    the instant the weld engaged, so the placement inherits the exact measured
+    grasp instead of the nominal design values.
+    """
+    object_mat = rot_z_mat(object_target_yaw)
+    ee_mat = object_mat @ np.asarray(attach_mat_site_obj, dtype=float).T
+    ee_pos = np.asarray(object_target_pos, dtype=float) - ee_mat @ np.asarray(attach_pos_site_obj, dtype=float)
+    return ee_pos, mat_to_quat(ee_mat)
+
+
+@dataclass
+class SkillStep:
+    """One leg of the pick-place skill: a pose goal plus an on-arrival action."""
+
+    label: str
+    pose: Optional[PoseCommand] = None
+    pose_factory: Optional[Callable[[], "PoseCommand"]] = None
+    action: str = ""          # "" | "grasp" | "release"
+    dwell_s: float = 0.1
+    pos_tol: float = 0.004
+    ori_tol: float = 0.05
+
+    def resolve_pose(self) -> "PoseCommand":
+        if self.pose is not None:
+            return self.pose
+        if self.pose_factory is not None:
+            return self.pose_factory()
+        raise ValueError(f"skill step {self.label} has no pose")
 
 
 @dataclass(frozen=True)
@@ -119,6 +314,16 @@ def pose_array_to_command(values: list[float] | np.ndarray) -> PoseCommand:
     raise ValueError("pose must have 6 elements x y z roll pitch yaw or 7 elements x y z qw qx qy qz")
 
 
+def pose_command_from_position_quat(position: np.ndarray, quat: np.ndarray) -> PoseCommand:
+    mat = mat_from_quat(quat)
+    raw_pose = np.concatenate([np.asarray(position, dtype=float), rpy_from_mat(mat)])
+    return PoseCommand(
+        position=np.asarray(position, dtype=float).copy(),
+        quat=np.asarray(quat, dtype=float).copy(),
+        raw_pose=raw_pose,
+    )
+
+
 def format_pose(values: list[float] | np.ndarray) -> str:
     return " ".join(f"{float(x):.6f}" for x in values)
 
@@ -153,6 +358,14 @@ class SharedState:
         self.waypoint_index = 0
         self.waypoint_count = 0
         self.active_mode = "idle"
+        self.skill_task = ""
+        self.skill_step_label = ""
+        self.skill_step_index = 0
+        self.skill_step_count = 0
+        self.task_queue_len = 0
+        self.held_component = ""
+        self.available_components = list(COMPONENT_INSTANCES.keys())
+        self.available_slots: list[str] = []
         self.server_time = time.time()
 
     def snapshot(self) -> dict[str, Any]:
@@ -176,6 +389,14 @@ class SharedState:
                 "waypoint_index": int(self.waypoint_index),
                 "waypoint_count": int(self.waypoint_count),
                 "active_mode": str(self.active_mode),
+                "skill_task": str(self.skill_task),
+                "skill_step_label": str(self.skill_step_label),
+                "skill_step_index": int(self.skill_step_index),
+                "skill_step_count": int(self.skill_step_count),
+                "task_queue_len": int(self.task_queue_len),
+                "held_component": str(self.held_component),
+                "available_components": list(self.available_components),
+                "available_slots": list(self.available_slots),
                 "server_time": float(self.server_time),
             }
 
@@ -224,6 +445,24 @@ class RequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("move_one_step requires exactly one waypoint")
                 self.shared.commands.put({"type": "move", "mode": mode, "waypoints": waypoints})
                 self._send_json({"ok": True})
+            elif self.path == "/pick_place":
+                component = str(payload.get("component", ""))
+                slot = str(payload.get("slot", ""))
+                if not component or not slot:
+                    raise ValueError("pick_place requires component and slot")
+                self.shared.commands.put({"type": "pick_place", "component": component, "slot": slot})
+                self._send_json({"ok": True, "component": component, "slot": slot})
+            elif self.path == "/order":
+                components = payload.get("components", None)
+                preset = str(payload.get("preset", ""))
+                if components is None and preset:
+                    components = ORDER_PRESETS.get(preset.upper())
+                    if components is None:
+                        raise ValueError(f"unknown order preset: {preset}")
+                if not isinstance(components, list) or not components:
+                    raise ValueError("order requires components: [{type, instance?, target_slot}, ...]")
+                self.shared.commands.put({"type": "order", "components": components, "order_id": str(payload.get("order_id", preset or "custom"))})
+                self._send_json({"ok": True, "count": len(components)})
             elif self.path == "/stop":
                 self.shared.commands.put({"type": "stop"})
                 self._send_json({"ok": True})
@@ -324,7 +563,8 @@ def run_ui_client(args: argparse.Namespace) -> int:
     class ControlPanel(QWidget):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("base_develop - FR3 mocap follow")
+            self.setWindowTitle("flexible_pick_place - FR3 柔性取放")
+            self.combos_filled = False
             self.last_pose_rad = [0.0] * 6
             self.last_pose_deg = [0.0] * 6
             self.last_pose_quat = [1.0, 0.0, 0.0, 0.0]
@@ -407,6 +647,43 @@ def run_ui_client(args: argparse.Namespace) -> int:
             btn_row.addStretch(1)
             move_layout.addLayout(btn_row)
             layout.addWidget(move_group)
+
+            skill_group = QGroupBox("Flexible Pick and Place / 柔性取放")
+            skill_layout = QVBoxLayout(skill_group)
+
+            order_row = QHBoxLayout()
+            order_a_btn = QPushButton("执行订单 A (2件)")
+            order_a_btn.clicked.connect(lambda: self.post("/order", {"preset": "A"}))
+            order_b_btn = QPushButton("执行订单 B (3件)")
+            order_b_btn.clicked.connect(lambda: self.post("/order", {"preset": "B"}))
+            order_c_btn = QPushButton("执行订单 C (4件)")
+            order_c_btn.clicked.connect(lambda: self.post("/order", {"preset": "C"}))
+            order_stop_btn = QPushButton("停止任务")
+            order_stop_btn.clicked.connect(lambda: self.post("/stop", {}))
+            order_row.addWidget(order_a_btn)
+            order_row.addWidget(order_b_btn)
+            order_row.addWidget(order_c_btn)
+            order_row.addWidget(order_stop_btn)
+            order_row.addStretch(1)
+            skill_layout.addLayout(order_row)
+
+            single_row = QHBoxLayout()
+            single_row.addWidget(QLabel("元件:"))
+            self.component_combo = QComboBox()
+            single_row.addWidget(self.component_combo)
+            single_row.addWidget(QLabel("目标槽位:"))
+            self.slot_combo = QComboBox()
+            single_row.addWidget(self.slot_combo)
+            single_btn = QPushButton("单件取放")
+            single_btn.clicked.connect(self.run_single_pick_place)
+            single_row.addWidget(single_btn)
+            single_row.addStretch(1)
+            skill_layout.addLayout(single_row)
+
+            self.skill_status_label = QLabel("skill: idle")
+            self.make_label_copyable(self.skill_status_label)
+            skill_layout.addWidget(self.skill_status_label)
+            layout.addWidget(skill_group)
 
             vis_group = QGroupBox("Visibility")
             vis_layout = QHBoxLayout(vis_group)
@@ -503,6 +780,14 @@ def run_ui_client(args: argparse.Namespace) -> int:
         def move_one_step(self) -> None:
             self.post("/move", {"mode": "move_one_step", "waypoints": [self.get_pose_rad()]})
 
+        def run_single_pick_place(self) -> None:
+            component = self.component_combo.currentText()
+            slot = self.slot_combo.currentText()
+            if not component or not slot:
+                QMessageBox.warning(self, "取放任务", "元件/槽位列表尚未加载")
+                return
+            self.post("/pick_place", {"component": component, "slot": slot})
+
         def refresh_state(self) -> None:
             try:
                 state = get_json(base_url + "/state", timeout=0.5)
@@ -534,6 +819,26 @@ def run_ui_client(args: argparse.Namespace) -> int:
                 wp_n = int(state.get("waypoint_count", 0))
                 self.status_label.setText(f"{state.get('status', '')} [{mode} {wp_i}/{wp_n}]")
 
+                if not self.combos_filled:
+                    components = [str(x) for x in state.get("available_components", [])]
+                    slots = [str(x) for x in state.get("available_slots", [])]
+                    if components and slots:
+                        self.component_combo.addItems(components)
+                        self.slot_combo.addItems(slots)
+                        self.combos_filled = True
+                task = str(state.get("skill_task", ""))
+                step_label = str(state.get("skill_step_label", ""))
+                step_i = int(state.get("skill_step_index", 0))
+                step_n = int(state.get("skill_step_count", 0))
+                queue_len = int(state.get("task_queue_len", 0))
+                held = str(state.get("held_component", ""))
+                if task:
+                    self.skill_status_label.setText(
+                        f"skill: {task}  step {step_i}/{step_n} [{step_label}]  queue: {queue_len}  held: {held or '-'}"
+                    )
+                else:
+                    self.skill_status_label.setText(f"skill: idle  queue: {queue_len}  held: {held or '-'}")
+
                 show_ee = bool(state.get("show_ee_axes", True))
                 if self.ee_checkbox.isChecked() != show_ee:
                     self.ee_checkbox.blockSignals(True)
@@ -558,17 +863,19 @@ def run_ui_client(args: argparse.Namespace) -> int:
     panel = ControlPanel()
     panel.resize(1280, 720)
     panel.show()
-    print("[UI] base_develop PySide6 panel opened.", flush=True)
+    print("[UI] flexible_pick_place PySide6 panel opened.", flush=True)
     return int(app.exec())
 
 
 def print_terminal_help() -> None:
     print(
         "\n[终端命令]\n"
+        "  pick <元件> <槽位>   单件柔性取放，例如: pick relay_1 slot_1\n"
+        "  order_a/b/c         执行预设订单 A / B / C\n"
         "  ee_axes on/off      显示/隐藏机械臂末端坐标轴\n"
         "  mocap on/off        显示/隐藏 mocap target\n"
         "  offset 0.0          设置 mocap z 补偿\n"
-        "  stop                停止 Move One Step\n"
+        "  stop                停止当前任务/Move One Step\n"
         "  help                显示命令\n",
         flush=True,
     )
@@ -605,6 +912,18 @@ def start_terminal_thread(shared: SharedState) -> None:
                     continue
                 shared.mocap_z_comp = value
                 shared.commands.put({"type": "offset", "mocap_z_comp": value})
+            elif cmd.startswith("pick "):
+                parts = cmd.split()
+                if len(parts) != 3:
+                    print("[terminal] 用法: pick <元件> <槽位>", flush=True)
+                    continue
+                shared.commands.put({"type": "pick_place", "component": parts[1], "slot": parts[2]})
+            elif cmd.startswith("order_"):
+                preset = cmd.split("_", 1)[1].upper()
+                if preset not in ORDER_PRESETS:
+                    print(f"[terminal] 未知订单预设: {preset}", flush=True)
+                    continue
+                shared.commands.put({"type": "order", "components": ORDER_PRESETS[preset], "order_id": preset})
             elif cmd == "stop":
                 shared.commands.put({"type": "stop"})
             elif cmd == "help":
@@ -643,13 +962,34 @@ def run_controller(args: argparse.Namespace) -> int:
     original_geom_rgba = model.geom_rgba.copy()
     original_site_rgba = model.site_rgba.copy()
     model.opt.timestep = float(args.dt)
-    if not args.real_gravity:
+    if args.zero_gravity:
         model.opt.gravity[:] = 0.0
 
     site_id = int(model.site(SITE_NAME).id)
     mocap_id = int(model.body(MOCAP_NAME).mocapid[0])
     if mocap_id < 0:
         raise ValueError(f"Body {MOCAP_NAME!r} is not a mocap body.")
+    hand_body_id = int(model.body(HAND_BODY_NAME).id)
+
+    # Component / slot / grasp-weld registries. Slots are discovered from the
+    # model so adding a slot in the XML automatically extends the system.
+    component_body_ids: dict[str, int] = {}
+    component_weld_ids: dict[str, int] = {}
+    for instance_name in COMPONENT_INSTANCES:
+        try:
+            component_body_ids[instance_name] = int(model.body(instance_name).id)
+            component_weld_ids[instance_name] = int(model.equality(f"grasp_{instance_name}").id)
+        except KeyError:
+            pass
+    slot_site_ids: dict[str, int] = {}
+    for i in range(model.nsite):
+        name = model.site(i).name
+        if name and name.startswith("slot_"):
+            slot_site_ids[name] = int(i)
+    shared.update(
+        available_components=sorted(component_body_ids.keys()),
+        available_slots=sorted(slot_site_ids.keys()),
+    )
 
     joint_ids = np.asarray([int(model.joint(name).id) for name in JOINT_NAMES], dtype=int)
     qpos_ids = np.asarray([int(model.jnt_qposadr[jid]) for jid in joint_ids], dtype=int)
@@ -792,7 +1132,7 @@ def run_controller(args: argparse.Namespace) -> int:
         return float(value + np.clip(target - value, -abs(max_delta), abs(max_delta)))
 
     if gripper_actuator_id is not None:
-        data.ctrl[gripper_actuator_id] = GRIPPER_CLOSED_CTRL
+        data.ctrl[gripper_actuator_id] = GRIPPER_OPEN_CTRL
     mujoco.mj_forward(model, data)
 
     def maybe_geom(name: str) -> Optional[int]:
@@ -859,6 +1199,135 @@ def run_controller(args: argparse.Namespace) -> int:
         mujoco.mju_quat2Vel(omega, error_quat, 1.0)
         return float(np.linalg.norm(omega))
 
+    # ------------------------------------------------------------------
+    # Flexible pick-place skill helpers.
+    # ------------------------------------------------------------------
+    def component_spec_of(instance: str) -> ComponentSpec:
+        return COMPONENT_SPECS[COMPONENT_INSTANCES[instance]]
+
+    def perceive_component(instance: str) -> tuple[np.ndarray, float]:
+        """Simulated perception: read the instance pose from the physics state."""
+        body_id = component_body_ids[instance]
+        pos = np.array(data.body(body_id).xpos, copy=True)
+        yaw = yaw_from_mat(np.asarray(data.body(body_id).xmat, dtype=float))
+        return pos, yaw
+
+    def slot_pose(slot: str) -> tuple[np.ndarray, float]:
+        sid = slot_site_ids[slot]
+        pos = np.array(data.site(sid).xpos, copy=True)
+        yaw = yaw_from_mat(np.asarray(data.site(sid).xmat, dtype=float))
+        return pos, yaw
+
+    def attach_component(instance: str) -> dict[str, np.ndarray]:
+        """Engage the pre-declared weld with the measured hand-object pose and
+        record the site->object transform for the placement inverse map."""
+        body_id = component_body_ids[instance]
+        eq_id = component_weld_ids[instance]
+        hand_pos = np.asarray(data.body(hand_body_id).xpos, dtype=float)
+        hand_mat = np.asarray(data.body(hand_body_id).xmat, dtype=float).reshape(3, 3)
+        obj_pos = np.asarray(data.body(body_id).xpos, dtype=float)
+        obj_mat = np.asarray(data.body(body_id).xmat, dtype=float).reshape(3, 3)
+        rel_pos = hand_mat.T @ (obj_pos - hand_pos)
+        rel_quat = mat_to_quat(hand_mat.T @ obj_mat)
+        model.eq_data[eq_id, :] = 0.0
+        model.eq_data[eq_id, 3:6] = rel_pos
+        model.eq_data[eq_id, 6:10] = rel_quat
+        model.eq_data[eq_id, 10] = 1.0
+        data.eq_active[eq_id] = 1
+        site_pos = np.asarray(data.site(site_id).xpos, dtype=float)
+        site_mat = np.asarray(data.site(site_id).xmat, dtype=float).reshape(3, 3)
+        return {
+            "pos_site_obj": site_mat.T @ (obj_pos - site_pos),
+            "mat_site_obj": site_mat.T @ obj_mat,
+        }
+
+    def detach_component(instance: str) -> None:
+        data.eq_active[component_weld_ids[instance]] = 0
+
+    def build_pick_place_steps(task: PickPlaceTask, attach_record: dict[str, Any]) -> list[SkillStep]:
+        """Parameterized six-leg trajectory. Pick legs are generated from the
+        perceived component pose NOW; place legs are deferred factories that use
+        the grasp transform captured at weld-engage time."""
+        spec = component_spec_of(task.component)
+        object_pos, object_yaw = perceive_component(task.component)
+        grasp_pos, grasp_quat = compute_grasp_ee_pose(object_pos, object_yaw, spec)
+        approach_pos = grasp_pos + np.asarray([0.0, 0.0, APPROACH_CLEARANCE])
+        lift_pos = grasp_pos + np.asarray([0.0, 0.0, LIFT_HEIGHT])
+
+        def place_ee_pose() -> tuple[np.ndarray, np.ndarray]:
+            slot_pos, slot_yaw = slot_pose(task.slot)
+            object_target_pos = slot_pos + np.asarray([0.0, 0.0, spec.half_height + spec.place_drop])
+            return compute_place_ee_pose(
+                object_target_pos,
+                slot_yaw,
+                attach_record["pos_site_obj"],
+                attach_record["mat_site_obj"],
+            )
+
+        def place_pose_cmd() -> PoseCommand:
+            pos, quat = place_ee_pose()
+            return pose_command_from_position_quat(pos, quat)
+
+        def seat_pose_cmd() -> PoseCommand:
+            pos, quat = place_ee_pose()
+            pos = pos - np.asarray([0.0, 0.0, float(spec.seat_press_m)])
+            return pose_command_from_position_quat(pos, quat)
+
+        def transfer_pose_cmd() -> PoseCommand:
+            pos, quat = place_ee_pose()
+            return pose_command_from_position_quat(pos + np.asarray([0.0, 0.0, APPROACH_CLEARANCE]), quat)
+
+        steps = [
+            SkillStep("approach", pose=pose_command_from_position_quat(approach_pos, grasp_quat)),
+            SkillStep("descend", pose=pose_command_from_position_quat(grasp_pos, grasp_quat), pos_tol=0.003),
+            SkillStep("grasp_close", pose=pose_command_from_position_quat(grasp_pos, grasp_quat), action="close_gripper", dwell_s=0.45),
+            SkillStep("grasp_attach", pose=pose_command_from_position_quat(grasp_pos, grasp_quat), action="attach", dwell_s=0.15),
+            SkillStep("lift", pose=pose_command_from_position_quat(lift_pos, grasp_quat)),
+            SkillStep("transfer", pose_factory=transfer_pose_cmd),
+            SkillStep("place", pose_factory=place_pose_cmd, pos_tol=0.003),
+        ]
+        if float(spec.seat_press_m) > 0.0:
+            steps.append(SkillStep("seat_press", pose_factory=seat_pose_cmd, pos_tol=0.002, dwell_s=0.35))
+        steps.extend(
+            [
+                SkillStep(
+                    "release",
+                    pose_factory=seat_pose_cmd if float(spec.seat_press_m) > 0.0 else place_pose_cmd,
+                    action="release",
+                    dwell_s=float(spec.release_dwell_s),
+                ),
+                SkillStep("retreat", pose_factory=transfer_pose_cmd, dwell_s=0.25),
+            ]
+        )
+        return steps
+
+    def resolve_order_entries(entries: list[dict[str, Any]], reserved: set[str]) -> list[PickPlaceTask]:
+        """Turn order JSON entries into concrete tasks. Instances may be omitted:
+        the first free instance of the requested type is auto-selected."""
+        tasks: list[PickPlaceTask] = []
+        for entry in entries:
+            type_name = str(entry.get("type", ""))
+            slot = str(entry.get("target_slot", ""))
+            instance = str(entry.get("instance", "") or "")
+            if slot not in slot_site_ids:
+                raise ValueError(f"unknown slot: {slot}")
+            if instance:
+                if instance not in component_body_ids:
+                    raise ValueError(f"unknown component instance: {instance}")
+                if type_name and COMPONENT_INSTANCES.get(instance) != type_name:
+                    raise ValueError(f"instance {instance} is not of type {type_name}")
+            else:
+                candidates = [
+                    name for name, tname in COMPONENT_INSTANCES.items()
+                    if tname == type_name and name in component_body_ids and name not in reserved
+                ]
+                if not candidates:
+                    raise ValueError(f"no free instance of type {type_name}")
+                instance = sorted(candidates)[0]
+            reserved.add(instance)
+            tasks.append(PickPlaceTask(component=instance, slot=slot))
+        return tasks
+
     snap_mocap_to_site()
 
     print("[3/5] Opening MuJoCo viewer.", flush=True)
@@ -898,6 +1367,17 @@ def run_controller(args: argparse.Namespace) -> int:
         q_arm_ctrl_target = np.array(data.qpos[qpos_ids], copy=True)
         arm_in_deadband = False
 
+        # Flexible pick-place skill state.
+        gripper_ctrl_target = GRIPPER_OPEN_CTRL
+        task_queue: list[PickPlaceTask] = []
+        active_task: Optional[PickPlaceTask] = None
+        active_steps: list[SkillStep] = []
+        active_step_index = 0
+        skill_phase = "move"  # "move" -> waiting for arrival, "dwell" -> action settling
+        skill_dwell_until = 0.0
+        skill_attach_record: dict[str, Any] = {}
+        held_component = ""
+
         while viewer.is_running() and running:
             step_start = time.time()
 
@@ -911,6 +1391,12 @@ def run_controller(args: argparse.Namespace) -> int:
                     if ctype == "move":
                         waypoints = [pose_array_to_command(item) for item in command.get("waypoints", [])]
                         if waypoints:
+                            # Manual jogging cancels any running pick-place task.
+                            task_queue.clear()
+                            active_task = None
+                            active_steps = []
+                            active_step_index = 0
+                            skill_phase = "move"
                             motion.active_mode = str(command.get("mode", "move_one_step"))
                             motion.current_goal = waypoints[0]
                             motion.remaining_goals = waypoints[1:]
@@ -918,15 +1404,39 @@ def run_controller(args: argparse.Namespace) -> int:
                             motion.total_goal_count = len(waypoints)
                             set_mocap_pose(motion.current_goal)
                             status = f"start {motion.active_mode}: waypoint {motion.active_goal_index}/{motion.total_goal_count}"
+                    elif ctype == "pick_place":
+                        instance = str(command.get("component", ""))
+                        slot = str(command.get("slot", ""))
+                        if instance not in component_body_ids:
+                            raise ValueError(f"unknown component: {instance}")
+                        if slot not in slot_site_ids:
+                            raise ValueError(f"unknown slot: {slot}")
+                        motion.clear()
+                        task_queue.append(PickPlaceTask(component=instance, slot=slot))
+                        status = f"queued pick_place: {instance} -> {slot}"
+                    elif ctype == "order":
+                        entries = command.get("components", [])
+                        reserved = {t.component for t in task_queue}
+                        if active_task is not None:
+                            reserved.add(active_task.component)
+                        tasks = resolve_order_entries(list(entries), reserved)
+                        motion.clear()
+                        task_queue.extend(tasks)
+                        status = f"order {command.get('order_id', '')} queued: {len(tasks)} tasks"
                     elif ctype == "stop":
                         motion.clear()
+                        task_queue.clear()
+                        active_task = None
+                        active_steps = []
+                        active_step_index = 0
+                        skill_phase = "move"
                         joint_centering_active = joint_centering_enabled
                         arm_posture_reference = np.array(data.qpos[qpos_ids], copy=True)
                         q_arm_ctrl_target = np.array(data.qpos[qpos_ids], copy=True)
                         snap_mocap_to_site()
                         if wrist_spin_qpos_id is not None:
                             wrist_spin_target_rad = float(data.qpos[wrist_spin_qpos_id])
-                        status = "stopped; target snapped to current EE pose"
+                        status = "stopped; tasks cleared; target snapped to current EE pose"
                     elif ctype == "ee_axes":
                         shared.show_ee_axes = bool(command.get("visible", True))
                     elif ctype == "mocap":
@@ -946,8 +1456,54 @@ def run_controller(args: argparse.Namespace) -> int:
             apply_visibility(ee_geom_ids, ee_site_ids, bool(shared.show_ee_axes))
             apply_visibility(mocap_geom_ids, mocap_site_ids, bool(shared.show_mocap))
 
+            # ---- Flexible pick-place skill state machine ----
+            if active_task is None and task_queue:
+                active_task = task_queue.pop(0)
+                skill_attach_record = {}
+                try:
+                    active_steps = build_pick_place_steps(active_task, skill_attach_record)
+                    active_step_index = 0
+                    skill_phase = "move"
+                    set_mocap_pose(active_steps[0].resolve_pose())
+                    status = f"task start: {active_task.component} -> {active_task.slot}"
+                except Exception as exc:
+                    status = f"task failed to start: {exc}"
+                    active_task = None
+                    active_steps = []
+
+            if active_task is not None and active_steps:
+                step = active_steps[active_step_index]
+                if skill_phase == "move":
+                    pos_err_step = float(np.linalg.norm(compensated_target_pos() - data.site(site_id).xpos))
+                    ori_err_step = orientation_error()
+                    if pos_err_step < float(step.pos_tol) and ori_err_step < float(step.ori_tol):
+                        if step.action == "close_gripper":
+                            gripper_ctrl_target = gripper_close_ctrl_for_width(component_spec_of(active_task.component).grip_width)
+                        elif step.action == "attach":
+                            skill_attach_record.update(attach_component(active_task.component))
+                            held_component = active_task.component
+                        elif step.action == "release":
+                            detach_component(active_task.component)
+                            gripper_ctrl_target = GRIPPER_OPEN_CTRL
+                            held_component = ""
+                        skill_phase = "dwell"
+                        skill_dwell_until = time.time() + float(step.dwell_s)
+                elif skill_phase == "dwell" and time.time() >= skill_dwell_until:
+                    active_step_index += 1
+                    skill_phase = "move"
+                    if active_step_index >= len(active_steps):
+                        status = f"task complete: {active_task.component} -> {active_task.slot}"
+                        active_task = None
+                        active_steps = []
+                        active_step_index = 0
+                        if not task_queue:
+                            snap_mocap_to_site()
+                    else:
+                        set_mocap_pose(active_steps[active_step_index].resolve_pose())
+                        status = f"{active_task.component} -> {active_task.slot}: {active_steps[active_step_index].label}"
+
             if gripper_actuator_id is not None:
-                data.ctrl[gripper_actuator_id] = GRIPPER_CLOSED_CTRL
+                data.ctrl[gripper_actuator_id] = float(gripper_ctrl_target)
 
             if motion.current_goal is not None:
                 pos_err_goal = float(np.linalg.norm(compensated_target_pos() - data.site(site_id).xpos))
@@ -1086,7 +1642,17 @@ def run_controller(args: argparse.Namespace) -> int:
                     viewer_running=True,
                     waypoint_index=int(motion.active_goal_index),
                     waypoint_count=int(motion.total_goal_count),
-                    active_mode=motion.active_mode or "idle",
+                    active_mode=motion.active_mode or ("pick_place" if active_task is not None else "idle"),
+                    skill_task=(f"{active_task.component} -> {active_task.slot}" if active_task is not None else ""),
+                    skill_step_label=(
+                        active_steps[active_step_index].label
+                        if active_task is not None and active_step_index < len(active_steps)
+                        else ""
+                    ),
+                    skill_step_index=int(active_step_index + 1) if active_task is not None else 0,
+                    skill_step_count=int(len(active_steps)),
+                    task_queue_len=int(len(task_queue)),
+                    held_component=str(held_component),
                     show_ee_axes=bool(shared.show_ee_axes),
                     show_mocap=bool(shared.show_mocap),
                     mocap_z_comp=float(shared.mocap_z_comp),
@@ -1106,13 +1672,13 @@ def run_controller(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Minimal FR3 mocap target follower with Move One Step UI")
+    parser = argparse.ArgumentParser(description="Flexible FR3 pick-and-place cell: order-driven parameterized grasping onto an electrical mounting board")
     parser.add_argument("--ui-client", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--ui-python", type=str, default=None)
     parser.add_argument("--no-ui", action="store_true")
     parser.add_argument("--no-terminal-commands", action="store_true")
-    parser.add_argument("--xml", type=str, default=str(Path(__file__).with_name("base_develop.xml")))
+    parser.add_argument("--xml", type=str, default=str(Path(__file__).with_name("flexible_pick_place.xml")))
     parser.add_argument("--dt", type=float, default=0.002)
     parser.add_argument("--kpos", type=float, default=3.6)
     parser.add_argument("--kori", type=float, default=3.6)
@@ -1132,8 +1698,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hide-ee-axes", action="store_true")
     parser.add_argument("--hide-mocap", action="store_true")
     parser.add_argument("--mocap-z-comp", type=float, default=0.0)
-    parser.add_argument("--real-gravity", action="store_true", help="Use MuJoCo's normal gravity instead of zero gravity")
-    parser.add_argument("--gravity-comp", action="store_true", help="Enable robot body gravity compensation")
+    parser.add_argument("--zero-gravity", action="store_true", help="Disable gravity (components will float; debugging only)")
+    parser.add_argument("--gravity-comp", action="store_true", default=True, help="Enable robot body gravity compensation (default on)")
     parser.add_argument("--no-gravity-comp", action="store_false", dest="gravity_comp", help=argparse.SUPPRESS)
     parser.add_argument("--show-mujoco-ui", action="store_true")
     parser.add_argument("--show-site-frame-glyphs", action="store_true")

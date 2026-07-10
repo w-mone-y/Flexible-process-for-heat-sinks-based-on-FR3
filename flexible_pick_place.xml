@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
-<mujoco model="base_develop_fr3_mocap_follow">
+<mujoco model="flexible_pick_place_fr3">
   <compiler angle="radian" meshdir="franka_fr3/assets" autolimits="true"/>
-  <option integrator="implicitfast" cone="elliptic" impratio="5" density="0" viscosity="0" gravity="0 0 0"/>
+  <option integrator="implicitfast" cone="elliptic" impratio="5" density="0" viscosity="0" gravity="0 0 -9.81"/>
 
   <default>
     <default class="fr3">
@@ -33,6 +33,22 @@
         <joint axis="0 1 0" type="slide" range="0 0.04" damping="10" armature="0.01" frictionloss="0"/>
       </default>
     </default>
+    <!-- Static workcell furniture: collides with both the robot (bit 1) and the
+         components (bit 2). -->
+    <default class="workcell">
+      <geom type="box" contype="3" conaffinity="3" friction="1.0 0.005 0.0001"/>
+    </default>
+    <!-- Free components: collide with the environment and each other (bit 2) but
+         NOT with the robot/fingers (bit 1). Grasping is a logical weld attach, so
+         finger closing is a visual animation and must never push components away. -->
+    <default class="component_collision">
+      <geom contype="2" conaffinity="2" condim="4" friction="1.0 0.005 0.0001" group="3"/>
+    </default>
+    <!-- Component visual layer: swap freely for textures/meshes later without
+         touching physics. -->
+    <default class="component_visual">
+      <geom density="0" contype="0" conaffinity="0" group="2"/>
+    </default>
   </default>
 
   <asset>
@@ -47,6 +63,16 @@
     <material name="button_red" rgba="0.520996 0.008023 0.013702 1"/>
     <material name="button_blue" rgba="0.024157 0.445201 0.737911 1"/>
     <material name="off_white" rgba="0.901961 0.921569 0.929412 1"/>
+
+    <!-- Workcell materials. board_green is the mount point for a future photo
+         texture of a real low-voltage mounting board. -->
+    <material name="rack_surface" rgba="0.55 0.42 0.28 1"/>
+    <material name="station_surface" rgba="0.42 0.44 0.48 1"/>
+    <material name="board_green" rgba="0.16 0.35 0.22 1" specular="0.2" shininess="0.3"/>
+    <material name="relay_blue" rgba="0.16 0.38 0.80 1"/>
+    <material name="relay_blue_light" rgba="0.35 0.55 0.90 1"/>
+    <material name="terminal_gray" rgba="0.72 0.72 0.74 1"/>
+    <material name="button_module_red" rgba="0.80 0.12 0.10 1"/>
 
     <mesh file="link0_0.obj"/>
     <mesh file="link0_1.obj"/>
@@ -103,7 +129,7 @@
 
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
-    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" friction="1.2 0.1 0.01"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" friction="1.2 0.1 0.01" contype="3" conaffinity="3"/>
 
     <body name="target" pos="0.45 0 0.45" quat="0 1 0 0" mocap="true">
       <geom name="target_box" type="box" size="0.025 0.025 0.025" contype="0" conaffinity="0" rgba="0.6 0.3 0.3 0.35" group="1"/>
@@ -111,6 +137,25 @@
       <geom name="target_axis_x" type="capsule" fromto="0 0 0 0.09 0 0" size="0.003" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
       <geom name="target_axis_y" type="capsule" fromto="0 0 0 0 0.09 0" size="0.003" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
       <geom name="target_axis_z" type="capsule" fromto="0 0 0 0 0 0.09" size="0.003" rgba="0 0.35 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+    </body>
+
+    <!-- Feeding rack (left side): components start here. -->
+    <body name="feed_rack" pos="0.30 0.38 0">
+      <geom name="feed_rack_top" class="workcell" size="0.15 0.10 0.05" pos="0 0 0.05" material="rack_surface"/>
+    </body>
+
+    <!-- Assembly station (right side): pedestal + low-voltage mounting board with
+         six parameterized slots. Slot sites carry position AND yaw; slot_3/slot_6
+         are rotated 90 deg to exercise flexible placement orientation. -->
+    <body name="assembly_station" pos="0.50 -0.15 0">
+      <geom name="assembly_pedestal" class="workcell" size="0.17 0.14 0.05" pos="0 0 0.05" material="station_surface"/>
+      <geom name="electrical_board" class="workcell" size="0.15 0.12 0.005" pos="0 0 0.105" material="board_green"/>
+      <site name="slot_1" type="box" size="0.045 0.020 0.0008" pos="-0.09 0.06 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <site name="slot_2" type="box" size="0.045 0.020 0.0008" pos="0 0.06 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <site name="slot_3" type="box" size="0.045 0.020 0.0008" pos="0.09 0.06 0.111" quat="0.7071068 0 0 0.7071068" rgba="0.9 0.8 0.2 0.35" group="1"/>
+      <site name="slot_4" type="box" size="0.045 0.020 0.0008" pos="-0.09 -0.06 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <site name="slot_5" type="box" size="0.045 0.020 0.0008" pos="0 -0.06 0.111" rgba="0.2 0.9 0.4 0.35" group="1"/>
+      <site name="slot_6" type="box" size="0.045 0.020 0.0008" pos="0.09 -0.06 0.111" quat="0.7071068 0 0 0.7071068" rgba="0.9 0.8 0.2 0.35" group="1"/>
     </body>
 
     <body name="base" childclass="fr3">
@@ -210,7 +255,6 @@
                           <geom class="fingertip_pad_collision_4"/>
                           <geom class="fingertip_pad_collision_5"/>
                         </body>
-
                       </body>
                     </body>
                     </body>
@@ -221,6 +265,39 @@
           </body>
         </body>
       </body>
+    </body>
+
+    <!-- Free components, declared AFTER the arm so their freejoint qpos live at the
+         end of qpos (keyframe layout: 10 robot values first, then 7 per component).
+         Collision layer = simple primitives (physics); visual layer = separate
+         geoms that can later be upgraded to textures/meshes without touching
+         physics. -->
+    <body name="relay_1" pos="0.24 0.32 0.121">
+      <freejoint name="relay_1_free"/>
+      <geom name="relay_1_col" class="component_collision" type="box" size="0.015 0.012 0.020" mass="0.06"/>
+      <geom name="relay_1_vis" class="component_visual" type="box" size="0.015 0.012 0.020" material="relay_blue"/>
+      <geom name="relay_1_vis_top" class="component_visual" type="box" size="0.010 0.008 0.002" pos="0 0 0.021" material="off_white"/>
+    </body>
+    <body name="relay_2" pos="0.24 0.44 0.121">
+      <freejoint name="relay_2_free"/>
+      <geom name="relay_2_col" class="component_collision" type="box" size="0.015 0.012 0.020" mass="0.06"/>
+      <geom name="relay_2_vis" class="component_visual" type="box" size="0.015 0.012 0.020" material="relay_blue_light"/>
+      <geom name="relay_2_vis_top" class="component_visual" type="box" size="0.010 0.008 0.002" pos="0 0 0.021" material="off_white"/>
+    </body>
+    <body name="terminal_1" pos="0.36 0.44 0.111" quat="0.7071068 0 0 0.7071068">
+      <freejoint name="terminal_1_free"/>
+      <geom name="terminal_1_col" class="component_collision" type="box" size="0.040 0.008 0.010" mass="0.04"/>
+      <geom name="terminal_1_vis" class="component_visual" type="box" size="0.040 0.008 0.010" material="terminal_gray"/>
+      <geom name="terminal_1_vis_top" class="component_visual" type="box" size="0.036 0.005 0.002" pos="0 0 0.011" material="black"/>
+    </body>
+    <body name="button_1" pos="0.36 0.32 0.112">
+      <freejoint name="button_1_free"/>
+      <!-- Box collision with a wide footprint: real button modules mount on a square
+           base; a pure cylinder tips too easily after release. Visual stays cylindrical. -->
+      <geom name="button_1_col" class="component_collision" type="box" size="0.016 0.016 0.011" mass="0.02"
+            friction="1.4 0.01 0.001"/>
+      <geom name="button_1_vis" class="component_visual" type="cylinder" size="0.011 0.009" pos="0 0 0.002" material="button_module_red"/>
+      <geom name="button_1_vis_top" class="component_visual" type="cylinder" size="0.007 0.002" pos="0 0 0.012" material="off_white"/>
     </body>
   </worldbody>
 
@@ -233,6 +310,12 @@
 
   <equality>
     <joint joint1="finger_joint1" joint2="finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
+    <!-- Logical grasp attachments: one pre-declared weld per component, enabled at
+         runtime with the measured hand-object relative pose. -->
+    <weld name="grasp_relay_1" body1="hand" body2="relay_1" active="false" solref="0.004 1"/>
+    <weld name="grasp_relay_2" body1="hand" body2="relay_2" active="false" solref="0.004 1"/>
+    <weld name="grasp_terminal_1" body1="hand" body2="terminal_1" active="false" solref="0.004 1"/>
+    <weld name="grasp_button_1" body1="hand" body2="button_1" active="false" solref="0.004 1"/>
   </equality>
 
   <actuator>
@@ -258,6 +341,12 @@
   </contact>
 
   <keyframe>
-    <key name="home" qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0 0" ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 0"/>
+    <key name="home"
+         qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
+               0.24 0.32 0.121 1 0 0 0
+               0.24 0.44 0.121 1 0 0 0
+               0.36 0.44 0.111 0.7071068 0 0 0.7071068
+               0.36 0.32 0.112 1 0 0 0"
+         ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 255"/>
   </keyframe>
 </mujoco>
