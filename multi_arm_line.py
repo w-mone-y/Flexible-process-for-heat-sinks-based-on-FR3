@@ -701,7 +701,15 @@ class PipelineWorld:
                 raise RuntimeError("assemble_place requires gripper_press tool")
             print(f"[Arm2] Move {job.component} to {job.slot}", flush=True)
             site_id = self.slot_site_ids[job.slot]
-            return place_steps(job.component, spec, lambda: self.site_pose(site_id), job.attach_asm, keep_grip=True)
+            # Must fully open fingers + detach weld BEFORE retreat, otherwise
+            # the weld carries the part up and it floats in mid-air.
+            return place_steps(
+                job.component,
+                spec,
+                lambda: self.site_pose(site_id),
+                job.attach_asm,
+                seat_on_release=True,
+            )
         if stage.name == "press":
             arm = self.arms[stage.arm]
             if self.tool_mgr.state["current_tool"] != "gripper_press":
@@ -711,14 +719,13 @@ class PipelineWorld:
             pos, _ = self.objects.perceive(job.component)
             _, slot_yaw = self.site_pose(self.slot_site_ids[job.slot])
             top = pos + np.asarray([0.0, 0.0, float(spec.half_height)])
-            holding = arm.held_component == job.component
             return press_steps(
                 job.component,
                 top,
                 slot_yaw,
                 arm.tool_offsets["press"],
                 (job.component, job.slot),
-                release_after=holding,
+                fixture_after=True,
             )
         if stage.name == "screw":
             arm = self.arms[stage.arm]

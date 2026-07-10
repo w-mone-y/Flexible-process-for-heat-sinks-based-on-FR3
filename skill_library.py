@@ -279,13 +279,15 @@ def place_steps(
     attach_record: dict[str, Any],
     loose_tol: bool = False,
     release_dwell_s: Optional[float] = None,
-    keep_grip: bool = False,
+    seat_on_release: bool = False,
 ) -> list[SkillStep]:
-    """transfer -> place -> [release] -> retreat. Target pose is deferred so the
-    placement follows the site even if perception updates later.
+    """transfer -> place -> open fingers -> detach weld -> retreat.
 
-    When keep_grip is True the gripper stays closed after placement (Arm2
-    insert-then-press flow: release happens in press_steps)."""
+    Order is critical: fingers must open and the grasp weld must be cleared
+    BEFORE the arm lifts, otherwise the part rides up and floats in mid-air.
+
+    When seat_on_release is True (Arm2 board placement), a seat action snaps
+    the part onto the slot pose right after detach so it cannot drift."""
 
     def place_ee_pose() -> tuple[np.ndarray, np.ndarray]:
         target_pos, target_yaw = target_pose_getter()
@@ -301,14 +303,38 @@ def place_steps(
         return pose_cmd(pos + np.asarray([0.0, 0.0, APPROACH_CLEARANCE]), quat)
 
     dwell = float(spec.release_dwell_s) if release_dwell_s is None else float(release_dwell_s)
+    # Fingers need time to fully open before the weld is cut and the arm lifts.
+    open_dwell = max(dwell, 0.55)
     pos_tol = 0.005 if loose_tol else 0.003
     steps = [
         SkillStep("transfer", pose_factory=transfer_pose_cmd),
         SkillStep("place", pose_factory=place_pose_cmd, pos_tol=pos_tol),
+        SkillStep(
+            "release_open",
+            pose_factory=place_pose_cmd,
+            action="open_gripper",
+            dwell_s=open_dwell,
+            pos_tol=pos_tol,
+        ),
+        SkillStep(
+            "release_detach",
+            pose_factory=place_pose_cmd,
+            action="release",
+            action_arg=instance,
+            dwell_s=0.25,
+            pos_tol=pos_tol,
+        ),
     ]
-    if not keep_grip:
+    if seat_on_release:
         steps.append(
-            SkillStep("release", pose_factory=place_pose_cmd, action="release", action_arg=instance, dwell_s=dwell)
+            SkillStep(
+                "release_seat",
+                pose_factory=place_pose_cmd,
+                action="place_seat",
+                action_arg=instance,
+                dwell_s=0.15,
+                pos_tol=pos_tol,
+            )
         )
     steps.append(SkillStep("retreat", pose_factory=transfer_pose_cmd, dwell_s=0.2))
     return steps
@@ -320,17 +346,16 @@ def press_steps(
     slot_yaw: float,
     press_offset_site: np.ndarray,
     snap_arg: Any,
-    release_after: bool = False,
+    fixture_after: bool = False,
 ) -> list[SkillStep]:
     """Press-fit process (plan: independent stage using the press head).
 
-    The press face (a tool rigidly mounted next to the gripper) is aligned to
-    the component top center, pushed down PRESS_DEPTH, held, then retracted.
-    On the hold step the positioning-fixture snap action seats the component.
+    The press face is aligned to the component top center, pushed down
+    PRESS_DEPTH, held, then retracted. On the hold step the positioning-
+    fixture snap seats the component.
 
-    When release_after is True (Arm2 quick-change flow) the gripper opens,
-    the part is detached, and the board fixture weld is activated so the
-    component survives the subsequent tool swap."""
+    When fixture_after is True (Arm2 quick-change flow) the board fixture
+    weld is activated after press so the part survives the tool swap."""
     quat = top_down_ee_quat(slot_yaw)
     top = np.asarray(component_top_pos, dtype=float)
     hover_ee = compute_tool_ee_pose(top + np.asarray([0.0, 0.0, PRESS_HOVER]), quat, press_offset_site)
@@ -342,25 +367,15 @@ def press_steps(
         SkillStep("press_hold", pose=pose_cmd(press_ee, quat), action="press_seat", action_arg=snap_arg, dwell_s=PRESS_HOLD_S, pos_tol=0.006, ori_tol=0.03),
         SkillStep("press_retreat", pose=pose_cmd(hover_ee, quat), dwell_s=0.1),
     ]
-    if release_after:
-        steps.extend(
-            [
-                SkillStep("press_release_open", pose=pose_cmd(hover_ee, quat), action="open_gripper", dwell_s=0.35),
-                SkillStep(
-                    "press_release_detach",
-                    pose=pose_cmd(hover_ee, quat),
-                    action="release",
-                    action_arg=instance,
-                    dwell_s=0.15,
-                ),
-                SkillStep(
-                    "fixture_hold",
-                    pose=pose_cmd(hover_ee, quat),
-                    action="fixture_hold",
-                    action_arg=instance,
-                    dwell_s=0.1,
-                ),
-            ]
+    if fixture_after:
+        steps.append(
+            SkillStep(
+                "fixture_hold",
+                pose=pose_cmd(hover_ee, quat),
+                action="fixture_hold",
+                action_arg=instance,
+                dwell_s=0.1,
+            )
         )
     return steps
 
