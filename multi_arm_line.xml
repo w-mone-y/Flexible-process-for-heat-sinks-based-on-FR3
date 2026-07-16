@@ -476,42 +476,38 @@
                       <geom name="arm3_fr3_link7_collision" class="collision" mesh="link7_coll"/>
                       <body name="arm3_wrist_spin_mount" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
                         <joint name="arm3_wrist_spin" type="hinge" axis="0 0 1" limited="false" damping="0.05" armature="0.01"/>
+                        <!-- Direct-flange inspection camera.  The legacy
+                             arm3_hand body name is retained only because the
+                             controller/contact tables use it as the Arm3 tool
+                             carrier; no Franka Hand meshes remain here.
+
+                             The compact stereo housing is D405-inspired and
+                             mounts through an ISO 9409-1-A50 adapter plate.
+                             MuJoCo cameras look along local -Z, so the 180-deg
+                             X rotation makes the optical axis follow tool +Z
+                             (world -Z during every top-down inspection). -->
                         <body name="arm3_hand" pos="0 0 0" quat="1 0 0 0">
-                          <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
-                          <geom mesh="hand_0" material="off_white" class="visual"/>
-                          <geom mesh="hand_1" material="black" class="visual"/>
-                          <geom mesh="hand_2" material="black" class="visual"/>
-                          <geom mesh="hand_3" material="white" class="visual"/>
-                          <geom mesh="hand_4" material="off_white" class="visual"/>
-                          <geom mesh="hand_c" class="collision"/>
-                          <site name="arm3_attachment_site" pos="0 0 0.107" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
-                          <geom name="arm3_ee_axis_x" type="capsule" fromto="0 0 0.107 0 0.09 0.107" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
-                          <geom name="arm3_ee_axis_y" type="capsule" fromto="0 0 0.107 -0.09 0 0.107" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
-                          <geom name="arm3_ee_axis_z" type="capsule" fromto="0 0 0.107 0 0 0.197" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
-                          <body name="arm3_left_finger" pos="0 0 0.0584">
-                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
-                            <joint name="arm3_finger_joint1" class="finger"/>
-                            <geom mesh="finger_0" material="off_white" class="visual"/>
-                            <geom mesh="finger_1" material="black" class="visual"/>
-                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
-                            <geom class="fingertip_pad_collision_1"/>
-                            <geom class="fingertip_pad_collision_2"/>
-                            <geom class="fingertip_pad_collision_3"/>
-                            <geom class="fingertip_pad_collision_4"/>
-                            <geom class="fingertip_pad_collision_5"/>
-                          </body>
-                          <body name="arm3_right_finger" pos="0 0 0.0584" quat="0 0 0 1">
-                            <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
-                            <joint name="arm3_finger_joint2" class="finger"/>
-                            <geom mesh="finger_0" material="off_white" class="visual"/>
-                            <geom mesh="finger_1" material="black" class="visual"/>
-                            <geom mesh="finger_0" class="collision" condim="6" friction="20 2 1" solref="0.012 1" solimp="0.95 0.99 0.001"/>
-                            <geom class="fingertip_pad_collision_1"/>
-                            <geom class="fingertip_pad_collision_2"/>
-                            <geom class="fingertip_pad_collision_3"/>
-                            <geom class="fingertip_pad_collision_4"/>
-                            <geom class="fingertip_pad_collision_5"/>
-                          </body>
+                          <inertial mass="0.19" pos="0 0 0.036" diaginertia="0.000055 0.000065 0.000075"/>
+                          <geom name="arm3_camera_flange" type="cylinder" size="0.025 0.004" pos="0 0 0.004" rgba="0.30 0.32 0.35 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_adapter" type="cylinder" size="0.019 0.008" pos="0 0 0.016" rgba="0.62 0.64 0.67 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_collision" type="box" size="0.025 0.020 0.017" pos="0 0 0.041" class="collision"/>
+                          <geom name="arm3_camera_housing" type="box" size="0.025 0.020 0.017" pos="0 0 0.041" rgba="0.08 0.10 0.12 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_face" type="box" size="0.024 0.019 0.0015" pos="0 0 0.0595" rgba="0.16 0.18 0.20 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_left_lens" type="cylinder" size="0.006 0.0025" pos="-0.014 0 0.0625" rgba="0.04 0.10 0.18 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_rgb_lens" type="cylinder" size="0.005 0.0025" pos="0 0 0.0625" rgba="0.04 0.16 0.22 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_right_lens" type="cylinder" size="0.006 0.0025" pos="0.014 0 0.0625" rgba="0.04 0.10 0.18 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_camera_status_led" type="sphere" size="0.0018" pos="0.021 -0.014 0.0625" rgba="0.1 0.9 0.35 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <camera name="arm3_inspection_camera" pos="0 0 0.065" quat="0 1 0 0" mode="fixed" fovy="70" resolution="640 480"/>
+                          <site name="arm3_camera_optical_site" pos="0 0 0.065" quat="0 1 0 0" type="sphere" size="0.003" rgba="0.1 0.9 1 0.65" group="1"/>
+                          <site name="arm3_attachment_site" pos="0 0 0.065" quat="0.7071068 0 0 0.7071068" type="sphere" size="0.007" rgba="1 1 0 1"/>
+                          <geom name="arm3_ee_axis_x" type="capsule" fromto="0 0 0.065 0 0.09 0.065" size="0.005" rgba="1 0 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_ee_axis_y" type="capsule" fromto="0 0 0.065 -0.09 0 0.065" size="0.005" rgba="0 1 0 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <geom name="arm3_ee_axis_z" type="capsule" fromto="0 0 0.065 0 0 0.155" size="0.005" rgba="0.1 0.3 1 1" density="0" contype="0" conaffinity="0" group="1"/>
+                          <!-- Empty compatibility anchors keep the existing
+                               cross-arm exclude table valid.  They contain no
+                               hand/finger visual or collision geometry. -->
+                          <body name="arm3_left_finger"/>
+                          <body name="arm3_right_finger"/>
                         </body>
                       </body>
                     </body>
@@ -524,8 +520,8 @@
       </body>
     </body>
 
-    <!-- Free components on the feed rack. Declared last so their freejoint qpos
-         sit at the end of the keyframe (3 x 10 robot values first). -->
+    <!-- Free components on the feed rack. Declared after the three robot
+         chains so their freejoint qpos remain grouped near the keyframe tail. -->
 
     <body name="relay_1" pos="-1.08 0.29 0.121">
       <freejoint name="relay_1_free"/>
@@ -639,11 +635,6 @@
       <joint joint="arm2_gripper_finger_joint2" coef="0.5"/>
     </fixed>
 
-    <fixed name="arm3_split">
-      <joint joint="arm3_finger_joint1" coef="0.5"/>
-      <joint joint="arm3_finger_joint2" coef="0.5"/>
-    </fixed>
-
   </tendon>
 
   <equality>
@@ -673,13 +664,6 @@
     <weld name="fixture_hold_terminal_1" body1="assembly_station" body2="terminal_1" active="false" solref="0.004 1"/>
     <weld name="fixture_hold_button_1" body1="assembly_station" body2="button_1" active="false" solref="0.004 1"/>
     <weld name="fixture_hold_breaker_1" body1="assembly_station" body2="breaker_1" active="false" solref="0.004 1"/>
-    <joint joint1="arm3_finger_joint1" joint2="arm3_finger_joint2" solimp="0.95 0.99 0.001" solref="0.005 1"/>
-    <weld name="arm3_grasp_relay_1" body1="arm3_hand" body2="relay_1" active="false" solref="0.004 1"/>
-    <weld name="arm3_grasp_relay_2" body1="arm3_hand" body2="relay_2" active="false" solref="0.004 1"/>
-    <weld name="arm3_grasp_terminal_1" body1="arm3_hand" body2="terminal_1" active="false" solref="0.004 1"/>
-    <weld name="arm3_grasp_button_1" body1="arm3_hand" body2="button_1" active="false" solref="0.004 1"/>
-    <weld name="arm3_grasp_breaker_1" body1="arm3_hand" body2="breaker_1" active="false" solref="0.004 1"/>
-
   </equality>
 
   <actuator>
@@ -712,7 +696,6 @@
     <position class="fr3" name="arm3_fr3_joint6" joint="arm3_fr3_joint6" kp="2000" kv="200"/>
     <position class="fr3" name="arm3_fr3_joint7" joint="arm3_fr3_joint7" kp="2000" kv="200"/>
     <position name="arm3_wrist_spin" joint="arm3_wrist_spin" kp="800" kv="80" ctrlrange="-1000000 1000000" forcerange="-40 40"/>
-    <general name="arm3_gripper" tendon="arm3_split" dyntype="none" gaintype="fixed" biastype="affine" forcerange="-500 500" ctrlrange="0 255" gainprm="0.01568627451 0 0" biasprm="0 -100 -10"/>
 
   </actuator>
 
@@ -947,17 +930,17 @@
   </contact>
 
   <keyframe>
-    <!-- qpos layout: arm1 (7+spin+2 fingers) | arm2 (7+spin, NO fingers: the
-         gripper lives on quick-change tool A) | arm3 (7+spin+2 fingers) |
+    <!-- qpos layout: arm1 (7+spin+2 fingers) | arm2 (7+spin, NO fixed fingers:
+         the gripper lives on quick-change tool A) | arm3 (7+spin, camera) |
          5 free components (7 each) | tool A free+2 fingers | tool B free. -->
     <key name="home"
          qpos="0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
                0 0 0 -1.57079 0 1.57079 -0.7853 0
-               0 0 0 -1.57079 0 1.57079 -0.7853 0 0.04 0.04
+               0 0 0 -1.57079 0 1.57079 -0.7853 0
                -1.08 0.29 0.121 1 0 0 0  -1.08 0.41 0.121 1 0 0 0  -0.96 0.41 0.111 0.7071068 0 0 0.7071068  -0.96 0.29 0.112 1 0 0 0  -1.02 0.35 0.126 1 0 0 0
                -0.13 0.56 0.20 0 1 0 0 0.04 0.04  0.03 0.56 0.20 0 1 0 0"
          ctrl="0 0 0 -1.57079 0 1.57079 -0.7853 0 255
                0 0 0 -1.57079 0 1.57079 -0.7853 0 255
-               0 0 0 -1.57079 0 1.57079 -0.7853 0 255"/>
+               0 0 0 -1.57079 0 1.57079 -0.7853 0"/>
   </keyframe>
 </mujoco>

@@ -1,0 +1,402 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="heat_sink_brazing_line">
+  <!--
+    MVP cell for a low-voltage cabinet heat-sink brazing demonstration.
+    Dimensions and thermal behaviour are demonstrator defaults, not process data.
+
+    The three robots are independent attachments of the upstream FR3 asset.  The
+    prefixes are part of the public scene contract used by brazing_sim.motion.
+  -->
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic"
+          gravity="0 0 -9.81" impratio="5"/>
+
+  <default>
+    <geom friction="1.0 0.01 0.001" solref="0.008 1" solimp="0.95 0.99 0.001"/>
+    <default class="cell">
+      <geom type="box" contype="1" conaffinity="1" rgba="0.42 0.45 0.50 1"/>
+    </default>
+    <default class="product">
+      <geom type="box" contype="2" conaffinity="3" condim="4"
+            friction="1.2 0.01 0.001" solref="0.006 1"/>
+    </default>
+    <default class="marker">
+      <geom contype="0" conaffinity="0" density="0" group="1"/>
+      <site group="1"/>
+    </default>
+  </default>
+
+  <asset>
+    <model name="fr3_asset" file="franka_fr3/fr3.xml"/>
+    <texture name="floor_tex" type="2d" builtin="checker" width="256" height="256"
+             rgb1="0.18 0.22 0.26" rgb2="0.12 0.15 0.18" mark="edge" markrgb="0.35 0.38 0.42"/>
+    <material name="floor_mat" texture="floor_tex" texuniform="true" texrepeat="6 6" reflectance="0.12"/>
+    <material name="aluminium" rgba="0.73 0.76 0.80 1" specular="0.75" shininess="0.7"/>
+    <material name="tray_mat" rgba="0.20 0.24 0.29 1" metallic="0.45" roughness="0.42"/>
+    <material name="fixture_mat" rgba="0.15 0.32 0.47 1" metallic="0.30" roughness="0.50"/>
+    <material name="braze_mat" rgba="0.94 0.55 0.10 0.90" emission="0.15"/>
+    <material name="furnace_mat" rgba="0.20 0.22 0.25 1" metallic="0.35" roughness="0.55"/>
+    <material name="hot_mat" rgba="0.90 0.22 0.06 0.40" emission="0.45"/>
+    <material name="tool_blue" rgba="0.10 0.38 0.78 1"/>
+    <material name="tool_yellow" rgba="0.92 0.67 0.10 1"/>
+  </asset>
+
+  <visual>
+    <headlight ambient="0.35 0.35 0.35" diffuse="0.75 0.75 0.75" specular="0.25 0.25 0.25"/>
+    <global azimuth="90" elevation="-28"/>
+    <rgba haze="0.10 0.14 0.18 1"/>
+  </visual>
+
+  <worldbody>
+    <light pos="0 0.40 2.2" dir="0 0 -1" directional="true" diffuse="0.85 0.85 0.82"/>
+    <light pos="-1.2 -0.8 1.4" dir="0.5 0.5 -1" diffuse="0.35 0.38 0.45"/>
+    <geom name="floor" type="plane" size="0 0 0.05" material="floor_mat"
+          contype="1" conaffinity="3"/>
+
+    <!-- Software-owned shared zones.  Sites remain visual-only. -->
+    <site name="zone_assembly_fixture" type="box" pos="0 0.45 0.185" size="0.29 0.22 0.002"
+          rgba="0.20 0.75 0.95 0.11" group="1"/>
+    <site name="zone_brazing" type="box" pos="0 0.45 0.34" size="0.31 0.24 0.15"
+          rgba="0.95 0.58 0.12 0.06" group="1"/>
+    <site name="zone_furnace_mouth" type="box" pos="-0.25 -0.81 0.31" size="0.22 0.18 0.18"
+          rgba="0.95 0.28 0.12 0.08" group="1"/>
+    <site name="zone_inspection" type="box" pos="0.60 -0.25 0.30" size="0.23 0.18 0.14"
+          rgba="0.25 0.90 0.40 0.07" group="1"/>
+
+    <!-- MOCAP goals used by the independent arm controllers. -->
+    <body name="arm1_target" mocap="true" pos="-0.35 0.25 0.59" quat="0 0.967157 0.254180 0">
+      <geom class="marker" name="arm1_target_marker" type="sphere" size="0.018" rgba="0.95 0.25 0.20 0.35"/>
+    </body>
+    <body name="arm2_target" mocap="true" pos="0 0.13 0.59" quat="0 0.923880 0.382683 0">
+      <geom class="marker" name="arm2_target_marker" type="sphere" size="0.018" rgba="0.20 0.75 0.95 0.35"/>
+    </body>
+    <body name="arm3_target" mocap="true" pos="0.35 0.25 0.59" quat="0 0.253983 0.967209 0">
+      <geom class="marker" name="arm3_target_marker" type="sphere" size="0.018" rgba="0.25 0.90 0.40 0.35"/>
+    </body>
+
+    <!-- Shallow triangular robot layout.  Each frame points toward Table2. -->
+    <frame pos="-0.62 0.10 0" euler="0 0 0.514">
+      <attach model="fr3_asset" body="base" prefix="arm1_"/>
+    </frame>
+    <frame pos="0 -0.18 0" euler="0 0 1.57079632679">
+      <attach model="fr3_asset" body="base" prefix="arm2_"/>
+    </frame>
+    <frame pos="0.62 0.10 0" euler="0 0 2.628">
+      <attach model="fr3_asset" body="base" prefix="arm3_"/>
+    </frame>
+
+    <!-- Arm1 quick-change rack. Both tools hang downward from their adapters. -->
+    <body name="arm1_tool_rack" pos="-0.49 0.42 0">
+      <geom class="cell" name="arm1_tool_rack_base" size="0.075 0.14 0.025" pos="0 0 0.025"/>
+      <geom class="cell" name="arm1_tool_rack_column" size="0.030 0.025 0.145" pos="0 0.095 0.170"/>
+      <geom class="cell" name="arm1_tool_rack_beam" size="0.045 0.12 0.020" pos="0 0 0.315"/>
+      <site name="arm1_parallel_gripper_rack_site" pos="0 -0.040 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+      <site name="arm1_suction_tool_rack_site" pos="0 0.040 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+    </body>
+
+    <!-- Arm1 parallel gripper, initially parked on the quick-change rack. -->
+    <body name="arm1_parallel_gripper" pos="-0.49 0.380 0.295" quat="0 1 0 0" gravcomp="1">
+      <freejoint name="arm1_parallel_gripper_free"/>
+      <inertial pos="0 0 0.025" mass="0.28" diaginertia="0.00045 0.00042 0.00018"/>
+      <geom name="arm1_gripper_palm" type="box" size="0.025 0.035 0.018" pos="0 0 0.018"
+            rgba="0.18 0.21 0.25 1" contype="0" conaffinity="0"/>
+      <body name="arm1_gripper_left_body" pos="0 0.026 0.058">
+        <joint name="arm1_left_finger_joint" type="slide" axis="0 -1 0" range="0 0.020" damping="6"/>
+        <geom name="arm1_gripper_left" type="box" size="0.006 0.005 0.030"
+              rgba="0.72 0.75 0.79 1" contype="4" conaffinity="2"/>
+      </body>
+      <body name="arm1_gripper_right_body" pos="0 -0.026 0.058">
+        <joint name="arm1_right_finger_joint" type="slide" axis="0 1 0" range="0 0.020" damping="6"/>
+        <geom name="arm1_gripper_right" type="box" size="0.006 0.005 0.030"
+              rgba="0.72 0.75 0.79 1" contype="4" conaffinity="2"/>
+      </body>
+      <site name="arm1_parallel_gripper_mount_site" pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
+      <site name="arm1_grasp_tcp" pos="0 0 0.090" size="0.005" rgba="1 0.75 0.1 1"/>
+    </body>
+
+    <!-- Arm1 suction tool, initially parked beside the gripper. -->
+    <body name="arm1_suction_tool" pos="-0.49 0.460 0.295" quat="0 1 0 0" gravcomp="1">
+      <freejoint name="arm1_suction_tool_free"/>
+      <inertial pos="0 0 0.035" mass="0.20" diaginertia="0.00028 0.00026 0.00010"/>
+      <geom name="arm1_suction_adapter" type="cylinder" size="0.025 0.010" pos="0 0 0.010"
+            rgba="0.18 0.21 0.25 1" contype="0" conaffinity="0"/>
+      <geom name="arm1_suction_bellows" type="cylinder" size="0.020 0.022" pos="0 0 0.052"
+            rgba="0.12 0.15 0.18 1" contype="0" conaffinity="0"/>
+      <geom name="arm1_suction_pad" type="cylinder" size="0.028 0.004" pos="0 0 0.086"
+            rgba="0.18 0.20 0.22 1" contype="4" conaffinity="2"/>
+      <site name="arm1_suction_tool_mount_site" pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
+      <site name="arm1_suction_tcp" pos="0 0 0.090" size="0.005" rgba="0.2 0.9 0.95 0.8"/>
+    </body>
+
+    <!-- Arm3 fixed wrist camera. Camera looks along its local -Z. -->
+    <body name="arm3_camera_rig" pos="0.543353 0.143235 0.926" quat="0 0.253983 0.967209 0" gravcomp="1">
+      <freejoint name="arm3_camera_rig_free"/>
+      <inertial pos="0 0 0.025" mass="0.16" diaginertia="0.00018 0.00016 0.00010"/>
+      <geom name="arm3_camera_housing" type="box" size="0.027 0.020 0.020" pos="0 0 0.025"
+            rgba="0.10 0.12 0.15 1" contype="0" conaffinity="0"/>
+      <geom class="marker" name="arm3_camera_lens" type="cylinder" size="0.010 0.006" pos="0 0 0.051"
+            rgba="0.08 0.22 0.40 1"/>
+      <site name="arm3_inspection_tcp" pos="0 0 0.065" size="0.004" rgba="0.25 0.9 0.4 1"/>
+      <camera name="arm3_wrist_camera" pos="0 0 0.055" euler="3.14159265359 0 0" fovy="52"/>
+    </body>
+
+    <!-- Table1 uses X (the Arm1-Arm3 line) as left-right.  Its 0.92 x 0.46 m
+         top is twice as long left-right as front-back.  The base is horizontal
+         on the left and the X-aligned fins occupy the right half. -->
+    <body name="raw_material_rack" pos="-1.079 0.508 0">
+      <geom class="cell" name="raw_material_rack_top" size="0.46 0.23 0.05" pos="0 0 0.05"
+            rgba="0.38 0.31 0.23 1"/>
+      <site name="raw_base_site" type="box" pos="-0.23 0 0.105" size="0.182 0.112 0.002"
+            rgba="0.72 0.76 0.80 0.18" group="1"/>
+      <site name="raw_fin_01_site" pos="0.23 -0.070 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_02_site" pos="0.23 0.000 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_03_site" pos="0.23 0.070 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_04_site" pos="0.23 0.140 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_05_site" pos="0.23 -0.210 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_06_site" pos="0.23 -0.140 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_07_site" pos="0.23 0.140 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_08_site" pos="0.23 0.210 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+    </body>
+
+    <!-- Table2: static pedestal, floating tray and flexible comb fixture. -->
+    <body name="table2" pos="0 0.45 0">
+      <geom class="cell" name="table2_top" size="0.31 0.24 0.055" pos="0 0 0.055" rgba="0.34 0.37 0.42 1"/>
+      <geom class="cell" name="table2_column" size="0.08 0.08 0.055" pos="0 0 0.145" rgba="0.22 0.24 0.28 1"/>
+    </body>
+    <body name="assembly_fixture" pos="0 0.45 0.18">
+      <geom name="fixture_base" type="box" size="0.225 0.155 0.015" material="fixture_mat"
+            contype="1" conaffinity="3"/>
+      <geom name="fixture_comb_left" type="box" size="0.185 0.009 0.025" pos="0 -0.132 0.040"
+            material="fixture_mat" contype="1" conaffinity="3"/>
+      <geom name="fixture_comb_right" type="box" size="0.185 0.009 0.025" pos="0 0.132 0.040"
+            material="fixture_mat" contype="1" conaffinity="3"/>
+      <geom class="marker" name="fixture_lock_button_geom" type="cylinder" size="0.018 0.008"
+            pos="0 -0.200 0.160" rgba="0.95 0.42 0.08 1"/>
+      <site name="fixture_origin" pos="0 0 0.031" size="0.006" rgba="0.2 0.8 1 0.7"/>
+      <site name="fixture_lock_button" pos="0 -0.200 0.180" size="0.006" rgba="1 0.55 0.1 0.8"/>
+    </body>
+    <body name="assembly_tray" pos="0 0.45 0.218" gravcomp="1">
+      <freejoint name="assembly_tray_free"/>
+      <geom name="assembly_tray_geom" type="box" size="0.205 0.135 0.009" mass="3.0"
+            material="tray_mat" contype="1" conaffinity="3"/>
+      <geom name="tray_handle_left" type="box" size="0.020 0.018 0.015" pos="-0.225 0 0.015"
+            material="tray_mat" contype="1" conaffinity="3"/>
+      <geom name="tray_handle_right" type="box" size="0.020 0.018 0.015" pos="0.225 0 0.015"
+            material="tray_mat" contype="1" conaffinity="3"/>
+      <site name="tray_transfer_tcp" pos="0 0 0.018" size="0.006" rgba="0.92 0.67 0.1 0.8"/>
+    </body>
+
+    <!-- Heat-sink base plate. Product frame: +X fin length, +Y fin array, +Z fin height. -->
+    <body name="base_plate" pos="0 0.45 0.240" gravcomp="1">
+      <freejoint name="base_plate_free"/>
+      <geom class="product" name="base_plate_geom" size="0.18 0.11 0.004" mass="0.95" material="aluminium"/>
+      <geom class="marker" name="base_mount_rail_left" type="box" size="0.18 0.012 0.003"
+            pos="0 -0.098 0.006" material="aluminium"/>
+      <geom class="marker" name="base_mount_rail_right" type="box" size="0.18 0.012 0.003"
+            pos="0 0.098 0.006" material="aluminium"/>
+      <geom class="marker" name="mount_hole_1" type="cylinder" size="0.006 0.005" pos="-0.155 -0.098 0.008"
+            rgba="0.08 0.09 0.10 1"/>
+      <geom class="marker" name="mount_hole_2" type="cylinder" size="0.006 0.005" pos="0.155 -0.098 0.008"
+            rgba="0.08 0.09 0.10 1"/>
+      <geom class="marker" name="mount_hole_3" type="cylinder" size="0.006 0.005" pos="-0.155 0.098 0.008"
+            rgba="0.08 0.09 0.10 1"/>
+      <geom class="marker" name="mount_hole_4" type="cylinder" size="0.006 0.005" pos="0.155 0.098 0.008"
+            rgba="0.08 0.09 0.10 1"/>
+      <site name="product_frame" pos="0 0 0.004" size="0.007" rgba="1 0.25 0.15 0.8"/>
+    </body>
+
+    <!-- Eight preallocated fins. A uses fin_01..fin_04; the remainder are hidden by scene.py. -->
+    <body name="fin_01" pos="0 0.360 0.274" gravcomp="1"><freejoint name="fin_01_free"/><geom class="product" name="fin_01_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_01_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_02" pos="0 0.420 0.274" gravcomp="1"><freejoint name="fin_02_free"/><geom class="product" name="fin_02_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_02_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_03" pos="0 0.480 0.274" gravcomp="1"><freejoint name="fin_03_free"/><geom class="product" name="fin_03_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_03_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_04" pos="0 0.540 0.274" gravcomp="1"><freejoint name="fin_04_free"/><geom class="product" name="fin_04_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_04_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_05" pos="2.50 0 0.15" gravcomp="1"><freejoint name="fin_05_free"/><geom class="product" name="fin_05_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_05_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_06" pos="2.65 0 0.15" gravcomp="1"><freejoint name="fin_06_free"/><geom class="product" name="fin_06_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_06_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_07" pos="2.80 0 0.15" gravcomp="1"><freejoint name="fin_07_free"/><geom class="product" name="fin_07_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_07_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+    <body name="fin_08" pos="2.95 0 0.15" gravcomp="1"><freejoint name="fin_08_free"/><geom class="product" name="fin_08_geom" size="0.15 0.001 0.030" mass="0.075" material="aluminium"/><site name="fin_08_tcp" pos="0 0 0.030" size="0.003" rgba="0.2 0.8 1 0.8"/></body>
+
+    <!-- Sixteen independently visible braze paths, all preallocated. -->
+    <body name="brazing_path_fin_01_left" pos="0 0.357 0.247" gravcomp="1"><freejoint name="brazing_path_fin_01_left_free"/><geom class="marker" name="brazing_path_fin_01_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_01_right" pos="0 0.363 0.247" gravcomp="1"><freejoint name="brazing_path_fin_01_right_free"/><geom class="marker" name="brazing_path_fin_01_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_02_left" pos="0 0.417 0.247" gravcomp="1"><freejoint name="brazing_path_fin_02_left_free"/><geom class="marker" name="brazing_path_fin_02_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_02_right" pos="0 0.423 0.247" gravcomp="1"><freejoint name="brazing_path_fin_02_right_free"/><geom class="marker" name="brazing_path_fin_02_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_03_left" pos="0 0.477 0.247" gravcomp="1"><freejoint name="brazing_path_fin_03_left_free"/><geom class="marker" name="brazing_path_fin_03_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_03_right" pos="0 0.483 0.247" gravcomp="1"><freejoint name="brazing_path_fin_03_right_free"/><geom class="marker" name="brazing_path_fin_03_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_04_left" pos="0 0.537 0.247" gravcomp="1"><freejoint name="brazing_path_fin_04_left_free"/><geom class="marker" name="brazing_path_fin_04_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_04_right" pos="0 0.543 0.247" gravcomp="1"><freejoint name="brazing_path_fin_04_right_free"/><geom class="marker" name="brazing_path_fin_04_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_05_left" pos="2.50 0.03 0.15" gravcomp="1"><freejoint name="brazing_path_fin_05_left_free"/><geom class="marker" name="brazing_path_fin_05_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_05_right" pos="2.50 0.06 0.15" gravcomp="1"><freejoint name="brazing_path_fin_05_right_free"/><geom class="marker" name="brazing_path_fin_05_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_06_left" pos="2.65 0.03 0.15" gravcomp="1"><freejoint name="brazing_path_fin_06_left_free"/><geom class="marker" name="brazing_path_fin_06_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_06_right" pos="2.65 0.06 0.15" gravcomp="1"><freejoint name="brazing_path_fin_06_right_free"/><geom class="marker" name="brazing_path_fin_06_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_07_left" pos="2.80 0.03 0.15" gravcomp="1"><freejoint name="brazing_path_fin_07_left_free"/><geom class="marker" name="brazing_path_fin_07_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_07_right" pos="2.80 0.06 0.15" gravcomp="1"><freejoint name="brazing_path_fin_07_right_free"/><geom class="marker" name="brazing_path_fin_07_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_08_left" pos="2.95 0.03 0.15" gravcomp="1"><freejoint name="brazing_path_fin_08_left_free"/><geom class="marker" name="brazing_path_fin_08_left_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+    <body name="brazing_path_fin_08_right" pos="2.95 0.06 0.15" gravcomp="1"><freejoint name="brazing_path_fin_08_right_free"/><geom class="marker" name="brazing_path_fin_08_right_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
+
+    <!-- Arm2 front quick-change rack. Tools hang downward in +Y of Arm2. -->
+    <body name="arm2_tool_rack" pos="0 0.12 0">
+      <geom class="cell" name="arm2_tool_rack_base" size="0.14 0.08 0.025" pos="0 0 0.025"/>
+      <geom class="cell" name="arm2_tool_rack_column" size="0.025 0.030 0.145" pos="0 0.055 0.170"/>
+      <geom class="cell" name="arm2_tool_rack_beam" size="0.14 0.030 0.020" pos="0 0 0.315"/>
+      <site name="arm2_brazing_dispenser_rack_site" pos="-0.075 0 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+      <site name="arm2_tray_transfer_rack_site" pos="0.075 0 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+    </body>
+    <body name="arm2_brazing_dispenser" pos="-0.075 0.12 0.295" quat="0 1 0 0" gravcomp="1">
+      <freejoint name="arm2_brazing_dispenser_free"/>
+      <inertial pos="0 0 0.090" mass="0.32" diaginertia="0.00120 0.00115 0.00016"/>
+      <site name="arm2_brazing_dispenser_mount_site" pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
+      <geom name="arm2_dispenser_adapter" type="cylinder" size="0.025 0.008" pos="0 0 0.008" material="aluminium" contype="0" conaffinity="0"/>
+      <geom name="arm2_dispenser_body" type="cylinder" size="0.014 0.060" pos="0 0 0.070" material="tool_blue" contype="0" conaffinity="0"/>
+      <geom name="arm2_dispenser_nozzle" type="cylinder" size="0.002 0.045" pos="0 0 0.175" material="tool_yellow" contype="0" conaffinity="0"/>
+      <geom name="arm2_dispenser_tip" type="sphere" size="0.001" pos="0 0 0.220" material="tool_yellow" contype="4" conaffinity="2"/>
+      <site name="arm2_brazing_dispenser_tcp" pos="0 0 0.220" size="0.004" rgba="1 0.4 0.1 1"/>
+    </body>
+    <body name="arm2_tray_transfer" pos="0.075 0.12 0.295" quat="0 1 0 0" gravcomp="1">
+      <freejoint name="arm2_tray_transfer_free"/>
+      <inertial pos="0 0 0.050" mass="0.48" diaginertia="0.00090 0.00082 0.00035"/>
+      <site name="arm2_tray_transfer_mount_site" pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
+      <geom name="arm2_transfer_adapter" type="cylinder" size="0.025 0.004" pos="0 0 0.004" material="aluminium" contype="0" conaffinity="0"/>
+      <geom name="arm2_transfer_spine" type="box" size="0.024 0.030 0.045" pos="0 0 0.052" material="tool_yellow" contype="0" conaffinity="0"/>
+      <geom name="arm2_transfer_crossbar" type="box" size="0.10 0.018 0.012" pos="0 0 0.106" material="tool_yellow" contype="4" conaffinity="1"/>
+      <geom name="arm2_transfer_left_hook" type="box" size="0.012 0.018 0.035" pos="-0.09 0 0.143" material="tool_yellow" contype="4" conaffinity="1"/>
+      <geom name="arm2_transfer_right_hook" type="box" size="0.012 0.018 0.035" pos="0.09 0 0.143" material="tool_yellow" contype="4" conaffinity="1"/>
+      <site name="arm2_tray_transfer_tcp" pos="0 0 0.178" size="0.004" rgba="1 0.8 0.1 1"/>
+    </body>
+
+    <!-- Demonstration furnace. Door slides vertically and is software-interlocked. -->
+    <body name="furnace" pos="-0.25 -0.65 0">
+      <geom class="cell" name="furnace_base" size="0.25 0.23 0.035" pos="0 0 0.035" material="furnace_mat"/>
+      <geom class="cell" name="furnace_left_wall" size="0.035 0.23 0.22" pos="-0.215 0 0.29" material="furnace_mat"/>
+      <geom class="cell" name="furnace_right_wall" size="0.035 0.23 0.22" pos="0.215 0 0.29" material="furnace_mat"/>
+      <geom class="cell" name="furnace_back" size="0.18 0.035 0.22" pos="0 0.195 0.29" material="furnace_mat"/>
+      <geom class="cell" name="furnace_roof" size="0.25 0.23 0.035" pos="0 0 0.545" material="furnace_mat"/>
+      <geom class="marker" name="furnace_hot_zone" type="box" size="0.175 0.165 0.145" pos="0 0.03 0.29" material="hot_mat"/>
+      <site name="furnace_tray_pose" pos="0 -0.02 0.165" size="0.006" rgba="1 0.3 0.1 0.8"/>
+      <camera name="furnace_camera" pos="0 -0.42 0.38" xyaxes="1 0 0 0 0.45 0.89" fovy="55"/>
+      <body name="furnace_door" pos="0 -0.225 0.29">
+        <joint name="furnace_door_joint" type="slide" axis="0 0 1" range="0 0.46" damping="25"/>
+        <geom name="furnace_door_geom" type="box" size="0.18 0.018 0.20" material="furnace_mat" contype="1" conaffinity="3"/>
+        <geom class="marker" name="furnace_window" type="box" size="0.10 0.020 0.075" rgba="0.72 0.18 0.05 0.35"/>
+      </body>
+    </body>
+
+    <!-- Table3 / post-braze inspection stand. -->
+    <body name="table3" pos="0.60 -0.25 0">
+      <geom class="cell" name="table3_top" size="0.25 0.20 0.06" pos="0 0 0.06" rgba="0.28 0.33 0.31 1"/>
+      <site name="post_inspection_pose" pos="0 0 0.13" size="0.007" rgba="0.2 0.9 0.4 0.8"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <!-- Extension bodies mounted on the unmodified attached FR3 models. -->
+    <weld name="arm1_toolchange_parallel_gripper" body1="arm1_fr3_link7" body2="arm1_parallel_gripper" active="false" solref="0.004 1"/>
+    <weld name="arm1_toolchange_suction_tool" body1="arm1_fr3_link7" body2="arm1_suction_tool" active="false" solref="0.004 1"/>
+    <weld name="arm1_rack_parallel_gripper" body1="arm1_tool_rack" body2="arm1_parallel_gripper" active="true" solref="0.004 1"/>
+    <weld name="arm1_rack_suction_tool" body1="arm1_tool_rack" body2="arm1_suction_tool" active="true" solref="0.004 1"/>
+    <weld name="arm3_camera_mount" body1="arm3_fr3_link7" body2="arm3_camera_rig" active="true" solref="0.004 1"/>
+
+    <!-- Tray/product/fixture lifecycle. -->
+    <weld name="raw_base_rack_weld" body1="raw_material_rack" body2="base_plate" active="false" solref="0.004 1"/>
+    <weld name="tray_fixture_weld" body1="assembly_fixture" body2="assembly_tray" active="true" solref="0.001 1"/>
+    <weld name="base_tray_weld" body1="assembly_tray" body2="base_plate" active="true" solref="0.001 1"/>
+    <weld name="arm1_grasp_base" body1="arm1_suction_tool" body2="base_plate" active="false" solref="0.004 1"/>
+    <weld name="arm2_tray_carry" body1="arm2_tray_transfer" body2="assembly_tray" active="false" solref="0.004 1"/>
+    <weld name="furnace_tray_weld" body1="furnace" body2="assembly_tray" active="false" solref="0.004 1"/>
+
+    <!-- Raw-rack welds keep thin blanks immobile while the fingers close. -->
+    <weld name="raw_fin_01_rack_weld" body1="raw_material_rack" body2="fin_01" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_02_rack_weld" body1="raw_material_rack" body2="fin_02" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_03_rack_weld" body1="raw_material_rack" body2="fin_03" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_04_rack_weld" body1="raw_material_rack" body2="fin_04" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_05_rack_weld" body1="raw_material_rack" body2="fin_05" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_06_rack_weld" body1="raw_material_rack" body2="fin_06" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_07_rack_weld" body1="raw_material_rack" body2="fin_07" active="false" solref="0.004 1"/>
+    <weld name="raw_fin_08_rack_weld" body1="raw_material_rack" body2="fin_08" active="false" solref="0.004 1"/>
+
+    <weld name="arm1_grasp_fin_01" body1="arm1_parallel_gripper" body2="fin_01" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_02" body1="arm1_parallel_gripper" body2="fin_02" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_03" body1="arm1_parallel_gripper" body2="fin_03" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_04" body1="arm1_parallel_gripper" body2="fin_04" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_05" body1="arm1_parallel_gripper" body2="fin_05" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_06" body1="arm1_parallel_gripper" body2="fin_06" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_07" body1="arm1_parallel_gripper" body2="fin_07" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_fin_08" body1="arm1_parallel_gripper" body2="fin_08" active="false" solref="0.004 1"/>
+
+    <weld name="fin_01_fixture_weld" body1="assembly_tray" body2="fin_01" active="true" solref="0.004 1"/>
+    <weld name="fin_02_fixture_weld" body1="assembly_tray" body2="fin_02" active="true" solref="0.004 1"/>
+    <weld name="fin_03_fixture_weld" body1="assembly_tray" body2="fin_03" active="true" solref="0.004 1"/>
+    <weld name="fin_04_fixture_weld" body1="assembly_tray" body2="fin_04" active="true" solref="0.004 1"/>
+    <weld name="fin_05_fixture_weld" body1="assembly_tray" body2="fin_05" active="false" solref="0.004 1"/>
+    <weld name="fin_06_fixture_weld" body1="assembly_tray" body2="fin_06" active="false" solref="0.004 1"/>
+    <weld name="fin_07_fixture_weld" body1="assembly_tray" body2="fin_07" active="false" solref="0.004 1"/>
+    <weld name="fin_08_fixture_weld" body1="assembly_tray" body2="fin_08" active="false" solref="0.004 1"/>
+
+    <weld name="fin_01_base_weld" body1="base_plate" body2="fin_01" active="false" solref="0.004 1"/>
+    <weld name="fin_02_base_weld" body1="base_plate" body2="fin_02" active="false" solref="0.004 1"/>
+    <weld name="fin_03_base_weld" body1="base_plate" body2="fin_03" active="false" solref="0.004 1"/>
+    <weld name="fin_04_base_weld" body1="base_plate" body2="fin_04" active="false" solref="0.004 1"/>
+    <weld name="fin_05_base_weld" body1="base_plate" body2="fin_05" active="false" solref="0.004 1"/>
+    <weld name="fin_06_base_weld" body1="base_plate" body2="fin_06" active="false" solref="0.004 1"/>
+    <weld name="fin_07_base_weld" body1="base_plate" body2="fin_07" active="false" solref="0.004 1"/>
+    <weld name="fin_08_base_weld" body1="base_plate" body2="fin_08" active="false" solref="0.004 1"/>
+
+    <!-- Deposited-material visuals follow the base through transfer/furnace.
+         Unused allocation slots are enabled/disabled by scene.py. -->
+    <weld name="brazing_path_fin_01_left_base_weld" body1="base_plate" body2="brazing_path_fin_01_left" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_01_right_base_weld" body1="base_plate" body2="brazing_path_fin_01_right" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_02_left_base_weld" body1="base_plate" body2="brazing_path_fin_02_left" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_02_right_base_weld" body1="base_plate" body2="brazing_path_fin_02_right" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_03_left_base_weld" body1="base_plate" body2="brazing_path_fin_03_left" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_03_right_base_weld" body1="base_plate" body2="brazing_path_fin_03_right" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_04_left_base_weld" body1="base_plate" body2="brazing_path_fin_04_left" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_04_right_base_weld" body1="base_plate" body2="brazing_path_fin_04_right" active="true" solref="0.004 1"/>
+    <weld name="brazing_path_fin_05_left_base_weld" body1="base_plate" body2="brazing_path_fin_05_left" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_05_right_base_weld" body1="base_plate" body2="brazing_path_fin_05_right" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_06_left_base_weld" body1="base_plate" body2="brazing_path_fin_06_left" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_06_right_base_weld" body1="base_plate" body2="brazing_path_fin_06_right" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_07_left_base_weld" body1="base_plate" body2="brazing_path_fin_07_left" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_07_right_base_weld" body1="base_plate" body2="brazing_path_fin_07_right" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_08_left_base_weld" body1="base_plate" body2="brazing_path_fin_08_left" active="false" solref="0.004 1"/>
+    <weld name="brazing_path_fin_08_right_base_weld" body1="base_plate" body2="brazing_path_fin_08_right" active="false" solref="0.004 1"/>
+
+    <!-- Arm2 quick changer: one rack or arm weld per tool is active. -->
+    <weld name="arm2_toolchange_brazing_dispenser" body1="arm2_fr3_link7" body2="arm2_brazing_dispenser" active="false" solref="0.004 1"/>
+    <weld name="arm2_toolchange_tray_transfer" body1="arm2_fr3_link7" body2="arm2_tray_transfer" active="false" solref="0.004 1"/>
+    <weld name="arm2_rack_brazing_dispenser" body1="arm2_tool_rack" body2="arm2_brazing_dispenser" active="true" solref="0.004 1"/>
+    <weld name="arm2_rack_tray_transfer" body1="arm2_tool_rack" body2="arm2_tray_transfer" active="true" solref="0.004 1"/>
+  </equality>
+
+  <actuator>
+    <position name="arm1_left_finger_actuator" joint="arm1_left_finger_joint" kp="800" kv="40"
+              ctrlrange="0 0.020"/>
+    <position name="arm1_right_finger_actuator" joint="arm1_right_finger_joint" kp="800" kv="40"
+              ctrlrange="0 0.020"/>
+    <position name="furnace_door_actuator" joint="furnace_door_joint" kp="1200" kv="120" ctrlrange="0 0.46"/>
+  </actuator>
+
+  <contact>
+    <!-- Only same-mechanism adjacent-body exclusions. Cross-arm contact remains enabled. -->
+    <exclude body1="assembly_fixture" body2="assembly_tray"/>
+    <exclude body1="arm1_fr3_link1" body2="arm1_fr3_link2"/>
+    <exclude body1="arm1_fr3_link2" body2="arm1_fr3_link3"/>
+    <exclude body1="arm1_fr3_link3" body2="arm1_fr3_link4"/>
+    <exclude body1="arm1_fr3_link4" body2="arm1_fr3_link5"/>
+    <exclude body1="arm1_fr3_link5" body2="arm1_fr3_link6"/>
+    <exclude body1="arm1_fr3_link6" body2="arm1_fr3_link7"/>
+    <exclude body1="arm1_fr3_link7" body2="arm1_parallel_gripper"/>
+    <exclude body1="arm1_fr3_link7" body2="arm1_suction_tool"/>
+    <exclude body1="arm2_fr3_link1" body2="arm2_fr3_link2"/>
+    <exclude body1="arm2_fr3_link2" body2="arm2_fr3_link3"/>
+    <exclude body1="arm2_fr3_link3" body2="arm2_fr3_link4"/>
+    <exclude body1="arm2_fr3_link4" body2="arm2_fr3_link5"/>
+    <exclude body1="arm2_fr3_link5" body2="arm2_fr3_link6"/>
+    <exclude body1="arm2_fr3_link6" body2="arm2_fr3_link7"/>
+    <exclude body1="arm3_fr3_link1" body2="arm3_fr3_link2"/>
+    <exclude body1="arm3_fr3_link2" body2="arm3_fr3_link3"/>
+    <exclude body1="arm3_fr3_link3" body2="arm3_fr3_link4"/>
+    <exclude body1="arm3_fr3_link4" body2="arm3_fr3_link5"/>
+    <exclude body1="arm3_fr3_link5" body2="arm3_fr3_link6"/>
+    <exclude body1="arm3_fr3_link6" body2="arm3_fr3_link7"/>
+    <exclude body1="arm3_fr3_link7" body2="arm3_camera_rig"/>
+  </contact>
+</mujoco>

@@ -1,0 +1,424 @@
+"""Thread-safe control surface for the brazing simulation.
+
+Only commands cross the HTTP/terminal boundary.  The MuJoCo thread remains the
+sole owner of simulation state and consumes :attr:`SharedState.commands`.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import asdict, is_dataclass
+from enum import Enum
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import queue
+import sys
+import threading
+import time
+from typing import Any, Callable, Mapping, TextIO
+from urllib import request
+from urllib.parse import urlsplit
+
+ARM_NAMES = ("arm1", "arm2", "arm3")
+FAULT_TYPES = {"fin_pose", "brazing_gap", "furnace_profile"}
+FAULT_SEVERITIES = {"recoverable", "severe"}
+
+
+def jsonable(value: Any) -> Any:
+    """Convert domain dataclasses/enums and containers to JSON-safe values."""
+
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {key: jsonable(item) for key, item in asdict(value).items()}
+    if isinstance(value, Mapping):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [jsonable(item) for item in value]
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+class SharedState:
+    """Small synchronized state mirror shared with HTTP and optional Qt UI."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.commands: queue.Queue[dict[str, Any]] = queue.Queue()
+        self._state: dict[str, Any] = {
+            "status": "starting",
+            "viewer_running": False,
+            "order_id": "",
+            "preset": "",
+            "stage": "IDLE",
+            "paused": False,
+            "disposition": None,
+            "arms": {
+                name: {"task_id": "", "task_type": "", "status": "idle", "error": ""} for name in ARM_NAMES
+            },
+            "resources": {},
+            "fins": {},
+            "paths": {},
+            "fixture": {},
+            "tools": {"arm1": {}, "arm2": {}},
+            "arm2_process": {
+                "current_path": "",
+                "completed_paths": 0,
+                "total_paths": 0,
+                "tray_carrying": False,
+            },
+            "furnace": {"status": "idle", "temperature_c": 25.0, "door_open": False},
+            "inspections": [],
+            "faults": [],
+            "kpi": {},
+            "last_error": "",
+            "camera_width": 0,
+            "camera_height": 0,
+            "camera_active": False,
+            "camera_status": "camera starting",
+            "camera_frame_time": 0.0,
+            "available_orders": ["A"],
+            "server_time": time.time(),
+        }
+        self._camera_frame_ppm = b""
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            result = copy.deepcopy(self._state)
+        return jsonable(result)
+
+    def update(self, payload: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
+        """Atomically update top-level keys.
+
+        ``update(stage="BRAZING")`` and ``update(coordinator.snapshot())`` are
+        both supported to keep the entry point uncomplicated.
+        """
+
+        values: dict[str, Any] = {}
+        if payload is not None:
+            values.update(dict(payload))
+        values.update(kwargs)
+        with self.lock:
+            self._state.update(jsonable(values))
+            self._state["server_time"] = time.time()
+
+    def replace(self, payload: Mapping[str, Any]) -> None:
+        with self.lock:
+            camera_meta = {
+                key: self._state[key]
+                for key in (
+                    "camera_width",
+                    "camera_height",
+                    "camera_active",
+                    "camera_status",
+                    "camera_frame_time",
+                    "available_orders",
+                )
+            }
+            self._state = jsonable(dict(payload))
+            for key, value in camera_meta.items():
+                self._state.setdefault(key, value)
+            self._state["server_time"] = time.time()
+
+    def enqueue(self, command: Mapping[str, Any]) -> dict[str, Any]:
+        item = jsonable(dict(command))
+        self.commands.put(item)
+        return item
+
+    @property
+    def camera_frame_ppm(self) -> bytes:
+        with self.lock:
+            return bytes(self._camera_frame_ppm)
+
+    @camera_frame_ppm.setter
+    def camera_frame_ppm(self, value: bytes) -> None:
+        with self.lock:
+            self._camera_frame_ppm = bytes(value)
+
+    def update_camera(
+        self,
+        frame_ppm: bytes,
+        *,
+        width: int,
+        height: int,
+        active: bool = False,
+        status: str = "camera ready",
+        timestamp: float | None = None,
+    ) -> None:
+        with self.lock:
+            self._camera_frame_ppm = bytes(frame_ppm)
+            self._state.update(
+                camera_width=int(width),
+                camera_height=int(height),
+                camera_active=bool(active),
+                camera_status=str(status),
+                camera_frame_time=time.time() if timestamp is None else float(timestamp),
+                server_time=time.time(),
+            )
+
+    def clear_commands(self) -> None:
+        while True:
+            try:
+                self.commands.get_nowait()
+            except queue.Empty:
+                return
+
+
+class RequestHandler(BaseHTTPRequestHandler):
+    """HTTP adapter; subclasses receive a class-level ``shared`` instance."""
+
+    shared: SharedState
+    max_body_bytes = 1_000_000
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+    def _send_json(self, payload: Mapping[str, Any], status: int = 200) -> None:
+        body = json.dumps(jsonable(payload), ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_binary(self, body: bytes, content_type: str, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json(self) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("invalid Content-Length") from exc
+        if length <= 0:
+            return {}
+        if length > self.max_body_bytes:
+            raise ValueError("request body too large")
+        decoded = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ValueError("JSON body must be an object")
+        return decoded
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        if path == "/state":
+            self._send_json(self.shared.snapshot())
+        elif path == "/camera.ppm":
+            frame = self.shared.camera_frame_ppm
+            if frame:
+                self._send_binary(frame, "image/x-portable-pixmap")
+            else:
+                self._send_binary(b"camera frame not ready", "text/plain; charset=utf-8", 503)
+        else:
+            self._send_json({"ok": False, "error": "not found"}, 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        try:
+            payload = self._read_json()
+            command = validate_http_command(path, payload)
+            self.shared.enqueue(command)
+            response = {"ok": True, **command}
+            self._send_json(response, 202)
+        except KeyError:
+            self._send_json({"ok": False, "error": "not found"}, 404)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            self._send_json({"ok": False, "error": str(exc)}, 400)
+
+
+def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if path == "/order":
+        preset = str(payload.get("preset", "A")).strip().upper()
+        if preset != "A":
+            raise ValueError(f"unknown order preset: {preset}")
+        return {"type": "order", "preset": preset}
+    if path == "/segment":
+        segment = str(payload.get("segment", "")).strip().lower()
+        allowed = {"pick_place", "inspection_1", "arm2_motion", "inspection_2"}
+        if segment not in allowed:
+            raise ValueError(f"segment must be one of {sorted(allowed)}")
+        return {"type": "segment", "segment": segment}
+    if path == "/fault":
+        fault_type = str(payload.get("type", "")).strip().lower()
+        target = str(payload.get("target", "")).strip()
+        severity = str(payload.get("severity", "recoverable")).strip().lower()
+        if fault_type not in FAULT_TYPES:
+            raise ValueError(f"fault type must be one of {sorted(FAULT_TYPES)}")
+        if severity not in FAULT_SEVERITIES:
+            raise ValueError(f"fault severity must be one of {sorted(FAULT_SEVERITIES)}")
+        if fault_type != "furnace_profile" and not target:
+            raise ValueError("fault target is required")
+        if fault_type == "furnace_profile" and not target:
+            target = "furnace"
+        return {"type": "fault", "fault_type": fault_type, "target": target, "severity": severity}
+    if path == "/stop":
+        return {"type": "stop"}
+    if path == "/continue":
+        return {"type": "continue"}
+    if path == "/reset":
+        return {"type": "reset"}
+    raise KeyError(path)
+
+
+def start_http_server(shared: SharedState, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
+    handler = type("BrazingRequestHandler", (RequestHandler,), {"shared": shared})
+    server = ThreadingHTTPServer((host, int(port)), handler)
+    threading.Thread(target=server.serve_forever, name="brazing-http", daemon=True).start()
+    return server
+
+
+def parse_terminal_command(line: str) -> dict[str, Any] | None:
+    """Parse one documented terminal command without mutating shared state."""
+
+    parts = line.strip().lower().replace("-", "_").split()
+    if not parts:
+        return None
+    command = parts[0]
+    if command == "order_a":
+        if len(parts) != 1:
+            raise ValueError("usage: order_a")
+        return {"type": "order", "preset": "A"}
+    if command == "fault":
+        if len(parts) < 3 or len(parts) > 4:
+            raise ValueError(
+                "usage: fault fin_pose <fin_id> | fault brazing_gap <path_id> | "
+                "fault furnace_profile recoverable|severe"
+            )
+        fault_type = parts[1]
+        if fault_type not in FAULT_TYPES:
+            raise ValueError(f"unknown fault type: {fault_type}")
+        if fault_type == "furnace_profile":
+            if len(parts) != 3 or parts[2] not in FAULT_SEVERITIES:
+                raise ValueError("usage: fault furnace_profile recoverable|severe")
+            return {
+                "type": "fault",
+                "fault_type": fault_type,
+                "target": "furnace",
+                "severity": parts[2],
+            }
+        target = parts[2]
+        severity = parts[3] if len(parts) == 4 else "recoverable"
+        if severity not in FAULT_SEVERITIES:
+            raise ValueError(f"fault severity must be one of {sorted(FAULT_SEVERITIES)}")
+        return {"type": "fault", "fault_type": fault_type, "target": target, "severity": severity}
+    segment_commands = {
+        "pick_place": "pick_place",
+        "inspection_1": "inspection_1",
+        "arm2_motion": "arm2_motion",
+        "inspection_2": "inspection_2",
+    }
+    if command in segment_commands:
+        if len(parts) != 1:
+            raise ValueError(f"usage: {command}")
+        return {"type": "segment", "segment": segment_commands[command]}
+    if command in {"stop", "continue", "reset", "status", "help"}:
+        if len(parts) != 1:
+            raise ValueError(f"usage: {command}")
+        return {"type": command}
+    raise ValueError(f"unknown command: {command}")
+
+
+TERMINAL_HELP = """
+[Terminal commands]
+  order_a                              start A-type order
+  fault fin_pose fin_02                inject recoverable fin pose fault
+  fault brazing_gap fin_02_left        inject recoverable material-gap fault
+  fault furnace_profile recoverable    degrade final quality to rework
+  fault furnace_profile severe         force scrap disposition
+  pick_place | inspection_1 | arm2_motion | inspection_2
+  stop | continue | reset | status | help
+""".strip()
+
+
+def start_terminal_thread(
+    shared: SharedState,
+    *,
+    stream: TextIO = sys.stdin,
+    output: TextIO = sys.stdout,
+    on_command: Callable[[dict[str, Any]], None] | None = None,
+) -> threading.Thread:
+    """Start a daemon command reader; EOF cleanly terminates the thread."""
+
+    def loop() -> None:
+        print(TERMINAL_HELP, file=output, flush=True)
+        for line in stream:
+            try:
+                command = parse_terminal_command(line)
+                if command is None:
+                    continue
+                if command["type"] == "help":
+                    print(TERMINAL_HELP, file=output, flush=True)
+                elif command["type"] == "status":
+                    print(
+                        json.dumps(shared.snapshot(), ensure_ascii=False, indent=2), file=output, flush=True
+                    )
+                elif on_command is not None:
+                    on_command(command)
+                else:
+                    shared.enqueue(command)
+            except ValueError as exc:
+                print(f"[terminal] {exc}", file=output, flush=True)
+
+    thread = threading.Thread(target=loop, name="brazing-terminal", daemon=True)
+    thread.start()
+    return thread
+
+
+def post_json(url: str, payload: Mapping[str, Any], timeout: float = 1.0) -> dict[str, Any]:
+    body = json.dumps(jsonable(payload)).encode("utf-8")
+    req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
+        return json.loads(response.read().decode("utf-8"))
+
+
+def get_json(url: str, timeout: float = 1.0) -> dict[str, Any]:
+    with request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+        return json.loads(response.read().decode("utf-8"))
+
+
+def get_bytes(url: str, timeout: float = 1.0) -> bytes:
+    with request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+        return response.read()
+
+
+def rgb_frame_to_ppm(frame: Any) -> bytes:
+    """Encode an HxWx3 uint8-compatible frame without an image dependency."""
+
+    shape = getattr(frame, "shape", None)
+    if shape is None or len(shape) != 3 or int(shape[2]) != 3:
+        raise ValueError(f"camera frame must be HxWx3 RGB, got {shape}")
+    try:
+        import numpy as np
+
+        rgb = np.ascontiguousarray(frame, dtype=np.uint8)
+        height, width = rgb.shape[:2]
+        pixels = rgb.tobytes()
+    except ImportError:
+        height, width = int(shape[0]), int(shape[1])
+        pixels = bytes(frame)
+    return f"P6\n{width} {height}\n255\n".encode("ascii") + pixels
+
+
+__all__ = [
+    "ARM_NAMES",
+    "FAULT_SEVERITIES",
+    "FAULT_TYPES",
+    "RequestHandler",
+    "SharedState",
+    "TERMINAL_HELP",
+    "get_bytes",
+    "get_json",
+    "jsonable",
+    "parse_terminal_command",
+    "post_json",
+    "rgb_frame_to_ppm",
+    "start_http_server",
+    "start_terminal_thread",
+    "validate_http_command",
+]

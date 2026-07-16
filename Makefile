@@ -1,6 +1,7 @@
 SHELL := /bin/bash
+PYTHON ?= python
 
-.PHONY: help format test
+.PHONY: help install install-dev format check test test-unit test-headless
 .DEFAULT: help
 
 help:
@@ -8,12 +9,32 @@ help:
 	@echo
 	@echo "Available targets:"
 	@echo "  help: Show this help"
-	@echo "  format: Run type checking and code styling inplace"
-	@echo "  test: Run all tests"
+	@echo "  install: Install runtime dependencies"
+	@echo "  install-dev: Install runtime, UI, and development dependencies"
+	@echo "  format: Format the new brazing simulation and tests"
+	@echo "  check: Run static checks without rewriting files"
+	@echo "  test: Run the complete automated suite"
+	@echo "  test-headless: Run the A-order headless smoke test"
+
+install:
+	$(PYTHON) -m pip install -e .
+
+install-dev:
+	$(PYTHON) -m pip install -e '.[ui,dev]'
 
 format:
-	black .
-	ruff --fix .
+	$(PYTHON) -m black brazing_line.py brazing_sim tests
+	$(PYTHON) -m ruff check --fix brazing_line.py brazing_sim tests
+
+check:
+	$(PYTHON) -m ruff check brazing_line.py brazing_sim tests
+	$(PYTHON) -m black --check brazing_line.py brazing_sim tests
 
 test:
-	pytest -n auto
+	$(PYTHON) -m pytest
+
+test-unit:
+	$(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+
+test-headless:
+	$(PYTHON) brazing_line.py --headless --order A --fast --max-sim-time 180

@@ -49,7 +49,12 @@ class ArmController:
         self.qpos_ids = np.asarray([int(model.jnt_qposadr[j]) for j in joint_ids], dtype=int)
         self.dof_ids = np.asarray([int(model.jnt_dofadr[j]) for j in joint_ids], dtype=int)
         self.actuator_ids = np.asarray([int(model.actuator(f"{p}fr3_joint{i}").id) for i in range(1, 8)], dtype=int)
-        self.gripper_act_id = int(model.actuator(p + "gripper").id)
+        try:
+            self.gripper_act_id: Optional[int] = int(model.actuator(p + "gripper").id)
+        except KeyError:
+            # Arm3 carries a directly mounted inspection camera and therefore
+            # has no hand, finger joints, tendon, or gripper actuator.
+            self.gripper_act_id = None
         spin_joint_id = int(model.joint(p + "wrist_spin").id)
         self.spin_qpos_id = int(model.jnt_qposadr[spin_joint_id])
         self.spin_act_id = int(model.actuator(p + "wrist_spin").id)
@@ -259,7 +264,8 @@ class ArmController:
         mujoco = self.mujoco
         data = self.data
 
-        data.ctrl[self.gripper_act_id] = float(self.gripper_ctrl)
+        if self.gripper_act_id is not None:
+            data.ctrl[self.gripper_act_id] = float(self.gripper_ctrl)
 
         dx = data.mocap_pos[self.mocap_id] - data.site(self.site_id).xpos
         target_mat = mat_from_quat(data.mocap_quat[self.mocap_id])

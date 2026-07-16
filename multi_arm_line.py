@@ -7,9 +7,10 @@ Layout (project plan section 3.2):
                                                 electric screwdriver)
   right  inspection/rework                   -> Arm3 (inspection, rework)
 
-Per-component process chain (plan sections 5.1-5.4):
-  feed_pick -> feed_place(type fixture) -> assemble_pick -> assemble_place
-  -> press -> screw x N -> inspect [-> rework(press / screw) -> re-inspect]
+Order-batched process chain (plan sections 5.1-5.4):
+  feed/pick/place/press every component with the gripper-press tool
+  -> one tool change -> tighten every screw with the screwdriver
+  -> inspect [-> rework(press / screw) -> re-inspect]
 
 Modules:
   object_manager.py  component specs/orders/state machine + simulated camera
@@ -69,6 +70,17 @@ ZONE_CENTRAL = "central"
 ZONE_STAGING = "staging"
 BOARD_TOP_Z = 0.110
 MAX_REWORK_ROUNDS = 2
+ARM3_CAMERA_NAME = "arm3_inspection_camera"
+CAMERA_FRAME_WIDTH = 640
+CAMERA_FRAME_HEIGHT = 480
+
+BATCH_PLACEMENT = "placement"
+BATCH_FASTENING = "fastening"
+BATCH_INSPECTION = "inspection"
+BATCH_ACQUIRE_GRIPPER = "acquire_gripper"
+BATCH_RELEASE_GRIPPER = "release_gripper"
+BATCH_ACQUIRE_SCREWDRIVER = "acquire_screwdriver"
+BATCH_RELEASE_SCREWDRIVER = "release_screwdriver"
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +93,7 @@ class Stage:
     tokens: tuple[str, ...] = ()
     screw: str = ""
     tool: str = ""             # gripper_press | screwdriver (tool-change stages)
+    batch_role: str = ""       # order-level barrier/tool-transition role
     status: str = "pending"    # pending -> active -> done
 
 
@@ -110,25 +123,59 @@ class Job:
         return self.stage_idx >= len(self.stages)
 
 
-def build_job_stages(job: Job) -> list[Stage]:
-    """Arm2 quick-change flow (design doc sections 5, 8):
-    get gripper_press -> pick/place/press/release/fixture -> return gripper_press
-    -> get screwdriver -> tighten screws -> return screwdriver -> inspect."""
+def build_job_stages(
+    job: Job,
+    *,
+    first_in_order: bool = True,
+    last_in_order: bool = True,
+    order_has_screws: Optional[bool] = None,
+) -> list[Stage]:
+    """Build one job inside an order-level, tool-batched process.
+
+    Arm2 mounts the gripper once before the first component and keeps it for
+    every pick/place/press operation.  Only after *all* components have been
+    pressed does the last job return the gripper and fetch the screwdriver.
+    The screwdriver is likewise returned only after all order screws are
+    finished.  ``stage_ready`` enforces the two order barriers.
+    """
+    if order_has_screws is None:
+        order_has_screws = bool(job.screws)
+
     stages = [
         Stage("feed_pick", "arm1"),
         Stage("feed_place", "arm1", tokens=(ZONE_STAGING,)),
-        Stage("get_tool", "arm2", tool="gripper_press"),
-        Stage("assemble_pick", "arm2", tokens=(ZONE_STAGING,)),
-        Stage("assemble_place", "arm2", tokens=(ZONE_CENTRAL,)),
-        Stage("press", "arm2", tokens=(ZONE_CENTRAL,)),
-        Stage("return_tool", "arm2", tool="gripper_press"),
-        Stage("get_tool", "arm2", tool="screwdriver"),
     ]
+    if first_in_order:
+        stages.append(
+            Stage("get_tool", "arm2", tool="gripper_press", batch_role=BATCH_ACQUIRE_GRIPPER)
+        )
+    stages.extend(
+        [
+            Stage("assemble_pick", "arm2", tokens=(ZONE_STAGING,)),
+            Stage("assemble_place", "arm2", tokens=(ZONE_CENTRAL,)),
+            Stage("press", "arm2", tokens=(ZONE_CENTRAL,), batch_role=BATCH_PLACEMENT),
+        ]
+    )
+    if last_in_order:
+        stages.append(
+            Stage("return_tool", "arm2", tool="gripper_press", batch_role=BATCH_RELEASE_GRIPPER)
+        )
+        if order_has_screws:
+            stages.append(
+                Stage("get_tool", "arm2", tool="screwdriver", batch_role=BATCH_ACQUIRE_SCREWDRIVER)
+            )
     for screw in job.screws:
-        stages.append(Stage("screw", "arm2", tokens=(ZONE_CENTRAL,), screw=screw))
-    stages.append(Stage("return_tool", "arm2", tool="screwdriver"))
+        stages.append(
+            Stage("screw", "arm2", tokens=(ZONE_CENTRAL,), screw=screw, batch_role=BATCH_FASTENING)
+        )
+    if last_in_order and order_has_screws:
+        stages.append(
+            Stage("return_tool", "arm2", tool="screwdriver", batch_role=BATCH_RELEASE_SCREWDRIVER)
+        )
     if job.inspect:
-        stages.append(Stage("inspect", "arm3", tokens=(ZONE_CENTRAL,)))
+        stages.append(
+            Stage("inspect", "arm3", tokens=(ZONE_CENTRAL,), batch_role=BATCH_INSPECTION)
+        )
     return stages
 
 
@@ -154,6 +201,12 @@ class SharedState:
         self.component_states: dict[str, str] = {}
         self.inspect_results: list[dict[str, Any]] = []
         self.fault_screws: list[str] = []
+        self.camera_frame_ppm = b""
+        self.camera_width = CAMERA_FRAME_WIDTH
+        self.camera_height = CAMERA_FRAME_HEIGHT
+        self.camera_active = False
+        self.camera_status = "camera starting"
+        self.camera_frame_time = 0.0
         self.available_orders = sorted(ORDER_PRESETS.keys())
         self.server_time = time.time()
 
@@ -173,6 +226,11 @@ class SharedState:
                 "component_states": dict(self.component_states),
                 "inspect_results": json.loads(json.dumps(self.inspect_results)),
                 "fault_screws": list(self.fault_screws),
+                "camera_width": int(self.camera_width),
+                "camera_height": int(self.camera_height),
+                "camera_active": bool(self.camera_active),
+                "camera_status": str(self.camera_status),
+                "camera_frame_time": float(self.camera_frame_time),
                 "available_orders": list(self.available_orders),
                 "server_time": float(self.server_time),
             }
@@ -204,9 +262,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _send_binary(self, body: bytes, content_type: str, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/state":
             self._send_json(self.shared.snapshot())
+        elif self.path == "/camera.ppm":
+            with self.shared.lock:
+                frame = bytes(self.shared.camera_frame_ppm)
+            if frame:
+                self._send_binary(frame, "image/x-portable-pixmap")
+            else:
+                self._send_binary(b"camera frame not ready", "text/plain; charset=utf-8", status=503)
         else:
             self._send_json({"ok": False, "error": "not found"}, status=404)
 
@@ -304,9 +377,26 @@ def get_json(url: str, timeout: float = 1.0) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def get_bytes(url: str, timeout: float = 1.0) -> bytes:
+    from urllib import request
+
+    with request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+        return resp.read()
+
+
+def rgb_frame_to_ppm(frame: np.ndarray) -> bytes:
+    """Dependency-free RGB transport for the separate Qt camera window."""
+    rgb = np.ascontiguousarray(frame, dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"camera frame must be HxWx3 RGB, got {rgb.shape}")
+    height, width = rgb.shape[:2]
+    return f"P6\n{width} {height}\n255\n".encode("ascii") + rgb.tobytes()
+
+
 def run_ui_client(args: argparse.Namespace) -> int:
     try:
         from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QPixmap
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -323,6 +413,59 @@ def run_ui_client(args: argparse.Namespace) -> int:
         return 2
 
     base_url = f"http://127.0.0.1:{int(args.port)}"
+
+    class CameraWindow(QWidget):
+        """Independent Arm3 wrist-camera monitor fed by MuJoCo offscreen rendering."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("Arm3 Inspection Camera - 向下检查相机")
+            layout = QVBoxLayout(self)
+            self.status_label = QLabel("等待 Arm3 相机画面...")
+            self.status_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(self.status_label)
+            self.image_label = QLabel()
+            self.image_label.setAlignment(Qt.AlignCenter)
+            self.image_label.setMinimumSize(640, 480)
+            self.image_label.setStyleSheet("background: #05070a; border: 2px solid #3b4654;")
+            layout.addWidget(self.image_label, 1)
+            self.last_pixmap = QPixmap()
+
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self.refresh_frame)
+            self.timer.start(100)
+
+        def show_pixmap(self) -> None:
+            if self.last_pixmap.isNull():
+                return
+            scaled = self.last_pixmap.scaled(
+                self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled)
+
+        def refresh_frame(self) -> None:
+            try:
+                state = get_json(base_url + "/state", timeout=0.35)
+                payload = get_bytes(base_url + "/camera.ppm", timeout=0.35)
+                pixmap = QPixmap()
+                if not pixmap.loadFromData(payload, "PPM"):
+                    raise ValueError("invalid PPM camera frame")
+                self.last_pixmap = pixmap
+                self.show_pixmap()
+                active = bool(state.get("camera_active", False))
+                status = str(state.get("camera_status", "camera ready"))
+                if active:
+                    self.status_label.setText("● 正在检查 / INSPECTING   " + status)
+                    self.image_label.setStyleSheet("background: #05070a; border: 3px solid #23d18b;")
+                else:
+                    self.status_label.setText("○ 相机待机 / STANDBY   " + status)
+                    self.image_label.setStyleSheet("background: #05070a; border: 2px solid #3b4654;")
+            except Exception as exc:
+                self.status_label.setText(f"相机画面等待中: {exc}")
+
+        def resizeEvent(self, event) -> None:  # type: ignore[override]
+            self.show_pixmap()
+            super().resizeEvent(event)
 
     class ControlPanel(QWidget):
         def __init__(self) -> None:
@@ -461,12 +604,18 @@ def run_ui_client(args: argparse.Namespace) -> int:
             except Exception:
                 pass
             event.accept()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
 
     app = QApplication(sys.argv[:1])
     panel = ControlPanel()
     panel.resize(1180, 640)
     panel.show()
-    print("[UI] multi_arm_line PySide6 panel opened.", flush=True)
+    camera_window = CameraWindow()
+    camera_window.resize(760, 620)
+    camera_window.show()
+    print("[UI] control panel and Arm3 inspection-camera window opened.", flush=True)
     return int(app.exec())
 
 
@@ -559,6 +708,11 @@ class PipelineWorld:
 
         self.jobs: list[Job] = []
         self.zone_owner: dict[str, str] = {ZONE_CENTRAL: "", ZONE_STAGING: ""}
+        # A zone lease outlives the stage that acquired it.  It is released
+        # only after that arm completes its park motion, so the next arm can
+        # never enter while the previous arm is still retreating through the
+        # shared workspace.
+        self.arm_zone_leases: dict[str, set[str]] = {name: set() for name in ARM_NAMES}
         self.staging_owner: dict[str, str] = {name: "" for name in TYPE_STAGING_SITE.values()}
         self.arm_job: dict[str, Optional[Job]] = {name: None for name in ARM_NAMES}
         self.fault_screws: set[str] = set()
@@ -571,6 +725,16 @@ class PipelineWorld:
         pos = np.array(self.data.site(site_id).xpos, copy=True)
         yaw = yaw_from_mat(np.asarray(self.data.site(site_id).xmat, dtype=float))
         return pos, yaw
+
+    def camera_activity(self) -> tuple[bool, str]:
+        job = self.arm_job["arm3"]
+        if job is not None:
+            stage = job.current_stage()
+            if stage is not None and stage.name == "inspect" and stage.status == "active":
+                return True, f"{job.component} @ {job.slot} | {self.arms['arm3'].current_step_label()}"
+        if self.arms["arm3"].parking:
+            return False, "Arm3 returning to safe home pose"
+        return False, "Arm3 camera ready"
 
     # -- order intake ---------------------------------------------------------
     def load_order(self, order: dict[str, Any]) -> None:
@@ -613,13 +777,21 @@ class PipelineWorld:
                 screws=job_screws,
                 inspect=(f"inspect_{slot}" in inspection_points),
             )
-            job.stages = build_job_stages(job)
             jobs.append(job)
 
         matched = {s for job in jobs for s in job.screws}
         unmatched = [s for s in screws if s not in matched]
         if unmatched:
             raise ValueError(f"screws not matching any ordered slot: {unmatched}")
+
+        order_has_screws = any(job.screws for job in jobs)
+        for idx, job in enumerate(jobs):
+            job.stages = build_job_stages(
+                job,
+                first_in_order=(idx == 0),
+                last_in_order=(idx == len(jobs) - 1),
+                order_has_screws=order_has_screws,
+            )
 
         self.jobs = jobs
         self.order_id = str(order.get("order_id", "custom"))
@@ -646,6 +818,7 @@ class PipelineWorld:
             self.arm_job[name] = None
         self.jobs = []
         self.zone_owner = {ZONE_CENTRAL: "", ZONE_STAGING: ""}
+        self.arm_zone_leases = {name: set() for name in ARM_NAMES}
         self.staging_owner = {name: "" for name in TYPE_STAGING_SITE.values()}
         self.tool_mgr.reset_to_rack()
         self.objects.fixture_release_all()
@@ -742,6 +915,23 @@ class PipelineWorld:
         raise ValueError(f"unknown stage: {stage.name}")
 
     # -- scheduling ----------------------------------------------------------
+    def batch_stages(self, role: str) -> list[Stage]:
+        return [stage for job in self.jobs for stage in job.stages if stage.batch_role == role]
+
+    def batch_placements_done(self) -> bool:
+        stages = self.batch_stages(BATCH_PLACEMENT)
+        return len(stages) == len(self.jobs) and all(stage.status == "done" for stage in stages)
+
+    def batch_fastening_done(self) -> bool:
+        return all(stage.status == "done" for stage in self.batch_stages(BATCH_FASTENING))
+
+    def release_arm_zone_leases(self, arm_name: str) -> None:
+        """Release shared zones only after ``arm_name`` is safely parked."""
+        for token in tuple(self.arm_zone_leases[arm_name]):
+            if self.zone_owner.get(token) == arm_name:
+                self.zone_owner[token] = ""
+        self.arm_zone_leases[arm_name].clear()
+
     def stage_ready(self, job: Job, stage: Stage) -> bool:
         arm = self.arms[stage.arm]
         if self.arm_job[stage.arm] is not None:
@@ -749,6 +939,28 @@ class PipelineWorld:
         if arm.busy and not arm.parking:
             return False
         if arm.held_component and arm.held_component != job.component:
+            return False
+
+        # Order-level process barriers: finish every gripper operation before
+        # changing to the screwdriver, and finish every screw before Arm3 can
+        # inspect or Arm2 can return the screwdriver.
+        if stage.batch_role in {
+            BATCH_RELEASE_GRIPPER,
+            BATCH_ACQUIRE_SCREWDRIVER,
+            BATCH_FASTENING,
+            BATCH_INSPECTION,
+        } and not self.batch_placements_done():
+            return False
+        if stage.batch_role in {BATCH_RELEASE_SCREWDRIVER, BATCH_INSPECTION} and not self.batch_fastening_done():
+            return False
+
+        required_tool = {
+            "assemble_pick": "gripper_press",
+            "assemble_place": "gripper_press",
+            "press": "gripper_press",
+            "screw": "screwdriver",
+        }.get(stage.name)
+        if required_tool and self.tool_mgr.state["current_tool"] != required_tool:
             return False
         if stage.name == "feed_place":
             site_name = TYPE_STAGING_SITE[self.objects.spec_of(job.component).type_name]
@@ -775,6 +987,7 @@ class PipelineWorld:
             return
         for token in stage.tokens:
             self.zone_owner[token] = stage.arm
+            self.arm_zone_leases[stage.arm].add(token)
         stage.status = "active"
         self.arm_job[stage.arm] = job
         arm.start_steps(steps, f"{job.job_id}:{stage.name}")
@@ -782,9 +995,9 @@ class PipelineWorld:
 
     def finish_stage(self, job: Job, stage: Stage) -> None:
         stage.status = "done"
-        for token in stage.tokens:
-            if self.zone_owner[token] == stage.arm:
-                self.zone_owner[token] = ""
+        # Do not release stage tokens here: the skill ends at its retreat
+        # waypoint, not at a collision-safe parking pose.  ``tick`` releases
+        # all leases after the arm's subsequent park motion completes.
         self.arm_job[stage.arm] = None
 
         if stage.name == "feed_place":
@@ -803,8 +1016,17 @@ class PipelineWorld:
             self.objects.set_status(job.component, "assembled")
             print(f"[Arm2] Press-fit complete", flush=True)
         elif stage.name == "return_tool" and stage.tool == "screwdriver":
-            self.objects.set_status(job.component, "waiting_for_inspection")
-            print("[Arm2] Assembly complete, waiting for Arm3 inspection", flush=True)
+            if stage.batch_role == BATCH_RELEASE_SCREWDRIVER:
+                for ordered_job in self.jobs:
+                    self.objects.set_status(ordered_job.component, "waiting_for_inspection")
+                print("[Arm2] Batch fastening complete, waiting for Arm3 inspection", flush=True)
+            else:
+                self.objects.set_status(job.component, "waiting_for_inspection")
+                print("[Arm2] Rework complete, waiting for Arm3 inspection", flush=True)
+        elif stage.batch_role == BATCH_RELEASE_GRIPPER and not self.batch_stages(BATCH_FASTENING):
+            for ordered_job in self.jobs:
+                self.objects.set_status(ordered_job.component, "waiting_for_inspection")
+            print("[Arm2] Batch placement complete, waiting for Arm3 inspection", flush=True)
         elif stage.name == "screw":
             if stage.screw in self.fault_screws:
                 self.fault_screws.discard(stage.screw)
@@ -904,6 +1126,7 @@ class PipelineWorld:
 
         # 1. Advance running skills; finish stages.
         for name, arm in self.arms.items():
+            was_parking = arm.parking
             finished = arm.skill_tick(now, on_action)
             if finished:
                 job = self.arm_job[name]
@@ -911,6 +1134,19 @@ class PipelineWorld:
                     stage = job.current_stage()
                     if stage is not None and stage.status == "active":
                         self.finish_stage(job, stage)
+                elif was_parking:
+                    self.release_arm_zone_leases(name)
+
+            # Defensive fallback for an arm that is already at home (for
+            # example after a no-op tool stage) and therefore needs no park
+            # skill before its lease can be handed over.
+            if (
+                self.arm_zone_leases[name]
+                and self.arm_job[name] is None
+                and not arm.busy
+                and arm.dist_to_home() <= 0.03
+            ):
+                self.release_arm_zone_leases(name)
 
         # 2. Dispatch ready stages (FIFO over jobs -> natural pipelining).
         for job in self.jobs:
@@ -1037,7 +1273,8 @@ def run_controller(args: argparse.Namespace) -> int:
     arms = {name: ArmController(model, data, name, args) for name in ARM_NAMES}
     for arm in arms.values():
         arm.reset_hold()
-        data.ctrl[arm.gripper_act_id] = GRIPPER_OPEN_CTRL
+        if arm.gripper_act_id is not None:
+            data.ctrl[arm.gripper_act_id] = GRIPPER_OPEN_CTRL
 
     world = PipelineWorld(model, data, arms, objects, shared, args)
 
@@ -1068,6 +1305,8 @@ def run_controller(args: argparse.Namespace) -> int:
                 model.site_rgba[sid, 3] = 0.0
 
     print("[3/5] Opening MuJoCo viewer.", flush=True)
+    camera_renderer: Optional[Any] = None
+    camera_scene_option: Optional[Any] = None
     with mujoco.viewer.launch_passive(
         model=model,
         data=data,
@@ -1079,10 +1318,27 @@ def run_controller(args: argparse.Namespace) -> int:
         viewer.cam.distance = 2.8
         viewer.cam.azimuth = 90
         viewer.cam.elevation = -35
+        try:
+            camera_renderer = mujoco.Renderer(
+                model,
+                height=int(args.camera_height),
+                width=int(args.camera_width),
+            )
+            camera_scene_option = mujoco.MjvOption()
+            camera_scene_option.sitegroup[:] = 0
+            print(
+                f"[camera] {ARM3_CAMERA_NAME}: {args.camera_width}x{args.camera_height} @ {args.camera_fps:.1f} FPS",
+                flush=True,
+            )
+        except Exception as exc:
+            with shared.lock:
+                shared.camera_status = f"camera renderer unavailable: {exc}"
+            print(f"[camera] renderer initialization failed: {exc}", file=sys.stderr, flush=True)
         print("[4/5] Three-arm pipeline controller running.", flush=True)
 
         running = True
         last_state_time = 0.0
+        last_camera_time = 0.0
 
         while viewer.is_running() and running:
             step_start = time.time()
@@ -1112,11 +1368,14 @@ def run_controller(args: argparse.Namespace) -> int:
                         arm_name = str(command.get("arm", ""))
                         waypoints = [pose_array_to_command(item) for item in command.get("waypoints", [])]
                         if arm_name in arms and waypoints and world.arm_job[arm_name] is None:
-                            if arms[arm_name].parking:
-                                arms[arm_name].cancel()
-                            arms[arm_name].set_mocap_pose(waypoints[0])
-                            arms[arm_name].manual_hold = True
-                            world.status = f"{arm_name} manual move"
+                            if world.arm_zone_leases[arm_name]:
+                                world.status = f"{arm_name} manual move refused: shared-zone retreat is still active"
+                            else:
+                                if arms[arm_name].parking:
+                                    arms[arm_name].cancel()
+                                arms[arm_name].set_mocap_pose(waypoints[0])
+                                arms[arm_name].manual_hold = True
+                                world.status = f"{arm_name} manual move"
                     elif ctype == "quit":
                         running = False
                 except Exception as exc:
@@ -1134,6 +1393,31 @@ def run_controller(args: argparse.Namespace) -> int:
             mujoco.mj_step(model, data)
             viewer.sync()
 
+            if camera_renderer is not None and now - last_camera_time >= 1.0 / float(args.camera_fps):
+                try:
+                    camera_renderer.update_scene(
+                        data,
+                        camera=ARM3_CAMERA_NAME,
+                        scene_option=camera_scene_option,
+                    )
+                    camera_frame = camera_renderer.render()
+                    camera_active, camera_status = world.camera_activity()
+                    camera_ppm = rgb_frame_to_ppm(camera_frame)
+                    with shared.lock:
+                        shared.camera_frame_ppm = camera_ppm
+                        shared.camera_width = int(camera_frame.shape[1])
+                        shared.camera_height = int(camera_frame.shape[0])
+                        shared.camera_active = camera_active
+                        shared.camera_status = camera_status
+                        shared.camera_frame_time = now
+                except Exception as exc:
+                    with shared.lock:
+                        shared.camera_status = f"camera render failed: {exc}"
+                    print(f"[camera] frame render failed: {exc}", file=sys.stderr, flush=True)
+                    camera_renderer.close()
+                    camera_renderer = None
+                last_camera_time = now
+
             if now - last_state_time > 0.1:
                 world.publish()
                 last_state_time = now
@@ -1142,7 +1426,9 @@ def run_controller(args: argparse.Namespace) -> int:
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-    shared.update(status="viewer closed", viewer_running=False)
+    if camera_renderer is not None:
+        camera_renderer.close()
+    shared.update(status="viewer closed", viewer_running=False, camera_active=False, camera_status="viewer closed")
     server.shutdown()
     if ui_proc is not None and ui_proc.poll() is None:
         ui_proc.terminate()
@@ -1177,7 +1463,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gravity-comp", action="store_true", default=True)
     parser.add_argument("--no-gravity-comp", action="store_false", dest="gravity_comp", help=argparse.SUPPRESS)
     parser.add_argument("--show-mujoco-ui", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--camera-width", type=int, default=CAMERA_FRAME_WIDTH)
+    parser.add_argument("--camera-height", type=int, default=CAMERA_FRAME_HEIGHT)
+    parser.add_argument("--camera-fps", type=float, default=10.0)
+    args = parser.parse_args()
+    if args.camera_width <= 0 or args.camera_height <= 0:
+        parser.error("camera dimensions must be positive")
+    if args.camera_fps <= 0:
+        parser.error("camera FPS must be positive")
+    return args
 
 
 def main() -> int:

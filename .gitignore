@@ -1,2 +1,15 @@
 diffik_qpsolvers.py
 diffik_qp.py
+
+# Python / test / editor artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.DS_Store
