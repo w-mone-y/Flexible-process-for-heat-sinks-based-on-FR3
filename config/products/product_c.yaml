@@ -1,0 +1,20 @@
+schema_version: 1
+product_id: PRODUCT_C
+preset: C
+base_size_m: [0.34, 0.20, 0.008]
+fin_size_m: [0.28, 0.0018, 0.055]
+fin_count: 7
+fin_pitch_m: 0.015
+start_offset_y_m: null
+path_margin_m: 0.015
+path_width_m: 0.004
+brazing_sides: [left, right]
+comb_module: comb_insert_15mm
+target_clamping_force_n: 22.0
+clamping_force_tolerance_n: 2.0
+force_hold_duration_s: 1.5
+nozzle_spacing_m: 0.0044
+bead_offset_m: 0.0022
+nozzle_tip_height_m: 0.0015
+material_speed_m_s: 0.09
+recipe: demo_brazing

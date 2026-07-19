@@ -1,0 +1,7 @@
+schema_version: 1
+order_id: ORDER_001
+product: ../products/product_a.yaml
+quantity: 3
+priority: 10
+due_time: null
+preferred_rack_layer: null

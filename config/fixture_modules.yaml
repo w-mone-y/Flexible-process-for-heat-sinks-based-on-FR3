@@ -1,0 +1,26 @@
+schema_version: 1
+modules:
+  - name: comb_insert_15mm
+    pitch_m: 0.015
+    slot_count: 9
+    front_body: front_comb_insert_15mm
+    rear_body: rear_comb_insert_15mm
+    legacy: false
+  - name: comb_insert_20mm
+    pitch_m: 0.020
+    slot_count: 7
+    front_body: front_comb_insert_20mm
+    rear_body: rear_comb_insert_20mm
+    legacy: false
+  - name: comb_insert_30mm
+    pitch_m: 0.030
+    slot_count: 5
+    front_body: front_comb_insert_30mm
+    rear_body: rear_comb_insert_30mm
+    legacy: false
+  - name: comb_insert_40mm
+    pitch_m: 0.040
+    slot_count: 3
+    front_body: front_comb_insert_40mm
+    rear_body: rear_comb_insert_40mm
+    legacy: true

@@ -11,8 +11,16 @@ from typing import Iterable
 
 class ResourceName(str, Enum):
     ASSEMBLY_FIXTURE = "assembly_fixture"
+    ARM1_TOOL_RACK = "arm1_tool_rack"
+    TABLE2_ZONE = "table2_zone"
     BRAZING_ZONE = "brazing_zone"
     FURNACE_MOUTH = "furnace_mouth"
+    CONVEYOR_LANE = "conveyor_lane"
+    TRAY_INDEXER = "tray_indexer"
+    LIFT_TRANSFER = "lift_transfer"
+    RACK_PUSHER = "rack_pusher"
+    FURNACE_RACK = "furnace_rack"
+    OUTPUT_BUFFER = "output_buffer"
     INSPECTION_ZONE = "inspection_zone"
 
     def __str__(self) -> str:

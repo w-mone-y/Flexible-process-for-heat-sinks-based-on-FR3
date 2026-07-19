@@ -85,19 +85,23 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             layout.addWidget(self.status)
             layout.addWidget(self.image, 1)
             self.pixmap = QPixmap()
+            self.last_frame_time = 0.0
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.refresh)
-            self.timer.start(120)
+            self.timer.start(200)
 
         def refresh(self) -> None:
             try:
                 state = get_json(base_url + "/state", timeout=0.35)
-                payload = get_bytes(base_url + "/camera.ppm", timeout=0.35)
-                pixmap = QPixmap()
-                if not pixmap.loadFromData(payload, "PPM"):
-                    raise ValueError("invalid camera frame")
-                self.pixmap = pixmap
-                self.show_pixmap()
+                frame_time = float(state.get("camera_frame_time", 0.0))
+                if frame_time > self.last_frame_time:
+                    payload = get_bytes(base_url + "/camera.ppm", timeout=0.35)
+                    pixmap = QPixmap()
+                    if not pixmap.loadFromData(payload, "PPM"):
+                        raise ValueError("invalid camera frame")
+                    self.pixmap = pixmap
+                    self.last_frame_time = frame_time
+                    self.show_pixmap()
                 active = bool(state.get("camera_active", False))
                 self.status.setText(
                     ("● INSPECTING  " if active else "○ STANDBY  ") + str(state.get("camera_status", ""))
@@ -128,11 +132,38 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self._button(row, "单独运行取放", "/segment", {"segment": "pick_place"})
             self._button(row, "检测1", "/segment", {"segment": "inspection_1"})
             self._button(row, "Arm2运动", "/segment", {"segment": "arm2_motion"})
+            self._button(row, "翅片安装", "/segment", {"segment": "fin_assembly"})
             self._button(row, "检测2", "/segment", {"segment": "inspection_2"})
+            self._button(row, "压紧/进炉/返回", "/segment", {"segment": "furnace_cycle"})
             self._button(row, "Stop", "/stop", {})
             self._button(row, "Continue", "/continue", {})
             self._button(row, "Reset", "/reset", {})
             root.addWidget(controls)
+
+            batch_controls = QGroupBox("三层炉内料架")
+            batch_row = QHBoxLayout(batch_controls)
+            self._button(
+                batch_row,
+                "运行三层批次",
+                "/batch",
+                {"preset": "A", "layers": 3},
+            )
+            self._button(
+                batch_row,
+                "单独运行升降入架",
+                "/segment",
+                {"segment": "rack_transfer"},
+            )
+            root.addWidget(batch_controls)
+
+            speed_controls = QGroupBox("仿真速度")
+            speed_row = QHBoxLayout(speed_controls)
+            self._button(speed_row, "减速 ÷2", "/speed", {"action": "decelerate"})
+            self.speed = QLabel("当前速度: 1×")
+            self.speed.setAlignment(Qt.AlignCenter)
+            speed_row.addWidget(self.speed, 1)
+            self._button(speed_row, "加速 ×2", "/speed", {"action": "accelerate"})
+            root.addWidget(speed_controls)
 
             status_group = QGroupBox("产线状态")
             grid = QGridLayout(status_group)
@@ -156,13 +187,31 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 arms_layout.addWidget(label)
             root.addWidget(arms_group)
 
+            batch_group = QGroupBox("批次、料架与移载")
+            batch_layout = QVBoxLayout(batch_group)
+            self.batch_status = QLabel("batch: -")
+            self.rack_status = QLabel("rack: EMPTY | EMPTY | EMPTY")
+            self.transfer_status = QLabel("transfer: IDLE")
+            for label in (self.batch_status, self.rack_status, self.transfer_status):
+                label.setWordWrap(True)
+                label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                batch_layout.addWidget(label)
+            root.addWidget(batch_group)
+
             progress_group = QGroupBox("进度、检测与 KPI")
             progress_layout = QVBoxLayout(progress_group)
-            self.progress = QLabel("fins 0/4 | paths 0/8")
-            self.arm2_tool = QLabel("Arm2 tool: none")
+            self.progress = QLabel("fins 0/5 | paths 0/10")
+            self.arm2_tool = QLabel("Arm2 fixed tool: brazing_dispenser")
+            self.conveyor = QLabel("conveyor: IDLE")
             self.inspection = QLabel("inspection: -")
             self.kpi = QLabel("KPI: -")
-            for label in (self.progress, self.arm2_tool, self.inspection, self.kpi):
+            for label in (
+                self.progress,
+                self.arm2_tool,
+                self.conveyor,
+                self.inspection,
+                self.kpi,
+            ):
                 label.setWordWrap(True)
                 label.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 progress_layout.addWidget(label)
@@ -172,7 +221,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
 
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.refresh)
-            self.timer.start(150)
+            self.timer.start(250)
 
         def _button(self, layout: Any, text: str, path: str, payload: dict[str, Any]) -> None:
             button = QPushButton(text)
@@ -181,7 +230,9 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
 
         def post(self, path: str, payload: dict[str, Any]) -> None:
             try:
-                post_json(base_url + path, payload, timeout=0.5)
+                response = post_json(base_url + path, payload, timeout=0.5)
+                command = str(response.get("segment") or response.get("type") or path)
+                self.result.setText(f"command accepted: {command}")
             except Exception as exc:
                 self.result.setText(f"request failed: {exc}")
 
@@ -191,20 +242,80 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 self.order.setText(f"order: {state.get('order_id') or '-'}")
                 paused = " (PAUSED)" if state.get("paused", False) else ""
                 self.stage.setText(f"stage: {state.get('stage', 'IDLE')}{paused}")
+                speed = float(state.get("simulation_speed", 1.0))
+                self.speed.setText(f"当前速度: {speed:g}×")
                 fixture = state.get("fixture", {})
-                self.fixture.setText(f"fixture: {fixture.get('status', fixture or '-')}")
+                resources = state.get("resources", {})
+                table2 = resources.get("table2_zone", {}) if isinstance(resources, dict) else {}
+                table2_owner = table2.get("owner", "-") if isinstance(table2, dict) else "-"
+                self.fixture.setText(
+                    f"fixture: {fixture.get('status', fixture or '-')} | "
+                    f"comb: {fixture.get('active_comb_module') or '-'} | "
+                    f"press: {fixture.get('press_state', '-')} "
+                    f"{float(fixture.get('clamping_force_n', 0.0)):.1f} N | "
+                    f"Table2: {table2_owner or '-'}"
+                )
                 furnace = state.get("furnace", {})
                 temperature = float(furnace.get("temperature_c", 25.0))
                 self.furnace.setText(f"furnace: {furnace.get('status', '-')}  {temperature:.1f} °C")
                 self.plot.add(temperature)
+                error = str(state.get("last_error", ""))
+                controller_status = str(state.get("status", ""))
                 self.result.setText(
-                    f"result: {state.get('disposition') or '-'}  {state.get('last_error', '')}"
+                    f"result: {state.get('disposition') or '-'} | "
+                    f"status: {controller_status or '-'}"
+                    f"{' | error: ' + error if error else ''}"
                 )
                 for name, label in self.arms.items():
                     arm = state.get("arms", {}).get(name, {})
                     label.setText(
                         f"{name}: {arm.get('status', 'idle')}  "
                         f"{arm.get('task_type', '')} {arm.get('task_id', '')}"
+                    )
+                batch = state.get("batch", {})
+                rack = state.get("rack", {})
+                transfer = state.get("transfer", {})
+                if isinstance(batch, dict) and batch:
+                    units = batch.get("units", [])
+                    unit_text = " | ".join(
+                        f"L{unit.get('layer', index + 1)}:{unit.get('phase', '-')}"
+                        for index, unit in enumerate(units)
+                        if isinstance(unit, dict)
+                    )
+                    self.batch_status.setText(
+                        f"batch: {batch.get('batch_id', '-')} | "
+                        f"active layer: {batch.get('active_layer', '-')} | {unit_text}"
+                    )
+                else:
+                    self.batch_status.setText("batch: -")
+                shelves = rack.get("shelves", []) if isinstance(rack, dict) else []
+                shelf_text = " | ".join(
+                    f"L{int(shelf.get('index', index)) + 1}:"
+                    f"{shelf.get('state', 'EMPTY')}"
+                    f"{'[LOCK]' if shelf.get('lock_engaged', False) else ''}"
+                    for index, shelf in enumerate(shelves)
+                    if isinstance(shelf, dict)
+                )
+                self.rack_status.setText(f"rack: {shelf_text or 'EMPTY | EMPTY | EMPTY'}")
+                if isinstance(transfer, dict):
+                    prefetch_index = transfer.get("prefetch_unit_index")
+                    prefetched_index = transfer.get("prefetch_complete_index")
+                    if isinstance(prefetch_index, int):
+                        overlap_text = f" | concurrent prefetch: L{prefetch_index + 1}"
+                    elif isinstance(prefetched_index, int):
+                        overlap_text = f" | prefetched: L{prefetched_index + 1}"
+                    elif transfer.get("parallel_active", False):
+                        overlap_text = " | concurrent axis return"
+                    else:
+                        overlap_text = ""
+                    self.transfer_status.setText(
+                        f"transfer: {transfer.get('phase', 'IDLE')} | "
+                        f"step: {transfer.get('step') or '-'} | "
+                        f"tray: {transfer.get('unit_id') or '-'} | "
+                        f"lift: {1000.0 * float(transfer.get('lift_height_m', 0.0)):.0f} mm | "
+                        f"fork: {100.0 * float(transfer.get('pusher_extension_ratio', 0.0)):.0f}% | "
+                        f"lock: {1000.0 * float(transfer.get('lock_position_m', 0.0)):.0f} mm"
+                        f"{overlap_text}"
                     )
                 fins = state.get("fins", {})
                 paths = state.get("paths", {})
@@ -213,16 +324,21 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 active_fins = sum(bool(item.get("active", False)) for item in fins.values())
                 active_paths = sum(bool(item.get("active", False)) for item in paths.values())
                 self.progress.setText(
-                    f"fins {fin_done}/{active_fins or 4} | paths {path_done}/{active_paths or 8}"
+                    f"fins {fin_done}/{active_fins or 5} | paths {path_done}/{active_paths or 10}"
                 )
                 arm2_tool = state.get("tools", {}).get("arm2", {})
                 arm2_process = state.get("arm2_process", {})
                 self.arm2_tool.setText(
-                    f"Arm2 tool: {arm2_tool.get('current_tool') or 'none'} | "
+                    f"Arm2 fixed tool: {arm2_tool.get('current_tool') or 'brazing_dispenser'} | "
                     f"path: {arm2_process.get('current_path') or '-'} | "
                     f"applied: {arm2_process.get('completed_paths', 0)}/"
-                    f"{arm2_process.get('total_paths', 0)} | "
-                    f"tray carrying: {bool(arm2_process.get('tray_carrying', False))}"
+                    f"{arm2_process.get('total_paths', 0)}"
+                )
+                conveyor = state.get("conveyor", {})
+                self.conveyor.setText(
+                    f"conveyor: {conveyor.get('phase', 'IDLE')} | "
+                    f"position: {1000.0 * float(conveyor.get('position_m', 0.0)):.0f}/"
+                    f"{1000.0 * float(conveyor.get('travel_m', 0.0)):.0f} mm"
                 )
                 inspections = state.get("inspections", [])
                 self.inspection.setText(f"inspection: {inspections[-1] if inspections else '-'}")

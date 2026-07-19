@@ -21,8 +21,8 @@ dev = [
   "ruff>=0.5",
 ]
 
-[tool.setuptools]
-packages = ["brazing_sim"]
+[tool.setuptools.packages.find]
+include = ["brazing_sim", "brazing_sim.*"]
 
 [tool.black]
 line-length = 110

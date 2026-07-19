@@ -22,6 +22,7 @@ class ContactEvent:
 
 DEFAULT_ALLOWED_BODY_PAIRS = {
     frozenset(("assembly_fixture", "assembly_tray")),
+    frozenset(("fixture_tray", "heatsink_base_plate")),
     frozenset(("furnace", "furnace_door")),
 }
 
@@ -55,7 +56,11 @@ class ContactMonitor:
             return True
         if frozenset((body1, body2)) in self.allowed_pairs:
             return True
-        if {body1, body2} <= {"base_plate", *(f"fin_{i:02d}" for i in range(1, 9))}:
+        if {body1, body2} <= {
+            "base_plate",
+            "heatsink_base_plate",
+            *(f"fin_{i:02d}" for i in range(1, 13)),
+        }:
             return True
         return False
 

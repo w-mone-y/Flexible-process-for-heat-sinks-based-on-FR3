@@ -1,4 +1,4 @@
-"""Equality-weld quick changers for the Arm1 and Arm2 tool racks."""
+"""Arm1 quick changer and Arm2's permanent brazing dispenser."""
 
 from __future__ import annotations
 
@@ -28,26 +28,24 @@ class ToolSpec:
     rack_weld: str
 
 
-TOOL_SPECS: dict[str, ToolSpec] = {
-    "brazing_dispenser": ToolSpec(
+@dataclass(frozen=True)
+class PermanentToolSpec:
+    name: str
+    body: str
+    free_joint: str
+    tcp_site: str
+    mount_site: str
+    arm_weld: str
+
+
+TOOL_SPECS: dict[str, PermanentToolSpec] = {
+    "brazing_dispenser": PermanentToolSpec(
         name="brazing_dispenser",
-        body="arm2_brazing_dispenser",
-        free_joint="arm2_brazing_dispenser_free",
-        tcp_site="arm2_brazing_dispenser_tcp",
-        mount_site="arm2_brazing_dispenser_mount_site",
-        rack_site="arm2_brazing_dispenser_rack_site",
-        arm_weld="arm2_toolchange_brazing_dispenser",
-        rack_weld="arm2_rack_brazing_dispenser",
-    ),
-    "tray_transfer": ToolSpec(
-        name="tray_transfer",
-        body="arm2_tray_transfer",
-        free_joint="arm2_tray_transfer_free",
-        tcp_site="arm2_tray_transfer_tcp",
-        mount_site="arm2_tray_transfer_mount_site",
-        rack_site="arm2_tray_transfer_rack_site",
-        arm_weld="arm2_toolchange_tray_transfer",
-        rack_weld="arm2_rack_tray_transfer",
+        body="arm2_dual_brazing_dispenser_tool",
+        free_joint="arm2_dual_brazing_dispenser_tool_free",
+        tcp_site="arm2_dispenser_center_tcp",
+        mount_site="arm2_dispenser_mount",
+        arm_weld="arm2_dispenser_tool_weld",
     ),
 }
 
@@ -105,7 +103,9 @@ class QuickChangeToolManager:
         self.data = data
         self.controller = controller
         self.arm_name = str(arm_name)
-        self.registry = dict(registry or TOOL_SPECS)
+        if registry is None:
+            raise ValueError("quick-change tools require an explicit rack registry")
+        self.registry = dict(registry)
         self.link7_id = int(model.body(f"{self.arm_name}_fr3_link7").id)
         self.master_site_id = int(model.site(f"{self.arm_name}_attachment_site").id)
         self.body_ids: dict[str, int] = {}
@@ -311,21 +311,111 @@ class Arm1ToolManager(QuickChangeToolManager):
         )
 
 
-class Arm2ToolManager(QuickChangeToolManager):
+class Arm2ToolManager:
+    """Keep the dual-nozzle dispenser rigidly mounted on Arm2 at all times."""
+
+    TOOL_NAME = "brazing_dispenser"
+
     def __init__(
         self,
         model: Any,
         data: Any,
         controller: ArmController | None = None,
-        registry: Mapping[str, ToolSpec] | None = None,
     ) -> None:
-        super().__init__(
-            model,
-            data,
-            controller,
-            arm_name="arm2",
-            registry=registry or TOOL_SPECS,
-        )
+        import mujoco
+
+        self.mujoco = mujoco
+        self.model = model
+        self.data = data
+        self.controller = controller
+        self.arm_name = "arm2"
+        self.spec = TOOL_SPECS[self.TOOL_NAME]
+        self.link7_id = int(model.body("arm2_fr3_link7").id)
+        self.master_site_id = int(model.site("arm2_attachment_site").id)
+        self.body_id = int(model.body(self.spec.body).id)
+        joint_id = int(model.joint(self.spec.free_joint).id)
+        self.qpos_address = int(model.jnt_qposadr[joint_id])
+        self.dof_address = int(model.jnt_dofadr[joint_id])
+        self.tcp_site_id = int(model.site(self.spec.tcp_site).id)
+        self.mount_site_id = int(model.site(self.spec.mount_site).id)
+        self.arm_weld_id = int(model.equality(self.spec.arm_weld).id)
+        self.current_tool = self.TOOL_NAME
+        self.reset_mounted()
+
+    @property
+    def state(self) -> dict[str, str]:
+        return {
+            "current_tool": self.TOOL_NAME,
+            "mount": "permanent",
+            self.TOOL_NAME: ToolLocation.ON_ARM.value,
+        }
+
+    @property
+    def available_tools(self) -> tuple[str, ...]:
+        return (self.TOOL_NAME,)
+
+    @property
+    def current_body(self) -> str:
+        return self.spec.body
+
+    def _teleport_to_flange(self) -> None:
+        flange = pose_from_site(self.data, self.master_site_id)
+        self.data.qpos[self.qpos_address : self.qpos_address + 3] = flange.position
+        self.data.qpos[self.qpos_address + 3 : self.qpos_address + 7] = flange.quaternion
+        self.data.qvel[self.dof_address : self.dof_address + 6] = 0.0
+
+    def _write_current_weld_pose(self) -> None:
+        link_pose = _body_pose(self.data, self.link7_id)
+        tool_pose = _body_pose(self.data, self.body_id)
+        relative = link_pose.inverse().transformed(tool_pose)
+        self.model.eq_data[self.arm_weld_id, :] = 0.0
+        self.model.eq_data[self.arm_weld_id, 3:6] = relative.position
+        self.model.eq_data[self.arm_weld_id, 6:10] = relative.quaternion
+        self.model.eq_data[self.arm_weld_id, 10] = 1.0
+
+    def _refresh_controller_tool(self) -> None:
+        if self.controller is None:
+            return
+        flange = pose_from_site(self.data, self.master_site_id)
+        tcp = pose_from_site(self.data, self.tcp_site_id)
+        self.controller.set_tool_transform(flange.inverse().transformed(tcp))
+
+    def reset_mounted(self) -> None:
+        """Restore the one legal state: dispenser welded directly to Arm2."""
+
+        self.data.eq_active[self.arm_weld_id] = 0
+        self._teleport_to_flange()
+        self.mujoco.mj_forward(self.model, self.data)
+        self._write_current_weld_pose()
+        self.data.eq_active[self.arm_weld_id] = 1
+        self.current_tool = self.TOOL_NAME
+        self.mujoco.mj_forward(self.model, self.data)
+        self._refresh_controller_tool()
+
+    def sync_mounted(self) -> None:
+        self._teleport_to_flange()
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def change_tool(self, tool: str) -> None:
+        if tool != self.TOOL_NAME:
+            raise ValueError(f"Arm2 only has permanent tool {self.TOOL_NAME!r}")
+        if not bool(self.data.eq_active[self.arm_weld_id]):
+            self.reset_mounted()
+
+    dock = change_tool
+
+    def tool_transform(self, tool: str = TOOL_NAME) -> Pose:
+        if tool != self.TOOL_NAME:
+            raise ValueError(f"Arm2 only has permanent tool {self.TOOL_NAME!r}")
+        mount = pose_from_site(self.data, self.mount_site_id)
+        tcp = pose_from_site(self.data, self.tcp_site_id)
+        return mount.inverse().transformed(tcp)
+
+    def tcp_for_flange(self, flange_pose: Pose, tool: str = TOOL_NAME) -> Pose:
+        return flange_pose.transformed(self.tool_transform(tool))
+
+    def tcp_pose(self) -> Pose:
+        return pose_from_site(self.data, self.tcp_site_id)
 
 
 # Concise compatibility alias for existing Arm2 callers.
@@ -340,5 +430,6 @@ __all__ = [
     "TOOL_SPECS",
     "ToolLocation",
     "ToolManager",
+    "PermanentToolSpec",
     "ToolSpec",
 ]

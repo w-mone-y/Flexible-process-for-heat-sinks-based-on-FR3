@@ -462,11 +462,32 @@ class ArmController:
         roll_error = signed_twist_error(current_rotation, target_rotation, target_axis)
         return task, basis1, basis2, float(np.linalg.norm(position_error)), axis_angle, roll_error
 
-    def _joint_velocity(self, pose: Pose, *, tcp: bool = False) -> tuple[np.ndarray, float, float, float]:
+    def _joint_velocity(
+        self,
+        pose: Pose,
+        *,
+        tcp: bool = False,
+        locked_local_indices: Iterable[int] = (),
+        full_orientation: bool = False,
+    ) -> tuple[np.ndarray, float, float, float]:
+        """Return one DLS step while optionally keeping selected joints fixed.
+
+        A locked joint must be removed from the Jacobian solve itself.  Solving
+        with all seven joints and overwriting one column afterward invalidates
+        the full-orientation solution and lets a mounted tool rotate underneath
+        a rigidly carried workpiece.
+        """
+
+        locked = frozenset(int(index) for index in locked_local_indices)
+        if any(index < 0 or index >= 7 for index in locked):
+            raise ValueError("locked joint indices must be in the range 0..6")
+        active = np.asarray([index for index in range(7) if index not in locked], dtype=int)
+        if active.size < 6:
+            raise ValueError("full SE(3) IK requires at least six active joints")
         self.mujoco.mj_jacSite(self.model, self.data, self.jacobian[:3], self.jacobian[3:], self.site_id)
         task, basis1, basis2, position_error, axis_error, roll_error = self._task_velocity(pose, tcp=tcp)
-        jac_pos = self.jacobian[:3, self.dof_ids]
-        jac_rot = self.jacobian[3:, self.dof_ids]
+        jac_pos_full = self.jacobian[:3, self.dof_ids]
+        jac_rot_full = self.jacobian[3:, self.dof_ids]
         if tcp:
             flange = self.current_flange_pose()
             offset = flange.rotation @ self.tool_transform.position
@@ -477,29 +498,74 @@ class ArmController:
                     [-offset[1], offset[0], 0.0],
                 ]
             )
-            jac_pos = jac_pos - skew @ jac_rot
+            jac_pos_full = jac_pos_full - skew @ jac_rot_full
+        jac_pos = jac_pos_full[:, active]
+        jac_rot = jac_rot_full[:, active]
+        if locked or full_orientation:
+            # With one joint mechanically fixed there are exactly six active
+            # coordinates.  Solve the complete spatial task directly; a 5D
+            # solve followed by a damped null-space roll correction leaves a
+            # small orientation residual that accumulates along a carry path.
+            current = self.current_tcp_pose() if tcp else self.current_flange_pose()
+            current_axis = _unit(current.rotation[:, 2])
+            target_axis = _unit(pose.rotation[:, 2])
+            axis_cross = np.cross(current_axis, target_axis)
+            cross_norm = float(np.linalg.norm(axis_cross))
+            axis_angle = math.atan2(
+                cross_norm,
+                float(np.clip(np.dot(current_axis, target_axis), -1.0, 1.0)),
+            )
+            axis_vector = np.zeros(3) if cross_norm < 1e-10 else axis_cross / cross_norm * axis_angle
+            angular_task = (
+                self.config.axis_gain * axis_vector + self.config.roll_gain * roll_error * target_axis
+            )
+            task6 = np.concatenate((task[:3], angular_task))
+            jac6 = np.vstack((jac_pos, jac_rot))
+            regularizer6 = (self.config.damping**2) * np.eye(6)
+            try:
+                inverse6 = jac6.T @ np.linalg.solve(
+                    jac6 @ jac6.T + regularizer6,
+                    np.eye(6),
+                )
+            except np.linalg.LinAlgError:
+                return np.zeros(7), position_error, axis_error, roll_error
+            active_velocity = inverse6 @ task6
+            if active.size > 6:
+                nullspace6 = np.eye(active.size) - inverse6 @ jac6
+                qpos = np.asarray(self.data.qpos[self.qpos_ids], dtype=float)
+                centered = self.config.joint_center_gain * (self.mid - qpos) / self.half_range
+                active_velocity += nullspace6 @ centered[active]
+            velocity = np.zeros(7, dtype=float)
+            velocity[active] = active_velocity
+            peak = float(np.max(np.abs(velocity)))
+            if peak > self.config.max_joint_speed:
+                velocity *= self.config.max_joint_speed / peak
+            return velocity, position_error, axis_error, roll_error
+
         jac5 = np.vstack((jac_pos, np.vstack((basis1, basis2)) @ jac_rot))
         regularizer = (self.config.damping**2) * np.eye(5)
         try:
             inverse = jac5.T @ np.linalg.solve(jac5 @ jac5.T + regularizer, np.eye(5))
         except np.linalg.LinAlgError:
             return np.zeros(7), position_error, axis_error, roll_error
-        velocity = inverse @ task
-        nullspace = self.identity - inverse @ jac5
+        active_velocity = inverse @ task
+        nullspace = np.eye(active.size) - inverse @ jac5
 
         # Full-orientation twist is solved after the 5D task, through its
         # remaining null-space. This is the independent tool-roll channel.
         target_axis = pose.rotation[:, 2]
-        projected_roll_jac = (target_axis @ jac_rot @ nullspace).reshape(1, 7)
+        projected_roll_jac = (target_axis @ jac_rot @ nullspace).reshape(1, active.size)
         denominator = (projected_roll_jac @ projected_roll_jac.T).item() + self.config.damping**2
         if denominator > 1e-10:
-            velocity += (nullspace @ projected_roll_jac.T).ravel() * (
+            active_velocity += (nullspace @ projected_roll_jac.T).ravel() * (
                 self.config.roll_gain * roll_error / denominator
             )
 
         qpos = np.asarray(self.data.qpos[self.qpos_ids], dtype=float)
         centered = self.config.joint_center_gain * (self.mid - qpos) / self.half_range
-        velocity += nullspace @ centered
+        active_velocity += nullspace @ centered[active]
+        velocity = np.zeros(7, dtype=float)
+        velocity[active] = active_velocity
         peak = float(np.max(np.abs(velocity)))
         if peak > self.config.max_joint_speed:
             velocity *= self.config.max_joint_speed / peak
@@ -545,6 +611,10 @@ class ArmController:
         seed: ArrayLike | None = None,
         max_iterations: int = 600,
         step_s: float = 0.03,
+        locked_joints: Mapping[int, float] | None = None,
+        position_tolerance_m: float | None = None,
+        orientation_tolerance_rad: float | None = None,
+        full_orientation: bool = False,
     ) -> ReachabilityResult:
         """Non-destructive sampled IK check used before dispatching a path."""
 
@@ -553,22 +623,48 @@ class ArmController:
         saved_ctrl = self.data.ctrl.copy()
         saved_target = self.target
         saved_tcp_target = self.tcp_target
+        locks = {int(index): float(value) for index, value in (locked_joints or {}).items()}
+        if any(index < 0 or index >= 7 for index in locks):
+            raise ValueError("locked joint indices must be in the range 0..6")
+        if len(locks) > 1:
+            raise ValueError("full SE(3) IK supports at most one locked FR3 joint")
+        position_tolerance = (
+            self.config.position_tolerance_m if position_tolerance_m is None else float(position_tolerance_m)
+        )
+        orientation_tolerance = (
+            self.config.orientation_tolerance_rad
+            if orientation_tolerance_rad is None
+            else float(orientation_tolerance_rad)
+        )
+        if position_tolerance <= 0.0 or orientation_tolerance <= 0.0:
+            raise ValueError("IK tolerances must be positive")
         try:
             if seed is not None:
                 candidate = np.asarray(seed, dtype=float)
                 if candidate.shape != (7,):
                     raise ValueError("IK seed must have seven joints")
                 self.data.qpos[self.qpos_ids] = np.clip(candidate, self.lower, self.upper)
+            for index, value in locks.items():
+                self.data.qpos[self.qpos_ids[index]] = np.clip(
+                    value,
+                    self.lower[index],
+                    self.upper[index],
+                )
             self.mujoco.mj_forward(self.model, self.data)
             position_error = math.inf
             orientation_error = math.inf
             for iteration in range(1, int(max_iterations) + 1):
-                velocity, position_error, axis_error, roll_error = self._joint_velocity(target, tcp=tcp)
+                velocity, position_error, axis_error, roll_error = self._joint_velocity(
+                    target,
+                    tcp=tcp,
+                    locked_local_indices=locks,
+                    full_orientation=full_orientation,
+                )
                 orientation_error = math.hypot(axis_error, roll_error)
                 if (
-                    position_error <= self.config.position_tolerance_m
-                    and axis_error <= self.config.orientation_tolerance_rad
-                    and abs(roll_error) <= self.config.orientation_tolerance_rad
+                    position_error <= position_tolerance
+                    and axis_error <= orientation_tolerance
+                    and abs(roll_error) <= orientation_tolerance
                 ):
                     return ReachabilityResult(
                         True,
@@ -578,6 +674,8 @@ class ArmController:
                         iteration,
                     )
                 values = np.asarray(self.data.qpos[self.qpos_ids], dtype=float) + velocity * float(step_s)
+                for index, value in locks.items():
+                    values[index] = value
                 self.data.qpos[self.qpos_ids] = np.clip(values, self.lower, self.upper)
                 self.mujoco.mj_forward(self.model, self.data)
             return ReachabilityResult(
@@ -586,7 +684,10 @@ class ArmController:
                 orientation_error,
                 np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy(),
                 int(max_iterations),
-                "target residual exceeds 3 mm / 3 degrees",
+                (
+                    f"target residual exceeds {position_tolerance * 1000:.3g} mm / "
+                    f"{math.degrees(orientation_tolerance):.3g} degrees"
+                ),
             )
         finally:
             self.data.qpos[:] = saved_qpos
@@ -597,12 +698,27 @@ class ArmController:
             self.mujoco.mj_forward(self.model, self.data)
 
     def validate_trajectory(
-        self, trajectory: PolylineTrajectory, *, tcp: bool = True
+        self,
+        trajectory: PolylineTrajectory,
+        *,
+        tcp: bool = True,
+        locked_joints: Mapping[int, float] | None = None,
+        position_tolerance_m: float | None = None,
+        orientation_tolerance_rad: float | None = None,
+        full_orientation: bool = False,
     ) -> tuple[ReachabilityResult, ...]:
         results: list[ReachabilityResult] = []
         seed = np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy()
         for target in trajectory.samples(min(trajectory.sample_spacing_m, 0.01)):
-            result = self.solve_ik(target, tcp=tcp, seed=seed)
+            result = self.solve_ik(
+                target,
+                tcp=tcp,
+                seed=seed,
+                locked_joints=locked_joints,
+                position_tolerance_m=position_tolerance_m,
+                orientation_tolerance_rad=orientation_tolerance_rad,
+                full_orientation=full_orientation,
+            )
             results.append(result)
             if not result.reachable:
                 break

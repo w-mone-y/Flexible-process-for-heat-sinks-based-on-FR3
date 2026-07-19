@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from brazing_sim.config import create_product_state
-from brazing_sim.domain import FurnacePhase, OrderStage, TerminalDisposition
+from brazing_sim.domain import FurnacePhase, OrderStage, PressState, TerminalDisposition
 from brazing_sim.furnace import DemoFurnace, FurnaceInterlockError
 from brazing_sim.quality import QualityEvaluator
 
@@ -16,8 +16,18 @@ def _ready_product(fault: str | None = None):
     for path in product.active_paths:
         path.applied = True
         path.coverage_ratio = 1.0
-    product.fixture.base_weld_active = True
-    product.fixture.lock()
+    fixture = product.fixture
+    fixture.base_weld_active = True
+    fixture.active_comb_module = product.spec.comb_module_name
+    fixture.front_comb_module = product.spec.comb_module_name
+    fixture.rear_comb_module = product.spec.comb_module_name
+    fixture.comb_configured = True
+    fixture.comb_aligned = True
+    fixture.material_passed = True
+    fixture.fins_passed = True
+    fixture.press_state = PressState.COMPLETE
+    fixture.press_force_held = True
+    fixture.lock()
     furnace = DemoFurnace(product.spec.recipe)
     furnace.start(0.0, fault=fault)
     furnace.update(100.0)
@@ -27,6 +37,7 @@ def _ready_product(fault: str | None = None):
 
 def test_demo_furnace_advances_only_with_simulation_clock() -> None:
     furnace = DemoFurnace()
+    assert furnace.recipe.process_seconds == pytest.approx(10.0)
     furnace.start(0.0)
     assert furnace.status is FurnacePhase.DOOR_OPENING
     assert not furnace.complete
@@ -39,14 +50,14 @@ def test_demo_furnace_advances_only_with_simulation_clock() -> None:
     assert furnace.status is FurnacePhase.SOAK
     furnace.update(9.5)
     assert furnace.status is FurnacePhase.COOLING
-    furnace.update(14.24)
+    furnace.update(12.24)
     assert furnace.status is FurnacePhase.DOOR_OPENING
-    furnace.update(14.25)
+    furnace.update(12.25)
     assert furnace.complete
     assert furnace.temperature == pytest.approx(80.0)
     assert furnace.state.peak_temperature_c == pytest.approx(600.0)
     with pytest.raises(ValueError, match="monotonic"):
-        furnace.update(14.0)
+        furnace.update(12.0)
 
 
 def test_manual_furnace_sequence_enforces_door_and_load_interlocks() -> None:

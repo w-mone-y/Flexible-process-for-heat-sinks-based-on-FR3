@@ -1,0 +1,12 @@
+schema_version: 1
+recipes:
+  demo_brazing:
+    ambient_c: 25.0
+    preheat_c: 150.0
+    peak_c: 600.0
+    unload_c: 80.0
+    preheat_seconds: 2.0
+    ramp_seconds: 2.0
+    soak_seconds: 4.0
+    cooling_seconds: 2.0
+    door_seconds: 0.75

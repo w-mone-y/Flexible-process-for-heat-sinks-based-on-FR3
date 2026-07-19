@@ -28,6 +28,30 @@ class ContactMonitorTests(unittest.TestCase):
             mujoco.mj_step(model, data)
         self.assertEqual(ContactMonitor(model).unexpected(data), [])
 
+    def test_product_c_raw_fins_remain_stable_and_clear_of_arm1_tool_rack(self) -> None:
+        try:
+            import numpy as np
+        except ImportError as exc:  # pragma: no cover
+            self.skipTest(str(exc))
+        from brazing_sim.scene import BrazingScene
+        from brazing_sim.safety import ContactMonitor
+
+        scene = BrazingScene(ROOT / "brazing_line.xml", order="C", raw=True)
+        try:
+            initial = {
+                index: scene.registry.free_body_pose(f"fin_{index:02d}").position.copy()
+                for index in range(1, 8)
+            }
+            scene.step(300)
+            self.assertEqual(ContactMonitor(scene.model).unexpected(scene.data), [])
+            for index, position in initial.items():
+                actual = scene.registry.free_body_pose(f"fin_{index:02d}").position
+                self.assertLess(float(np.linalg.norm(actual - position)), 1.0e-9)
+                target = scene.registry.site_pose(f"raw_fin_{index:02d}_site").position
+                self.assertLess(float(np.linalg.norm(actual - target)), 1.0e-9)
+        finally:
+            scene.close()
+
 
 if __name__ == "__main__":
     unittest.main()

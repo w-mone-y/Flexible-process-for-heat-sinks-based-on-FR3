@@ -53,6 +53,7 @@ class SharedState:
             "preset": "",
             "stage": "IDLE",
             "paused": False,
+            "simulation_speed": 1.0,
             "disposition": None,
             "arms": {
                 name: {"task_id": "", "task_type": "", "status": "idle", "error": ""} for name in ARM_NAMES
@@ -61,12 +62,35 @@ class SharedState:
             "fins": {},
             "paths": {},
             "fixture": {},
+            "preflight": {"ok": False, "issues": [], "checked_presets": []},
             "tools": {"arm1": {}, "arm2": {}},
             "arm2_process": {
                 "current_path": "",
                 "completed_paths": 0,
                 "total_paths": 0,
-                "tray_carrying": False,
+            },
+            "conveyor": {
+                "phase": "IDLE",
+                "position_m": 0.0,
+                "target_m": 0.0,
+                "travel_m": 0.63,
+                "progress": 0.0,
+                "moving": False,
+            },
+            "batch": {},
+            "rack": {"shelves": []},
+            "transfer": {
+                "phase": "IDLE",
+                "step": "",
+                "unit_id": None,
+                "shelf_index": None,
+                "lift_height_m": 0.0,
+                "outfeed_position_m": 0.0,
+                "pusher_position_m": 0.0,
+                "pusher_extension_ratio": 0.0,
+                "lock_position_m": 0.0,
+                "output_position_m": 0.0,
+                "moving": False,
             },
             "furnace": {"status": "idle", "temperature_c": 25.0, "door_open": False},
             "inspections": [],
@@ -78,7 +102,7 @@ class SharedState:
             "camera_active": False,
             "camera_status": "camera starting",
             "camera_frame_time": 0.0,
-            "available_orders": ["A"],
+            "available_orders": ["A", "B", "C"],
             "server_time": time.time(),
         }
         self._camera_frame_ppm = b""
@@ -235,12 +259,28 @@ class RequestHandler(BaseHTTPRequestHandler):
 def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
     if path == "/order":
         preset = str(payload.get("preset", "A")).strip().upper()
-        if preset != "A":
+        if preset not in {"A", "B", "C"}:
             raise ValueError(f"unknown order preset: {preset}")
         return {"type": "order", "preset": preset}
+    if path == "/batch":
+        preset = str(payload.get("preset", "A")).strip().upper()
+        layers = int(payload.get("layers", 3))
+        if preset != "A":
+            raise ValueError("the three-layer MVP batch currently supports preset A only")
+        if layers != 3:
+            raise ValueError("the three-layer MVP batch requires layers=3")
+        return {"type": "batch", "preset": preset, "layers": layers}
     if path == "/segment":
         segment = str(payload.get("segment", "")).strip().lower()
-        allowed = {"pick_place", "inspection_1", "arm2_motion", "inspection_2"}
+        allowed = {
+            "pick_place",
+            "inspection_1",
+            "arm2_motion",
+            "fin_assembly",
+            "inspection_2",
+            "furnace_cycle",
+            "rack_transfer",
+        }
         if segment not in allowed:
             raise ValueError(f"segment must be one of {sorted(allowed)}")
         return {"type": "segment", "segment": segment}
@@ -261,6 +301,11 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
         return {"type": "stop"}
     if path == "/continue":
         return {"type": "continue"}
+    if path == "/speed":
+        action = str(payload.get("action", "")).strip().lower()
+        if action not in {"accelerate", "decelerate"}:
+            raise ValueError("speed action must be accelerate or decelerate")
+        return {"type": "speed", "action": action}
     if path == "/reset":
         return {"type": "reset"}
     raise KeyError(path)
@@ -280,10 +325,14 @@ def parse_terminal_command(line: str) -> dict[str, Any] | None:
     if not parts:
         return None
     command = parts[0]
-    if command == "order_a":
+    if command in {"order_a", "order_b", "order_c"}:
         if len(parts) != 1:
-            raise ValueError("usage: order_a")
-        return {"type": "order", "preset": "A"}
+            raise ValueError(f"usage: {command}")
+        return {"type": "order", "preset": command[-1].upper()}
+    if command == "batch_a":
+        if len(parts) != 1:
+            raise ValueError("usage: batch_a")
+        return {"type": "batch", "preset": "A", "layers": 3}
     if command == "fault":
         if len(parts) < 3 or len(parts) > 4:
             raise ValueError(
@@ -311,7 +360,10 @@ def parse_terminal_command(line: str) -> dict[str, Any] | None:
         "pick_place": "pick_place",
         "inspection_1": "inspection_1",
         "arm2_motion": "arm2_motion",
+        "fin_assembly": "fin_assembly",
         "inspection_2": "inspection_2",
+        "furnace_cycle": "furnace_cycle",
+        "rack_transfer": "rack_transfer",
     }
     if command in segment_commands:
         if len(parts) != 1:
@@ -326,12 +378,13 @@ def parse_terminal_command(line: str) -> dict[str, Any] | None:
 
 TERMINAL_HELP = """
 [Terminal commands]
-  order_a                              start A-type order
+  order_a | order_b | order_c          start A/B/C flexible-fixture order
   fault fin_pose fin_02                inject recoverable fin pose fault
-  fault brazing_gap fin_02_left        inject recoverable material-gap fault
+  fault brazing_gap slot_02_left       inject recoverable material-gap fault
   fault furnace_profile recoverable    degrade final quality to rework
   fault furnace_profile severe         force scrap disposition
-  pick_place | inspection_1 | arm2_motion | inspection_2
+  pick_place | inspection_1 | arm2_motion | fin_assembly | inspection_2 | furnace_cycle
+  rack_transfer | batch_a
   stop | continue | reset | status | help
 """.strip()
 

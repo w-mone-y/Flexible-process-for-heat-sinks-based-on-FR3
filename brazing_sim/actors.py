@@ -14,7 +14,9 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .conveyor import ConveyorTaskActor
 from .domain import ProductState, TaskSpec, TaskType
+from .fixture import FixtureTaskActor
 from .motion import (
     ExecutionState,
     PolylineTrajectory,
@@ -35,21 +37,6 @@ def _top_down_quaternion(yaw: float = 0.0) -> np.ndarray:
             [cosine, sine, 0.0],
             [sine, -cosine, 0.0],
             [0.0, 0.0, -1.0],
-        ]
-    )
-    return matrix_to_quat(rotation)
-
-
-def _forward_tilted_lance_quaternion(tilt_deg: float = 20.0) -> np.ndarray:
-    """Point a long Arm2 lance downward and slightly toward Table2 (+Y)."""
-
-    angle = math.radians(float(tilt_deg))
-    sine, cosine = math.sin(angle), math.cos(angle)
-    rotation = np.asarray(
-        [
-            [1.0, 0.0, 0.0],
-            [0.0, -cosine, sine],
-            [0.0, -sine, -cosine],
         ]
     )
     return matrix_to_quat(rotation)
@@ -119,14 +106,18 @@ class SceneTaskActor:
         self._kinematic_targets: tuple[Pose, ...] = ()
         self._carried_body: str | None = None
         self._carry_relative: Pose | None = None
-        self._carried_orientation_lock: np.ndarray | None = None
-        self._carried_group: dict[str, Pose] = {}
+        self._carried_tool_orientation_lock: np.ndarray | None = None
         self._transport_active = False
-        self._arm1_tool_roll_lock: float | None = None
         self._arm1_steps: list[Arm1Step] = []
         self._arm1_timed: tuple[Arm1Step, float] | None = None
         self._arm2_steps: list[Arm1Step] = []
         self._arm2_timed: tuple[Arm1Step, float] | None = None
+        self._arm3_joint_home: tuple[np.ndarray, np.ndarray, float, float] | None = None
+        self._material_path_ids: tuple[str, ...] = ()
+        self._material_start: np.ndarray | None = None
+        self._material_end: np.ndarray | None = None
+        self._material_progress = 0.0
+        self._material_reverse = False
         self._configure_tcp()
         # Idle actors hold their actual joint command. Leaving the Cartesian
         # controller enabled would let null-space centering slowly move an
@@ -142,16 +133,21 @@ class SceneTaskActor:
         kind = TaskType(task.task_type)
         if kind is TaskType.LOAD_BASE:
             return False
-        if kind is TaskType.INSERT_FIN:
-            # Table1 fins are distributed across the right half of the wide
-            # table. Returning to one high canonical pose after every fin
-            # prevents redundant-joint branches from accumulating as Arm1
-            # crosses between successive Y slots.
-            return True
-        if kind is TaskType.APPLY_MATERIAL:
-            # Return to the same high material-safe pose between seams. This
-            # prevents redundant-joint branch drift over the eight-path batch.
-            return True
+        if kind in {TaskType.INSERT_FIN, TaskType.ADJUST_FIN}:
+            # The release trajectory already clears the fixture vertically.
+            # Intermediate fins can continue through the high corridor to the
+            # next raw blank; the final task still returns to the canonical
+            # pose before another actor enters Table2.
+            return bool(task.payload.get("park_after", True))
+        if kind in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}:
+            # Intermediate slots remain over the product and transition
+            # directly to the adjacent slot. Only the final material task
+            # clears Table2 for Arm3.
+            return bool(task.payload.get("park_after", True))
+        if kind is TaskType.POST_INSPECT:
+            # Batch jobs may choose whether adjacent output-buffer scans use
+            # one continuous motion or return to the canonical safe posture.
+            return bool(task.payload.get("park_after", True))
         return True
 
     def _transport_milestone(self, task: TaskSpec) -> tuple[int, Callable[[], None]] | None:
@@ -164,10 +160,6 @@ class SceneTaskActor:
         if kind in {TaskType.INSERT_FIN, TaskType.ADJUST_FIN}:
             fin_id = str(task.payload["fin_id"])
             return 2, lambda: registry.grasp_fin(fin_id, True)
-        if kind is TaskType.LOAD_FURNACE:
-            return 2, lambda: registry.carry_tray(True)
-        if kind is TaskType.UNLOAD_FURNACE:
-            return 1, lambda: registry.carry_tray(True)
         return None
 
     def _release_transport(self) -> None:
@@ -179,8 +171,6 @@ class SceneTaskActor:
             registry.grasp_base(False)
         elif kind in {TaskType.INSERT_FIN, TaskType.ADJUST_FIN}:
             registry.grasp_fin(str(self.task.payload["fin_id"]), False)
-        elif kind in {TaskType.LOAD_FURNACE, TaskType.UNLOAD_FURNACE}:
-            registry.carry_tray(False)
         self._transport_active = False
 
     def _transport_body(self) -> str | None:
@@ -200,7 +190,38 @@ class SceneTaskActor:
         *,
         final_joint_positions: np.ndarray | None = None,
     ) -> None:
-        checks = self.controller.validate_trajectory(trajectory)
+        kind = TaskType(self.task.task_type) if self.task is not None else None
+        is_arm1_rigid_payload_motion = (
+            self.arm_name == "arm1"
+            and kind in {TaskType.LOAD_BASE, TaskType.INSERT_FIN, TaskType.ADJUST_FIN}
+            and self.scene.arm1_tools.current_tool is not None
+        )
+        is_arm2_material_motion = self.arm_name == "arm2" and kind in {
+            TaskType.APPLY_MATERIAL,
+            TaskType.REAPPLY_MATERIAL,
+        }
+        if is_arm1_rigid_payload_motion and self._carried_tool_orientation_lock is not None:
+            # A carried fin may translate, but it must not rotate.  Every TCP
+            # waypoint therefore uses the exact orientation captured at the
+            # seating frame rather than merely a nominally equivalent pose.
+            trajectory = PolylineTrajectory(
+                tuple(
+                    Pose(waypoint.position, self._carried_tool_orientation_lock)
+                    for waypoint in trajectory.waypoints
+                ),
+                trajectory.speed_m_s,
+                trajectory.sample_spacing_m,
+            )
+        checks = self.controller.validate_trajectory(
+            trajectory,
+            position_tolerance_m=0.0001 if is_arm1_rigid_payload_motion else None,
+            orientation_tolerance_rad=(
+                math.radians(0.01)
+                if is_arm1_rigid_payload_motion
+                else math.radians(0.25) if is_arm2_material_motion else None
+            ),
+            full_orientation=is_arm1_rigid_payload_motion,
+        )
         failed = next((result for result in checks if not result.reachable), None)
         if failed is not None:
             raise RuntimeError(
@@ -218,11 +239,6 @@ class SceneTaskActor:
         joint_samples[0] = np.asarray(self.scene.data.qpos[self.controller.qpos_ids], dtype=float)
         if final_joint_positions is not None:
             joint_samples[-1] = np.asarray(final_joint_positions, dtype=float)
-        if self.arm_name == "arm1" and self._arm1_tool_roll_lock is not None:
-            # Joint 7 is the independent roll channel about the tool's body-Z
-            # axis.  Once a workpiece is attached, changing this joint twists
-            # the suction cup/gripper and introduces apparent payload drift.
-            joint_samples[:, -1] = self._arm1_tool_roll_lock
         self._kinematic_motion = (
             joint_samples,
             float(now),
@@ -241,56 +257,24 @@ class SceneTaskActor:
         carried = self.scene.registry.free_body_pose(body)
         self._carried_body = body
         self._carry_relative = gripper.inverse().transformed(carried)
-        self._carried_orientation_lock = carried.quaternion.copy()
+        self._carried_tool_orientation_lock = self.controller.current_tcp_pose().quaternion.copy()
 
     def _sync_carried_body(self) -> None:
-        if self._carried_group:
-            tool_body = self.scene.tools.current_body
-            if tool_body is None:
-                raise RuntimeError("Arm2 lost its tray-transfer tool while carrying the assembly")
-            tool = self.scene.registry.free_body_pose(tool_body)
-            for body_name, relative in self._carried_group.items():
-                self.scene.registry.set_free_body_pose(
-                    body_name,
-                    tool.transformed(relative),
-                )
-            self.scene.mujoco.mj_forward(self.scene.model, self.scene.data)
         if self._carried_body is None or self._carry_relative is None:
             return
         tool_body = self.scene.arm1_tools.current_body
         if tool_body is None:
             raise RuntimeError("Arm1 lost its tool while carrying a workpiece")
+        if self.task is not None and TaskType(self.task.task_type) in {
+            TaskType.INSERT_FIN,
+            TaskType.ADJUST_FIN,
+        }:
+            # The finger servos have already animated the close.  Keep their
+            # final inner faces exactly at +/-1 mm for the whole rigid carry.
+            self.scene.registry.snap_arm1_gripper_closed(forward=False)
         gripper = self.scene.registry.free_body_pose(tool_body)
         carried_pose = gripper.transformed(self._carry_relative)
-        if self._carried_orientation_lock is not None:
-            carried_pose = Pose(carried_pose.position, self._carried_orientation_lock)
         self.scene.registry.set_free_body_pose(self._carried_body, carried_pose, forward=True)
-
-    def _assembly_body_names(self) -> list[str]:
-        product = self._product()
-        return [
-            "assembly_tray",
-            "base_plate",
-            *(fin.fin_id for fin in product.active_fins),
-            *(f"brazing_path_{path.path_id}" for path in product.active_paths),
-        ]
-
-    def _capture_tray_group(self) -> None:
-        tool_body = self.scene.tools.current_body
-        if tool_body != "arm2_tray_transfer":
-            raise RuntimeError("tray transfer requires Arm2 tray_transfer tool")
-        tool = self.scene.registry.free_body_pose(tool_body)
-        inverse = tool.inverse()
-        self._carried_group = {
-            name: inverse.transformed(self.scene.registry.free_body_pose(name))
-            for name in self._assembly_body_names()
-        }
-        self._transport_active = True
-
-    def _release_tray_group(self) -> None:
-        self.scene.registry.carry_tray(False)
-        self._carried_group.clear()
-        self._transport_active = False
 
     def _build_arm1_steps(
         self,
@@ -307,12 +291,14 @@ class SceneTaskActor:
 
         def attach(action: Callable[[], None]) -> Callable[[], None]:
             def run() -> None:
-                self._arm1_tool_roll_lock = float(self.scene.data.qpos[self.controller.qpos_ids[-1]])
-                # Capture the unconstrained workpiece pose first.  Enabling a
-                # weld may run mj_forward immediately, so reading it afterward
-                # can preserve a tiny solver-induced orientation snap.
-                self._capture_carried_body()
-                action()
+                if TaskType(task.task_type) in {TaskType.INSERT_FIN, TaskType.ADJUST_FIN}:
+                    # Exact jaw seating establishes the canonical rigid
+                    # gripper-to-fin transform; capture only after it exists.
+                    action()
+                    self._capture_carried_body()
+                else:
+                    self._capture_carried_body()
+                    action()
                 self._transport_active = True
 
             return run
@@ -322,13 +308,7 @@ class SceneTaskActor:
             self._transport_active = False
             self._carried_body = None
             self._carry_relative = None
-            self._carried_orientation_lock = None
-            # Keep joint 7 on the same tool-roll branch through the retreat.
-            # Releasing it at the placement callback lets the following IK
-            # sample choose an equivalent roll solution and produces a visible
-            # wrist jump, especially near Table1's extended-reach boundary.
-            # ``_advance_arm1_step`` clears the lock only after the smooth
-            # joint-home step has completed.
+            self._carried_tool_orientation_lock = None
 
         def release_grasp() -> None:
             if TaskType(task.task_type) is TaskType.LOAD_BASE:
@@ -338,9 +318,7 @@ class SceneTaskActor:
             self._transport_active = False
             self._carried_body = None
             self._carry_relative = None
-            self._carried_orientation_lock = None
-            # The payload has been released, but retain the selected wrist
-            # roll branch until the retreat and joint-home sequence finishes.
+            self._carried_tool_orientation_lock = None
 
         kind = TaskType(task.task_type)
         cruise_speed = max(self.speed_m_s, 0.18)
@@ -358,8 +336,8 @@ class SceneTaskActor:
                     action=attach(lambda: self.scene.registry.grasp_base(True)),
                 ),
                 Arm1Step("hold", duration=0.35),
-                Arm1Step("trajectory", trajectory=path(3, 7, cruise_speed)),
-                Arm1Step("trajectory", trajectory=path(6, 8, 0.030)),
+                Arm1Step("trajectory", trajectory=path(3, 9, cruise_speed)),
+                Arm1Step("trajectory", trajectory=path(8, 10, 0.050)),
                 Arm1Step("hold", duration=0.35),
                 Arm1Step("action", action=release_grasp),
                 Arm1Step(
@@ -371,7 +349,7 @@ class SceneTaskActor:
                 Arm1Step("action", action=place),
                 Arm1Step("suction", duration=0.60, start_value=1.0, end_value=0.0),
                 Arm1Step("hold", duration=0.25),
-                Arm1Step("trajectory", trajectory=path(7, len(points), 0.12)),
+                Arm1Step("trajectory", trajectory=path(9, len(points), 0.12)),
                 Arm1Step("joint_home", duration=1.25),
             ]
             return
@@ -388,27 +366,28 @@ class SceneTaskActor:
                     duration=0.75,
                     start_value=0.0,
                     end_value=1.0,
-                    action=attach(lambda: self.scene.registry.grasp_fin(fin_id, True)),
+                    action=attach(lambda: self.scene.registry.seat_and_grasp_fin(fin_id)),
                 ),
                 Arm1Step("hold", duration=0.35),
                 Arm1Step("trajectory", trajectory=path(3, 7, cruise_speed)),
                 Arm1Step("trajectory", trajectory=path(6, 8, 0.025)),
                 Arm1Step("hold", duration=0.35),
-                Arm1Step("action", action=release_grasp),
-                Arm1Step(
-                    "settle",
-                    duration=0.60,
-                    body_name=fin_id,
-                    target_pose=lambda: self.scene.registry.product_pose().transformed(
-                        self.scene.registry.fin_local_targets[fin_id]
-                    ),
-                ),
+                # Switch directly from the rigid grasp weld to the comb weld
+                # while the fin is still held in its final slot pose.  There
+                # is no released-body slide or post-release snap.
                 Arm1Step("action", action=place),
-                Arm1Step("gripper", duration=0.75, start_value=1.0, end_value=0.0),
-                Arm1Step("hold", duration=0.25),
+                # With the 20 mm A-pitch, fully opening the fingers at the
+                # root would sweep them into the neighbouring installed fin.
+                # Open only enough to release the 2 mm blank, retreat above
+                # the fin tops, then finish opening in free space.
+                Arm1Step("gripper", duration=0.55, start_value=1.0, end_value=0.85),
+                Arm1Step("hold", duration=0.20),
                 Arm1Step("trajectory", trajectory=path(7, len(points), 0.12)),
-                Arm1Step("joint_home", duration=1.25),
+                Arm1Step("gripper", duration=0.55, start_value=0.85, end_value=0.0),
+                Arm1Step("hold", duration=0.25),
             ]
+            if self._should_park(task):
+                self._arm1_steps.append(Arm1Step("joint_home", duration=1.25))
             return
 
         raise RuntimeError(f"unsupported Arm1 sequence: {kind.value}")
@@ -446,8 +425,7 @@ class SceneTaskActor:
         self._transport_active = False
         self._carried_body = None
         self._carry_relative = None
-        self._carried_orientation_lock = None
-        self._arm1_tool_roll_lock = None
+        self._carried_tool_orientation_lock = None
         self.controller.enabled = False
         self.controller.hold()
         self._done = True
@@ -482,26 +460,6 @@ class SceneTaskActor:
         end = np.asarray(self.scene.registry.product_to_world(path.local_end), dtype=float)
         return start, end
 
-    def _move_assembly(self, target_tray_pose: Pose) -> None:
-        """Teleport the constrained tray/product as one rigid visual group."""
-
-        registry = self.scene.registry
-        current_tray = registry.free_body_pose("assembly_tray")
-        relative: dict[str, Pose] = {}
-        product = self._product()
-        names = [
-            "assembly_tray",
-            "base_plate",
-            *(fin.fin_id for fin in product.active_fins),
-            *(f"brazing_path_{path.path_id}" for path in product.active_paths),
-        ]
-        inverse = current_tray.inverse()
-        for name in names:
-            relative[name] = inverse.transformed(registry.free_body_pose(name))
-        for name in names:
-            registry.set_free_body_pose(name, target_tray_pose.transformed(relative[name]))
-        self.scene.mujoco.mj_forward(self.scene.model, self.scene.data)
-
     def _task_goal(self, task: TaskSpec) -> tuple[PolylineTrajectory, Callable[[], None]]:
         kind = TaskType(task.task_type)
         current = self.controller.current_tcp_pose()
@@ -518,19 +476,46 @@ class SceneTaskActor:
             )
             raw_approach = raw + np.asarray([0.0, 0.0, 0.10])
             target = registry.assembly_base_pose.position + np.asarray([0.0, 0.0, half_thickness + 0.002])
-            target_approach = target + np.asarray([0.0, 0.0, 0.12])
-            corridor = 0.5 * (raw_approach + target_approach)
-            corridor[2] = 0.50
+            # The replaceable comb insert and upper press are enabled only
+            # after the bare base is seated.  This leaves a genuine vertical
+            # loading aperture: approach over the target, descend slowly into
+            # the four locators, release suction, then retreat on the same
+            # line.  The high corridor keeps the wide 360 mm plate above the
+            # Arm1 tool rack while travelling from Table1 to Table2.
+            target_approach = target + np.asarray([0.0, 0.0, 0.10])
+            rack_body = self.scene.model.body("arm1_tool_rack")
+            rack_base = self.scene.model.geom("arm1_tool_rack_base")
+            rack_beam = self.scene.model.geom("arm1_tool_rack_beam")
+            bypass_low = raw_approach.copy()
+            bypass_low[0] = (
+                float(rack_body.pos[0])
+                - float(rack_base.size[0])
+                - 0.5 * self._product().spec.base_length
+                - 0.30
+            )
+            bypass_low[1] = (
+                float(rack_body.pos[1])
+                + float(rack_beam.pos[1])
+                - float(rack_beam.size[1])
+                - 0.5 * self._product().spec.base_width
+                - 0.03
+            )
+            raw_clearance = bypass_low.copy()
+            raw_clearance[2] = 0.46
+            corridor = target_approach.copy()
+            corridor[2] = 0.46
             points = (
                 current,
                 work_entry,
                 self._pose(raw_approach),
                 self._pose(raw),
                 self._pose(raw_approach),
+                self._pose(bypass_low),
+                self._pose(raw_clearance),
                 self._pose(corridor),
                 self._pose(target_approach),
                 self._pose(target),
-                self._pose(target + np.asarray([0.0, 0.0, 0.14])),
+                self._pose(target_approach),
             )
             return (
                 PolylineTrajectory(points, self.speed_m_s),
@@ -556,6 +541,8 @@ class SceneTaskActor:
             retreat = goal.copy()
             retreat[:2] += 0.09 * toward_park
             retreat[2] = max(goal[2] + 0.10, 0.42)
+            vertical_retreat = goal.copy()
+            vertical_retreat[2] = retreat[2]
             # The X-aligned 300 mm fin projects toward the quick-change rack.
             # Lift its lower edge above the rack beam before any lateral move.
             raw_approach = raw + np.asarray([0.0, 0.0, 0.26])
@@ -571,11 +558,12 @@ class SceneTaskActor:
                 self._pose(corridor),
                 self._pose(goal_approach),
                 self._pose(goal),
+                self._pose(vertical_retreat),
                 self._pose(retreat),
             )
             return (
                 PolylineTrajectory(points, self.speed_m_s),
-                lambda: registry.place_fin_in_slot(fin_id, snap=True),
+                lambda: registry.place_fin_in_slot(fin_id, snap=False),
             )
 
         if kind in {TaskType.PRE_INSPECT, TaskType.MATERIAL_INSPECT}:
@@ -586,30 +574,105 @@ class SceneTaskActor:
             return PolylineTrajectory((current, overview, end_view, overview), self.speed_m_s), noop
 
         if kind in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}:
+            process_spec = self._product().spec
             current = self.controller.current_tcp_pose()
-            path_id = str(task.payload["path_id"])
-            start, end = self._path_world_points(path_id)
-            # Keep the long physical nozzle outside the 2 mm fin while the
-            # virtual material remains on its product-coordinate root path.
-            lateral_sign = -1.0 if path_id.endswith("_left") else 1.0
-            start[1] += lateral_sign * 0.004
-            end[1] += lateral_sign * 0.004
-            start[2] += 0.012
-            end[2] += 0.012
-            lance_quaternion = _forward_tilted_lance_quaternion()
-            approach = Pose(start + np.asarray([0.0, 0.0, 0.08]), lance_quaternion)
-            start_pose = Pose(start, lance_quaternion)
-            end_pose = Pose(end, lance_quaternion)
-            retreat = Pose(end + np.asarray([0.0, 0.0, 0.065]), lance_quaternion)
-            corridor = safe_corridor_trajectory(
-                current,
-                approach,
-                clearance_z=0.43,
-                speed_m_s=self.speed_m_s,
+            if "path_ids" in task.payload:
+                path_ids = tuple(str(value) for value in task.payload["path_ids"])
+            else:
+                path_ids = (str(task.payload["path_id"]),)
+            if not path_ids:
+                raise RuntimeError("material task has no brazing path")
+            path_points = [self._path_world_points(path_id) for path_id in path_ids]
+            # A new part receives both symmetric beads in one pass.  For local
+            # repair, the tool still follows the owning slot centre while only
+            # the requested deficient bead is made visible.
+            starts = np.stack([pair[0] for pair in path_points])
+            ends = np.stack([pair[1] for pair in path_points])
+            start = np.mean(starts, axis=0)
+            end = np.mean(ends, axis=0)
+            if len(path_ids) == 1:
+                product = self._product()
+                target = next(path for path in product.active_paths if path.path_id == path_ids[0])
+                fin = next(fin for fin in product.active_fins if fin.fin_id == target.fin_id)
+                slot_y = float(self.scene.registry.product_to_world(fin.target_position)[1])
+                start[1] = slot_y
+                end[1] = slot_y
+            reverse_travel = bool(task.payload.get("reverse_travel", False))
+            if reverse_travel:
+                start, end = end.copy(), start.copy()
+            task.payload["travel_direction"] = "negative_x" if reverse_travel else "positive_x"
+            start[2] += process_spec.nozzle_tip_height
+            end[2] += process_spec.nozzle_tip_height
+            # The dual-nozzle centreline is a process constraint: its local Z
+            # axis remains exactly aligned with world -Z throughout approach,
+            # descent, dispensing and retreat. Reachability is provided by the
+            # Arm2 workstation placement, never by leaning the lance.
+            nozzle_quaternion = _top_down_quaternion(0.0)
+            # Do not propagate a sub-degree IK residual from one bead into the
+            # next Cartesian segment. The measured XYZ is continuous, while
+            # every commanded orientation remains the exact process frame.
+            current = Pose(current.position, nozzle_quaternion)
+            approach = Pose(
+                start + np.asarray([0.0, 0.0, 0.080]),
+                nozzle_quaternion,
             )
+            start_pose = Pose(start, nozzle_quaternion)
+            end_pose = Pose(end, nozzle_quaternion)
+            retreat = Pose(
+                end + np.asarray([0.0, 0.0, 0.080]),
+                nozzle_quaternion,
+            )
+            continuous = bool(task.payload.get("continuous_from_previous", False))
+            short_transition = (
+                continuous
+                and current.position[2] >= approach.position[2] - 0.020
+                and float(np.linalg.norm(current.position[:2] - approach.position[:2])) <= 0.35
+            )
+            if short_transition:
+                corridor = PolylineTrajectory(
+                    (current, approach),
+                    max(self.speed_m_s, 0.18),
+                    0.01,
+                )
+            else:
+                corridor = safe_corridor_trajectory(
+                    current,
+                    approach,
+                    clearance_z=0.43,
+                    speed_m_s=self.speed_m_s,
+                )
             points = (*corridor.waypoints, start_pose, end_pose, retreat)
-            return PolylineTrajectory(tuple(points), self.speed_m_s, 0.01), lambda: registry.set_path_visible(
-                path_id, True, coverage=1.0
+            self._material_path_ids = path_ids
+            self._material_start = start.copy()
+            self._material_end = end.copy()
+            self._material_progress = 0.0
+            self._material_reverse = reverse_travel
+            for path_id in path_ids:
+                registry.set_path_visible(
+                    path_id,
+                    False,
+                    coverage=0.0,
+                    reverse=reverse_travel,
+                )
+
+            def finish_material() -> None:
+                for path_id in path_ids:
+                    registry.set_path_visible(
+                        path_id,
+                        True,
+                        coverage=1.0,
+                        reverse=reverse_travel,
+                    )
+                self._material_progress = 1.0
+                task.payload["application_progress"] = 1.0
+
+            return (
+                PolylineTrajectory(
+                    tuple(points),
+                    process_spec.material_speed,
+                    0.01,
+                ),
+                finish_material,
             )
 
         if kind is TaskType.LOCK_FIXTURE:
@@ -624,54 +687,23 @@ class SceneTaskActor:
                 lambda: registry.set_fixture_locked(True),
             )
 
-        if kind is TaskType.LOAD_FURNACE:
-            current = self.controller.current_tcp_pose()
-            tray = registry.free_body_pose("assembly_tray").position + np.asarray([0.0, 0.0, 0.12])
-            furnace = _site_pose(self.scene, "furnace_tray_pose").position + np.asarray([0.0, -0.12, 0.16])
-            furnace_yaw = math.radians(60.0)
-            points = (
-                current,
-                self._pose([tray[0], tray[1], 0.52]),
-                self._pose(tray),
-                self._pose([tray[0], tray[1], 0.48]),
-                self._pose([furnace[0], furnace[1], 0.48], furnace_yaw),
-                self._pose(furnace, furnace_yaw),
-                self._pose([furnace[0], furnace[1] - 0.03, 0.44], furnace_yaw),
-            )
-
-            def finish_load() -> None:
-                registry.place_tray_in_furnace()
-
-            return PolylineTrajectory(points, self.speed_m_s), finish_load
-
-        if kind is TaskType.UNLOAD_FURNACE:
-            current = self.controller.current_tcp_pose()
-            furnace = _site_pose(self.scene, "furnace_tray_pose").position + np.asarray([0.0, -0.10, 0.16])
-            furnace_yaw = math.radians(60.0)
-            table3_site = _site_pose(self.scene, "post_inspection_pose").position
-            table3 = table3_site + np.asarray([0.0, 0.0, 0.25])
-            points = (
-                current,
-                self._pose(furnace, furnace_yaw),
-                self._pose([furnace[0], furnace[1], 0.48], furnace_yaw),
-                self._pose([0.10, 0.05, 0.44], furnace_yaw),
-                self._pose([table3[0], table3[1], 0.48]),
-                self._pose(table3),
-                self._pose([table3[0], table3[1] - 0.16, 0.48]),
-            )
-
-            def finish_unload() -> None:
-                registry.set_weld("furnace_tray_weld", False)
-                registry.set_weld("arm2_tray_carry", False)
-                for fin in self._product().active_fins:
-                    registry.braze_fin_to_base(fin.fin_id)
-
-            return PolylineTrajectory(points, self.speed_m_s), finish_unload
-
         if kind is TaskType.POST_INSPECT:
-            product = registry.product_pose().position
-            top = self._pose(product + np.asarray([0.0, 0.0, 0.32]), math.pi)
-            side = self._pose(product + np.asarray([0.14, 0.0, 0.16]), -math.pi / 2.0)
+            product = np.asarray(
+                task.payload.get("world_position", registry.product_pose().position),
+                dtype=float,
+            )
+            top_clearance = float(task.payload.get("top_clearance_m", 0.22))
+            side_clearance = float(task.payload.get("side_clearance_m", 0.14))
+            top_yaw = float(task.payload.get("top_yaw_rad", math.pi))
+            side_yaw = float(task.payload.get("side_yaw_rad", -math.pi / 2.0))
+            top = self._pose(
+                product + np.asarray([0.0, 0.0, top_clearance]),
+                top_yaw,
+            )
+            side = self._pose(
+                product + np.asarray([0.0, -side_clearance, 0.13]),
+                side_yaw,
+            )
             return PolylineTrajectory((current, top, side, top), self.speed_m_s), noop
 
         raise ValueError(f"unsupported scene task: {kind.value}")
@@ -680,12 +712,25 @@ class SceneTaskActor:
         kind = TaskType(task.task_type)
         if kind is TaskType.LOAD_BASE:
             return "suction_tool"
-        if kind in {TaskType.INSERT_FIN, TaskType.ADJUST_FIN}:
+        if kind in {
+            TaskType.PREPARE_FIN_TOOL,
+            TaskType.INSERT_FIN,
+            TaskType.ADJUST_FIN,
+        }:
             return "parallel_gripper"
         raise RuntimeError(f"Arm1 has no registered tool for {kind.value}")
 
     def _prepare_arm1_work(self, task: TaskSpec) -> None:
         """Generate the work path only after the requested tool is mounted."""
+
+        if TaskType(task.task_type) is TaskType.PREPARE_FIN_TOOL:
+            # Tool preparation runs in the background while Arm2 owns Table2.
+            # The rack exit is already outside that shared zone; finish at the
+            # canonical Arm1 posture so the first fin task can start directly.
+            self.trajectory = None
+            self._callback = lambda: None
+            self._arm1_steps = [Arm1Step("joint_home", duration=1.25)]
+            return
 
         trajectory, callback = self._task_goal(task)
         if self._should_park(task):
@@ -760,19 +805,97 @@ class SceneTaskActor:
         kind = TaskType(task.task_type)
         if kind in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}:
             return "brazing_dispenser"
-        if kind in {TaskType.LOAD_FURNACE, TaskType.UNLOAD_FURNACE}:
-            return "tray_transfer"
         return None
+
+    def _update_material_visual(self) -> None:
+        """Grow deposited beads from the measured Arm2 TCP position."""
+
+        if (
+            self.task is None
+            or not self._material_path_ids
+            or self._material_start is None
+            or self._material_end is None
+            or TaskType(self.task.task_type) not in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}
+        ):
+            return
+        actual = self.controller.current_tcp_pose().position
+        axis = self._material_end - self._material_start
+        length_sq = float(np.dot(axis, axis))
+        if length_sq <= 1.0e-12:
+            return
+        raw_progress = float(np.dot(actual - self._material_start, axis) / length_sq)
+        closest = self._material_start + np.clip(raw_progress, 0.0, 1.0) * axis
+        distance = float(np.linalg.norm(actual - closest))
+        # Ignore high approach/corridor motion. Once dispensing begins, keep
+        # coverage monotonic through the final anti-drip retreat.
+        if distance <= 0.025:
+            self._material_progress = max(
+                self._material_progress,
+                float(np.clip(raw_progress, 0.0, 1.0)),
+            )
+        self.task.payload["application_progress"] = self._material_progress
+        self.task.payload["current_path_id"] = self._material_path_ids[0]
+        for path_id in self._material_path_ids:
+            self.scene.registry.set_path_visible(
+                path_id,
+                self._material_progress > 0.0,
+                coverage=self._material_progress,
+                reverse=self._material_reverse,
+            )
 
     def _prepare_arm2_work(self, task: TaskSpec) -> None:
         """Generate Arm2 work only after the selected TCP is mounted."""
 
         trajectory, callback = self._task_goal(task)
         kind = TaskType(task.task_type)
-        if self._should_park(task) and kind not in {
-            TaskType.LOAD_FURNACE,
-            TaskType.UNLOAD_FURNACE,
-        }:
+        if kind in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}:
+            points = trajectory.waypoints
+            if len(points) < 5:
+                raise RuntimeError("material trajectory is missing approach/dispense/retreat points")
+            approach = PolylineTrajectory(
+                tuple(points[:-2]),
+                max(self.speed_m_s, 0.18),
+                0.01,
+            )
+            dispense = PolylineTrajectory(
+                tuple(points[-3:-1]),
+                self._product().spec.material_speed,
+                0.01,
+            )
+            retreat = PolylineTrajectory(
+                tuple(points[-2:]),
+                max(self.speed_m_s, 0.12),
+                0.01,
+            )
+            steps = [
+                Arm1Step("work", trajectory=approach),
+                Arm1Step("work", trajectory=dispense),
+                Arm1Step("work", trajectory=retreat),
+            ]
+            if self._should_park(task):
+                park_pose = self.park_flange_pose.transformed(self.controller.tool_transform)
+                if park_pose.position[2] < 0.43:
+                    position = park_pose.position.copy()
+                    position[2] = 0.43
+                    park_pose = Pose(position, park_pose.quaternion)
+                steps.append(
+                    Arm1Step(
+                        "work",
+                        trajectory=safe_corridor_trajectory(
+                            retreat.waypoints[-1],
+                            park_pose,
+                            clearance_z=0.43,
+                            speed_m_s=max(self.speed_m_s, 0.18),
+                        ),
+                    )
+                )
+            self.trajectory = trajectory
+            self._callback = callback
+            self._errors.clear()
+            self._arm2_steps = steps
+            return
+
+        if self._should_park(task):
             park_pose = self.park_flange_pose.transformed(self.controller.tool_transform)
             if park_pose.position[2] < 0.43:
                 position = park_pose.position.copy()
@@ -792,114 +915,7 @@ class SceneTaskActor:
         self.trajectory = trajectory
         self._callback = callback
         self._errors.clear()
-        if kind in {TaskType.LOAD_FURNACE, TaskType.UNLOAD_FURNACE}:
-            points = trajectory.waypoints
-
-            def path(start: int, stop: int, speed: float) -> PolylineTrajectory:
-                return PolylineTrajectory(tuple(points[start:stop]), speed, 0.01)
-
-            def attach_tray() -> None:
-                if kind is TaskType.UNLOAD_FURNACE:
-                    self.scene.registry.set_weld("furnace_tray_weld", False)
-                self.scene.registry.carry_tray(True)
-                self._capture_tray_group()
-
-            if kind is TaskType.LOAD_FURNACE:
-
-                def target_pose() -> Pose:
-                    return _site_pose(self.scene, "furnace_tray_pose")
-
-                approach = path(0, 3, 0.10)
-                carry = path(2, 6, 0.10)
-                retreat = path(5, len(points), 0.12)
-            else:
-                table3_site = _site_pose(self.scene, "post_inspection_pose").position
-                table3_pose = Pose(
-                    np.asarray([table3_site[0], table3_site[1], 0.255]),
-                    np.asarray([1.0, 0.0, 0.0, 0.0]),
-                )
-
-                def target_pose() -> Pose:
-                    return table3_pose
-
-                approach = path(0, 2, 0.08)
-                carry = path(1, 6, 0.10)
-                retreat = path(5, len(points), 0.12)
-            self._arm2_steps = [
-                Arm1Step("work", trajectory=approach),
-                Arm1Step("hold", duration=0.30),
-                Arm1Step("action", action=attach_tray),
-                Arm1Step("hold", duration=0.30),
-                Arm1Step("work", trajectory=carry),
-                Arm1Step("hold", duration=0.30),
-                Arm1Step("action", action=self._release_tray_group),
-                Arm1Step(
-                    "settle_group",
-                    duration=0.60,
-                    body_name="assembly_tray",
-                    target_pose=target_pose,
-                ),
-                Arm1Step("action", action=callback),
-                Arm1Step("work", trajectory=retreat),
-            ]
-            self._callback = lambda: None
-            return
         self._arm2_steps = [Arm1Step("work", trajectory=trajectory)]
-
-    def _build_arm2_tool_change(self, task: TaskSpec, required: str) -> None:
-        """Build the visible front-rack quick-change sequence for Arm2."""
-
-        manager = self.scene.tools
-
-        def segment(left: Pose, right: Pose, speed: float) -> Arm1Step:
-            return Arm1Step(
-                "kinematic",
-                trajectory=PolylineTrajectory((left, right), speed, 0.01),
-            )
-
-        steps: list[Arm1Step] = []
-        current = manager.current_tool
-        current_pose = self.controller.current_tcp_pose()
-        if current is not None:
-            hover, dock, _ = manager.change_poses(current, hover_m=0.10)
-            hover_tcp = manager.tcp_for_flange(hover, current)
-            dock_tcp = manager.tcp_for_flange(dock, current)
-            steps.extend(
-                [
-                    segment(current_pose, hover_tcp, 0.16),
-                    segment(hover_tcp, dock_tcp, 0.025),
-                    Arm1Step("hold", duration=0.25),
-                    Arm1Step("action", action=lambda name=current: manager.undock(name)),
-                    Arm1Step("hold", duration=0.20),
-                    segment(dock, hover, 0.035),
-                ]
-            )
-            current_pose = hover
-
-        hover, dock, _ = manager.change_poses(required, hover_m=0.10)
-        steps.extend(
-            [
-                segment(current_pose, hover, 0.14),
-                segment(hover, dock, 0.025),
-                Arm1Step("hold", duration=0.25),
-                Arm1Step("action", action=lambda: manager.dock(required)),
-                Arm1Step("hold", duration=0.25),
-                segment(
-                    manager.tcp_for_flange(dock, required),
-                    manager.tcp_for_flange(hover, required),
-                    0.035,
-                ),
-            ]
-        )
-        if required == "tray_transfer":
-            # The two rack poses are reachable with more than one redundant
-            # Arm2 joint branch.  Return smoothly to the known front-facing
-            # park branch before generating a loaded-tray path; otherwise the
-            # first furnace approach can inherit a locally valid rack branch
-            # whose next Cartesian sample misses by several millimetres.
-            steps.append(Arm1Step("joint_home", duration=1.50))
-        steps.append(Arm1Step("action", action=lambda: self._prepare_arm2_work(task)))
-        self._arm2_steps = steps
 
     def _advance_arm2_step(self, now: float) -> None:
         while self._arm2_steps:
@@ -919,13 +935,6 @@ class SceneTaskActor:
             if step.kind == "hold":
                 self._arm2_timed = (step, float(now))
                 return
-            if step.kind == "settle_group":
-                if step.body_name is None or step.target_pose is None:
-                    raise RuntimeError("Arm2 settle-group step is incomplete")
-                step.start_pose = self.scene.registry.free_body_pose(step.body_name)
-                step.end_pose = step.target_pose()
-                self._arm2_timed = (step, float(now))
-                return
             if step.kind == "joint_home":
                 step.joint_start = np.asarray(
                     self.scene.data.qpos[self.controller.qpos_ids], dtype=float
@@ -936,9 +945,7 @@ class SceneTaskActor:
             raise RuntimeError(f"unknown Arm2 step: {step.kind}")
 
         self._callback()
-        self._carried_group.clear()
         self._transport_active = False
-        self._arm1_tool_roll_lock = None
         self.controller.enabled = False
         self.controller.hold()
         self._done = True
@@ -957,14 +964,18 @@ class SceneTaskActor:
         self._kinematic_targets = ()
         self._carried_body = None
         self._carry_relative = None
-        self._carried_orientation_lock = None
-        self._carried_group.clear()
-        self._arm1_tool_roll_lock = None
+        self._carried_tool_orientation_lock = None
         self._transport_active = False
         self._arm1_steps.clear()
         self._arm1_timed = None
         self._arm2_steps.clear()
         self._arm2_timed = None
+        self._arm3_joint_home = None
+        self._material_path_ids = ()
+        self._material_start = None
+        self._material_end = None
+        self._material_progress = 0.0
+        self._material_reverse = False
         self.deadline = self.started_at + task.timeout
         if self.arm_name == "arm1" and not self.fast:
             required = self._required_arm1_tool(task)
@@ -976,18 +987,22 @@ class SceneTaskActor:
             return
         if self.arm_name == "arm1" and self.fast:
             self.scene.arm1_tools.change_tool(self._required_arm1_tool(task))
+            if TaskType(task.task_type) is TaskType.PREPARE_FIN_TOOL:
+                self._done = True
+                return
         if self.arm_name == "arm2" and not self.fast:
             required = self._required_arm2_tool(task)
-            if required is None or self.scene.tools.current_tool == required:
-                self._prepare_arm2_work(task)
-            else:
-                self._build_arm2_tool_change(task, required)
+            if required != "brazing_dispenser":
+                raise RuntimeError(f"Arm2 cannot execute {task.task_type} with its permanent dispenser")
+            self.scene.tools.change_tool(required)
+            self._prepare_arm2_work(task)
             self._advance_arm2_step(now)
             return
         if self.arm_name == "arm2" and self.fast:
             required = self._required_arm2_tool(task)
-            if required is not None:
-                self.scene.tools.change_tool(required)
+            if required != "brazing_dispenser":
+                raise RuntimeError(f"Arm2 cannot execute {task.task_type} with its permanent dispenser")
+            self.scene.tools.change_tool(required)
         trajectory, callback = self._task_goal(task)
         if self._should_park(task):
             park_pose = self.park_flange_pose.transformed(self.controller.tool_transform)
@@ -1064,6 +1079,25 @@ class SceneTaskActor:
         if self._done:
             self.task = None
             return ActorResult.SUCCEEDED
+        if self._arm3_joint_home is not None:
+            start, target, started_at, duration = self._arm3_joint_home
+            linear = float(np.clip((float(now) - started_at) / max(duration, 1e-6), 0.0, 1.0))
+            amount = linear * linear * (3.0 - 2.0 * linear)
+            joints = (1.0 - amount) * start + amount * target
+            self.controller.q_command = joints
+            self.scene.data.qpos[self.controller.qpos_ids] = joints
+            self.scene.data.qvel[self.controller.dof_ids] = 0.0
+            self.scene.data.ctrl[self.controller.actuator_ids] = joints
+            self.scene.sync_mounted_extensions()
+            if linear < 1.0:
+                return ActorResult.RUNNING
+            self._arm3_joint_home = None
+            self._callback()
+            self.controller.enabled = False
+            self.controller.hold()
+            self._done = True
+            self.task = None
+            return ActorResult.SUCCEEDED
         if self._arm2_timed is not None:
             self.scene.data.qpos[self.controller.qpos_ids] = self.controller.q_command
             self.scene.data.qvel[self.controller.dof_ids] = 0.0
@@ -1080,16 +1114,6 @@ class SceneTaskActor:
                 self.scene.data.qvel[self.controller.dof_ids] = 0.0
                 self.scene.data.ctrl[self.controller.actuator_ids] = joints
                 self.scene.sync_mounted_extensions()
-            elif step.kind == "settle_group":
-                assert step.start_pose is not None and step.end_pose is not None
-                left = step.start_pose.quaternion
-                right = step.end_pose.quaternion
-                if float(np.dot(left, right)) < 0.0:
-                    right = -right
-                quaternion = (1.0 - amount) * left + amount * right
-                quaternion /= max(float(np.linalg.norm(quaternion)), 1e-12)
-                position = (1.0 - amount) * step.start_pose.position + amount * step.end_pose.position
-                self._move_assembly(Pose(position, quaternion))
             if linear < 1.0:
                 return ActorResult.RUNNING
             self._arm2_timed = None
@@ -1164,6 +1188,7 @@ class SceneTaskActor:
             self.scene.data.ctrl[self.controller.actuator_ids] = self.controller.q_command
             self.scene.sync_mounted_extensions()
             self._sync_carried_body()
+            self._update_material_visual()
             if self._kinematic_targets:
                 desired_position = (1.0 - fraction) * self._kinematic_targets[left].position + fraction * (
                     self._kinematic_targets[right].position
@@ -1195,6 +1220,17 @@ class SceneTaskActor:
                     self._capture_carried_body()
                 self._start_kinematic(followup, now)
                 return ActorResult.RUNNING
+            if self.arm_name == "arm3" and self.task is not None and self._should_park(self.task):
+                self._arm3_joint_home = (
+                    np.asarray(
+                        self.scene.data.qpos[self.controller.qpos_ids],
+                        dtype=float,
+                    ).copy(),
+                    self.park_joint_positions.copy(),
+                    float(now),
+                    1.25,
+                )
+                return ActorResult.RUNNING
             self._callback()
             self._transport_active = False
             self._carried_body = None
@@ -1205,6 +1241,7 @@ class SceneTaskActor:
             self.task = None
             return ActorResult.SUCCEEDED
         state = self.executor.tick(now)
+        self._update_material_visual()
         if state is ExecutionState.ERROR:
             self.error = self.executor.error
             return ActorResult.FAILED
@@ -1257,13 +1294,17 @@ class SceneTaskActor:
         self._kinematic_targets = ()
         self._carried_body = None
         self._carry_relative = None
-        self._carried_orientation_lock = None
-        self._carried_group.clear()
-        self._arm1_tool_roll_lock = None
+        self._carried_tool_orientation_lock = None
         self._arm1_steps.clear()
         self._arm1_timed = None
         self._arm2_steps.clear()
         self._arm2_timed = None
+        self._arm3_joint_home = None
+        self._material_path_ids = ()
+        self._material_start = None
+        self._material_end = None
+        self._material_progress = 0.0
+        self._material_reverse = False
         self.scene.registry.set_arm1_gripper_closed(0.0)
         self.scene.registry.set_arm1_suction_fraction(0.0)
         self.controller.enabled = False
@@ -1276,8 +1317,18 @@ def build_scene_actors(
     product: Callable[[], ProductState | None],
     *,
     fast: bool = False,
-) -> dict[str, SceneTaskActor]:
-    return {name: SceneTaskActor(name, scene, product, fast=fast) for name in ("arm1", "arm2", "arm3")}
+) -> dict[str, Any]:
+    actors: dict[str, Any] = {
+        name: SceneTaskActor(name, scene, product, fast=fast) for name in ("arm1", "arm2", "arm3")
+    }
+    actors["fixture"] = FixtureTaskActor(
+        scene,
+        product,
+        fast=fast,
+        controller=scene.fixture_controller,
+    )
+    actors["conveyor"] = ConveyorTaskActor(scene, product, fast=fast)
+    return actors
 
 
 __all__ = ["SceneTaskActor", "build_scene_actors"]
