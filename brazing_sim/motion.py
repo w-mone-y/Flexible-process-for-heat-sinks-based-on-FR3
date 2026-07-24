@@ -32,6 +32,45 @@ def _unit(vector: ArrayLike, fallback: ArrayLike | None = None) -> np.ndarray:
     return _unit(fallback)
 
 
+def _solve_small_spd(matrix: ArrayLike, right_hand_side: ArrayLike) -> np.ndarray:
+    """Solve one 5x5/6x6 SPD system without high-overhead BLAS dispatch.
+
+    DLS normal matrices are symmetric positive definite because they include
+    a positive damping diagonal.  Some macOS NumPy/BLAS builds spend tens of
+    milliseconds dispatching ``linalg.solve`` for these tiny matrices.  This
+    fixed-size Cholesky solve avoids that thread-dispatch overhead.
+    """
+
+    system = np.asarray(matrix, dtype=float)
+    rhs = np.asarray(right_hand_side, dtype=float)
+    if system.ndim != 2 or system.shape[0] != system.shape[1]:
+        raise np.linalg.LinAlgError("SPD system must be square")
+    size = int(system.shape[0])
+    rhs_was_vector = rhs.ndim == 1
+    values = rhs.reshape(size, 1) if rhs_was_vector else rhs.copy()
+    if values.ndim != 2 or values.shape[0] != size:
+        raise np.linalg.LinAlgError("right-hand side has incompatible dimensions")
+
+    lower = np.zeros_like(system)
+    for row in range(size):
+        for column in range(row + 1):
+            residual = float(system[row, column] - np.dot(lower[row, :column], lower[column, :column]))
+            if row == column:
+                if residual <= 1.0e-15 or not np.isfinite(residual):
+                    raise np.linalg.LinAlgError("SPD Cholesky factorisation failed")
+                lower[row, column] = math.sqrt(residual)
+            else:
+                lower[row, column] = residual / lower[column, column]
+
+    forward = np.zeros_like(values)
+    for row in range(size):
+        forward[row] = (values[row] - lower[row, :row] @ forward[:row]) / lower[row, row]
+    solution = np.zeros_like(values)
+    for row in range(size - 1, -1, -1):
+        solution[row] = (forward[row] - lower[row + 1 :, row] @ solution[row + 1 :]) / lower[row, row]
+    return solution[:, 0] if rhs_was_vector else solution
+
+
 def normalize_quat(quaternion: ArrayLike) -> np.ndarray:
     quat = _unit(quaternion)
     if quat.shape != (4,):
@@ -388,6 +427,8 @@ class ArmController:
         self.last_position_error_m = 0.0
         self.last_orientation_error_rad = 0.0
         self.last_roll_error_rad = 0.0
+        self.locked_local_indices: tuple[int, ...] = ()
+        self.full_orientation = False
         self.enabled = True
         self.failure = ""
         self.set_target(self.target)
@@ -409,6 +450,8 @@ class ArmController:
         self.target = self.current_flange_pose()
         self.set_target(self.target)
         self.enabled = True
+        self.locked_local_indices = ()
+        self.full_orientation = False
         self.failure = ""
 
     def current_flange_pose(self) -> Pose:
@@ -523,7 +566,7 @@ class ArmController:
             jac6 = np.vstack((jac_pos, jac_rot))
             regularizer6 = (self.config.damping**2) * np.eye(6)
             try:
-                inverse6 = jac6.T @ np.linalg.solve(
+                inverse6 = jac6.T @ _solve_small_spd(
                     jac6 @ jac6.T + regularizer6,
                     np.eye(6),
                 )
@@ -545,7 +588,7 @@ class ArmController:
         jac5 = np.vstack((jac_pos, np.vstack((basis1, basis2)) @ jac_rot))
         regularizer = (self.config.damping**2) * np.eye(5)
         try:
-            inverse = jac5.T @ np.linalg.solve(jac5 @ jac5.T + regularizer, np.eye(5))
+            inverse = jac5.T @ _solve_small_spd(jac5 @ jac5.T + regularizer, np.eye(5))
         except np.linalg.LinAlgError:
             return np.zeros(7), position_error, axis_error, roll_error
         active_velocity = inverse @ task
@@ -578,7 +621,10 @@ class ArmController:
         timestep = self.config.dt if dt is None else float(dt)
         target = self.tcp_target if self.tcp_target is not None else self.target
         velocity, position_error, orientation_error, roll_error = self._joint_velocity(
-            target, tcp=self.tcp_target is not None
+            target,
+            tcp=self.tcp_target is not None,
+            locked_local_indices=self.locked_local_indices,
+            full_orientation=self.full_orientation,
         )
         qpos = np.asarray(self.data.qpos[self.qpos_ids], dtype=float)
         # Convert the IK velocity to a position-servo target with a short
@@ -603,7 +649,30 @@ class ArmController:
             and abs(self.last_roll_error_rad) <= self.config.orientation_tolerance_rad
         )
 
-    def solve_ik(
+    def _save_kinematic_state(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Pose, Pose | None]:
+        return (
+            self.data.qpos.copy(),
+            self.data.qvel.copy(),
+            self.data.ctrl.copy(),
+            self.target,
+            self.tcp_target,
+        )
+
+    def _restore_kinematic_state(
+        self,
+        state: tuple[np.ndarray, np.ndarray, np.ndarray, Pose, Pose | None],
+    ) -> None:
+        saved_qpos, saved_qvel, saved_ctrl, saved_target, saved_tcp_target = state
+        self.data.qpos[:] = saved_qpos
+        self.data.qvel[:] = saved_qvel
+        self.data.ctrl[:] = saved_ctrl
+        self.target = saved_target
+        self.tcp_target = saved_tcp_target
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def _solve_ik_inplace(
         self,
         target: Pose,
         *,
@@ -616,13 +685,6 @@ class ArmController:
         orientation_tolerance_rad: float | None = None,
         full_orientation: bool = False,
     ) -> ReachabilityResult:
-        """Non-destructive sampled IK check used before dispatching a path."""
-
-        saved_qpos = self.data.qpos.copy()
-        saved_qvel = self.data.qvel.copy()
-        saved_ctrl = self.data.ctrl.copy()
-        saved_target = self.target
-        saved_tcp_target = self.tcp_target
         locks = {int(index): float(value) for index, value in (locked_joints or {}).items()}
         if any(index < 0 or index >= 7 for index in locks):
             raise ValueError("locked joint indices must be in the range 0..6")
@@ -638,64 +700,87 @@ class ArmController:
         )
         if position_tolerance <= 0.0 or orientation_tolerance <= 0.0:
             raise ValueError("IK tolerances must be positive")
-        try:
-            if seed is not None:
-                candidate = np.asarray(seed, dtype=float)
-                if candidate.shape != (7,):
-                    raise ValueError("IK seed must have seven joints")
-                self.data.qpos[self.qpos_ids] = np.clip(candidate, self.lower, self.upper)
+        if seed is not None:
+            candidate = np.asarray(seed, dtype=float)
+            if candidate.shape != (7,):
+                raise ValueError("IK seed must have seven joints")
+            self.data.qpos[self.qpos_ids] = np.clip(candidate, self.lower, self.upper)
+        for index, value in locks.items():
+            self.data.qpos[self.qpos_ids[index]] = np.clip(
+                value,
+                self.lower[index],
+                self.upper[index],
+            )
+        self.mujoco.mj_forward(self.model, self.data)
+        position_error = math.inf
+        orientation_error = math.inf
+        for iteration in range(1, int(max_iterations) + 1):
+            velocity, position_error, axis_error, roll_error = self._joint_velocity(
+                target,
+                tcp=tcp,
+                locked_local_indices=locks,
+                full_orientation=full_orientation,
+            )
+            orientation_error = math.hypot(axis_error, roll_error)
+            if (
+                position_error <= position_tolerance
+                and axis_error <= orientation_tolerance
+                and abs(roll_error) <= orientation_tolerance
+            ):
+                return ReachabilityResult(
+                    True,
+                    position_error,
+                    orientation_error,
+                    np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy(),
+                    iteration,
+                )
+            values = np.asarray(self.data.qpos[self.qpos_ids], dtype=float) + velocity * float(step_s)
             for index, value in locks.items():
-                self.data.qpos[self.qpos_ids[index]] = np.clip(
-                    value,
-                    self.lower[index],
-                    self.upper[index],
-                )
+                values[index] = value
+            self.data.qpos[self.qpos_ids] = np.clip(values, self.lower, self.upper)
             self.mujoco.mj_forward(self.model, self.data)
-            position_error = math.inf
-            orientation_error = math.inf
-            for iteration in range(1, int(max_iterations) + 1):
-                velocity, position_error, axis_error, roll_error = self._joint_velocity(
-                    target,
-                    tcp=tcp,
-                    locked_local_indices=locks,
-                    full_orientation=full_orientation,
-                )
-                orientation_error = math.hypot(axis_error, roll_error)
-                if (
-                    position_error <= position_tolerance
-                    and axis_error <= orientation_tolerance
-                    and abs(roll_error) <= orientation_tolerance
-                ):
-                    return ReachabilityResult(
-                        True,
-                        position_error,
-                        orientation_error,
-                        np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy(),
-                        iteration,
-                    )
-                values = np.asarray(self.data.qpos[self.qpos_ids], dtype=float) + velocity * float(step_s)
-                for index, value in locks.items():
-                    values[index] = value
-                self.data.qpos[self.qpos_ids] = np.clip(values, self.lower, self.upper)
-                self.mujoco.mj_forward(self.model, self.data)
-            return ReachabilityResult(
-                False,
-                position_error,
-                orientation_error,
-                np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy(),
-                int(max_iterations),
-                (
-                    f"target residual exceeds {position_tolerance * 1000:.3g} mm / "
-                    f"{math.degrees(orientation_tolerance):.3g} degrees"
-                ),
+        return ReachabilityResult(
+            False,
+            position_error,
+            orientation_error,
+            np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy(),
+            int(max_iterations),
+            (
+                f"target residual exceeds {position_tolerance * 1000:.3g} mm / "
+                f"{math.degrees(orientation_tolerance):.3g} degrees"
+            ),
+        )
+
+    def solve_ik(
+        self,
+        target: Pose,
+        *,
+        tcp: bool = False,
+        seed: ArrayLike | None = None,
+        max_iterations: int = 600,
+        step_s: float = 0.03,
+        locked_joints: Mapping[int, float] | None = None,
+        position_tolerance_m: float | None = None,
+        orientation_tolerance_rad: float | None = None,
+        full_orientation: bool = False,
+    ) -> ReachabilityResult:
+        """Solve one sampled target without modifying the live simulation."""
+
+        saved_state = self._save_kinematic_state()
+        try:
+            return self._solve_ik_inplace(
+                target,
+                tcp=tcp,
+                seed=seed,
+                max_iterations=max_iterations,
+                step_s=step_s,
+                locked_joints=locked_joints,
+                position_tolerance_m=position_tolerance_m,
+                orientation_tolerance_rad=orientation_tolerance_rad,
+                full_orientation=full_orientation,
             )
         finally:
-            self.data.qpos[:] = saved_qpos
-            self.data.qvel[:] = saved_qvel
-            self.data.ctrl[:] = saved_ctrl
-            self.target = saved_target
-            self.tcp_target = saved_tcp_target
-            self.mujoco.mj_forward(self.model, self.data)
+            self._restore_kinematic_state(saved_state)
 
     def validate_trajectory(
         self,
@@ -707,23 +792,32 @@ class ArmController:
         orientation_tolerance_rad: float | None = None,
         full_orientation: bool = False,
     ) -> tuple[ReachabilityResult, ...]:
+        # A trajectory can contain dozens of samples.  Saving, restoring and
+        # forwarding the complete MuJoCo state for every sample made path
+        # validation needlessly expensive.  Solve the samples in-place so the
+        # previous solution is also the natural warm start, then restore the
+        # live simulation exactly once at the end.
+        saved_state = self._save_kinematic_state()
         results: list[ReachabilityResult] = []
         seed = np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy()
-        for target in trajectory.samples(min(trajectory.sample_spacing_m, 0.01)):
-            result = self.solve_ik(
-                target,
-                tcp=tcp,
-                seed=seed,
-                locked_joints=locked_joints,
-                position_tolerance_m=position_tolerance_m,
-                orientation_tolerance_rad=orientation_tolerance_rad,
-                full_orientation=full_orientation,
-            )
-            results.append(result)
-            if not result.reachable:
-                break
-            seed = result.joint_positions
-        return tuple(results)
+        try:
+            for target in trajectory.samples(min(trajectory.sample_spacing_m, 0.01)):
+                result = self._solve_ik_inplace(
+                    target,
+                    tcp=tcp,
+                    seed=seed,
+                    locked_joints=locked_joints,
+                    position_tolerance_m=position_tolerance_m,
+                    orientation_tolerance_rad=orientation_tolerance_rad,
+                    full_orientation=full_orientation,
+                )
+                results.append(result)
+                if not result.reachable:
+                    break
+                seed = result.joint_positions
+            return tuple(results)
+        finally:
+            self._restore_kinematic_state(saved_state)
 
 
 class ExecutionState(str, Enum):

@@ -1,4 +1,4 @@
-"""Actuator-driven three-layer furnace-rack transfer cell."""
+"""Direct black-belt transfer between the process station and furnace."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from .domain import (
     TransferPhase,
     TrayUnitPhase,
 )
+from .profiles import quintic_time_scaling
 
 
 @dataclass(slots=True)
@@ -27,31 +28,42 @@ class _AxisMotion:
 
 
 class BatchTransferActor:
-    """Move one rigid tray through index, lift, rack and output operations.
+    """Move a rigid tray on the direct furnace and finished-output belts.
 
-    A nested four-axis carrier performs every loaded motion. Ownership changes
-    only when the carrier and the receiving station are already coincident, so
-    enabling a new weld does not introduce a visible pose discontinuity.
+    The former lift and orange telescopic pusher have intentionally been
+    removed.  The product now follows one continuous horizontal infeed axis;
+    shelf ownership is exchanged only after the tray is inside the furnace.
     """
 
     POSITION_TOLERANCE_M = 0.0015
     VELOCITY_TOLERANCE_M_S = 0.02
     SETTLE_SECONDS = 0.12
-    OUTFEED_TARGET_M = 0.250
-    OUTPUT_BUFFER_OUTFEED_M = 0.100
-    PUSHER_TARGET_M = 0.380
-    ALIGNMENT_DWELL_SECONDS = 0.55
+    OUTFEED_TARGET_M = 0.840
+    # The rack-infeed carrier starts at (0.75, 0). Its local X output slide is
+    # world -Y, so 0.10 m is the Arm3-reachable post-inspection point and 1.12 m is
+    # inside the enclosed finished-goods port.
+    OUTPUT_HOME_OUTFEED_M = 0.0
+    OUTPUT_INSPECTION_M = 0.100
+    DELIVERY_INSIDE_M = 1.120
+    DELIVERY_GATE_OPEN_M = 0.500
+    DELIVERY_DWELL_SECONDS = 0.45
+    COMB_REMOVAL_SECONDS = 0.90
     LOCK_DWELL_SECONDS = 0.75
     UNLOCK_DWELL_SECONDS = 0.45
     AXES = {
-        "outfeed": ("batch_outfeed_joint", "batch_outfeed_actuator", 0.16),
-        "lift": ("batch_lift_joint", "batch_lift_actuator", 0.12),
-        "pusher": ("batch_pusher_joint", "batch_pusher_actuator", 0.12),
-        "output": ("batch_output_joint", "batch_output_actuator", 0.16),
+        "outfeed": ("batch_outfeed_joint", "batch_outfeed_actuator", 0.24),
+        "output": ("batch_output_joint", "batch_output_actuator", 0.24),
+        "delivery_gate": (
+            "finished_output_gate_joint",
+            "finished_output_gate_actuator",
+            0.42,
+        ),
         "index_02": ("batch_tray_02_index_joint", "batch_tray_02_index_actuator", 0.14),
         "index_03": ("batch_tray_03_index_joint", "batch_tray_03_index_actuator", 0.14),
     }
-    OUTPUT_TARGETS_M = (0.08, 0.56, 1.04)
+    # All products share one inspection station. Each tray leaves it before
+    # the next shelf is unloaded, eliminating the old three-table buffer.
+    OUTPUT_TARGETS_M = (OUTPUT_INSPECTION_M,) * 3
 
     def __init__(
         self,
@@ -74,14 +86,12 @@ class BatchTransferActor:
         self._index_unit: int | None = None
         self._prefetched_index: int | None = None
         self._paused = False
+        self._paused_phase = TransferPhase.IDLE
         self._resume_target: tuple[str, float] | None = None
         self._hold_until: float | None = None
         self._paused_hold_remaining = 0.0
-
-    @staticmethod
-    def _smoothstep(value: float) -> float:
-        fraction = min(1.0, max(0.0, float(value)))
-        return fraction * fraction * (3.0 - 2.0 * fraction)
+        self._comb_removal_started_at: float | None = None
+        self._paused_comb_removal_elapsed = 0.0
 
     def _batch(self) -> BatchState:
         value = self._batch_source()
@@ -163,7 +173,7 @@ class BatchTransferActor:
     def _motion_complete(self, motion: _AxisMotion, now: float) -> bool:
         if not self.fast:
             elapsed = max(0.0, float(now) - motion.started_at)
-            progress = self._smoothstep(elapsed / motion.duration)
+            progress = quintic_time_scaling(elapsed / motion.duration)
             command = motion.start + progress * (motion.target - motion.start)
             self.scene.registry.set_batch_joint_target(motion.joint, motion.actuator, command)
         position = self.scene.registry.batch_joint_position(motion.joint)
@@ -289,7 +299,12 @@ class BatchTransferActor:
             raise RuntimeError("target furnace shelf is not empty")
 
         tray_name = self._tray_name(unit_index)
-        station_pose = self.scene.registry.free_body_pose("assembly_tray")
+        # Validate the indexed physical carrier against the rack-infeed
+        # handoff anchor.  The reusable workcell tray is independently routed
+        # through S1→S2A→S2B→S3→rack and is copied only after both sides are
+        # docked; comparing against its historical Table2 pose made standalone
+        # lift demos and upper-shelf tests depend on the obsolete layout.
+        station_pose = self.scene.registry.free_body_pose("batch_tray_01_station_anchor")
         tray_pose = self.scene.registry.free_body_pose(tray_name)
         position_error = dist(tray_pose.position, station_pose.position)
         quaternion_alignment = min(
@@ -310,13 +325,39 @@ class BatchTransferActor:
                 "tray handoff is not aligned with Table2: "
                 f"{position_error * 1000.0:.2f} mm / {angle_error:.2f} deg"
             )
+        # In the verified UI/order path the reusable workcell and the batch
+        # carrier meet at the same rack-infeed dock.  Validate both sides
+        # before switching visibility/ownership so a stale station coordinate
+        # can never masquerade as a successful continuous transfer.
+        workcell_weld = self.scene.registry.equality_id("station_rack_infeed_assembly_tray_weld")
+        if bool(self.scene.data.eq_active[workcell_weld]):
+            workcell_pose = self.scene.registry.free_body_pose("assembly_tray")
+            workcell_error = dist(workcell_pose.position, tray_pose.position)
+            workcell_alignment = min(
+                1.0,
+                abs(
+                    sum(
+                        float(left) * float(right)
+                        for left, right in zip(
+                            workcell_pose.quaternion,
+                            tray_pose.quaternion,
+                        )
+                    )
+                ),
+            )
+            workcell_angle = degrees(2.0 * acos(workcell_alignment))
+            if not self.fast and (workcell_error > 0.003 or workcell_angle > 3.0):
+                raise RuntimeError(
+                    "S3→料架交接两侧未对齐：" f"{workcell_error * 1000.0:.2f} mm / {workcell_angle:.2f} deg"
+                )
         self.scene.registry.set_batch_weld(self._source_weld(unit_index), False)
         self.scene.registry.configure_batch_tray(unit_index, unit.product)
+        self.scene.registry.set_batch_comb_install_progress(unit_index, 1.0)
         self.scene.registry.set_batch_tray_visible(unit_index, carrier=True, payload=True)
         self.scene.registry.set_batch_weld(
             self._carrier_weld(unit_index),
             True,
-            recompute=("batch_pusher_carriage", tray_name),
+            recompute=("batch_output_carriage", tray_name),
         )
         self.scene.registry.set_workcell_visible(False)
 
@@ -328,8 +369,8 @@ class BatchTransferActor:
         batch.transfer.moving = True
         self.operation = "load"
         self.unit_index = unit_index
-        self.phase = TransferPhase.OUTFEED
-        self._step = "load_outfeed"
+        self.phase = TransferPhase.CONVEYING_IN
+        self._step = "load_conveyor_in"
         self.error = ""
         self._paused = False
         self._begin_axis("outfeed", self.OUTFEED_TARGET_M, now)
@@ -352,11 +393,68 @@ class BatchTransferActor:
         batch.transfer.moving = True
         self.operation = "unload"
         self.unit_index = unit_index
-        self.phase = TransferPhase.OUTFEED
-        self._step = "unload_outfeed"
+        self.phase = TransferPhase.CONVEYING_IN
+        self._step = "unload_conveyor_in"
         self.error = ""
         self._paused = False
         self._begin_axis("outfeed", self.OUTFEED_TARGET_M, now)
+
+    def start_delivery(self, unit_index: int, now: float) -> None:
+        """Feed an inspected product into the enclosed finished-goods port."""
+
+        if self.busy or self._prefetched_index is not None:
+            raise RuntimeError("batch transfer actor is already busy")
+        batch = self._batch()
+        unit = batch.units[unit_index]
+        if unit.phase is not TrayUnitPhase.INSPECTED:
+            raise RuntimeError("only inspected tray units may enter the finished-goods port")
+        output_weld = self.scene.registry.equality_id(self._output_weld(unit_index))
+        if not bool(self.scene.data.eq_active[output_weld]):
+            raise RuntimeError("inspected tray is not owned by the output station")
+        unit.phase = TrayUnitPhase.DELIVERING
+        batch.transfer.unit_id = unit.unit_id
+        batch.transfer.shelf_index = unit.layer_index
+        batch.transfer.moving = True
+        batch.transfer.comb_removal_progress = 0.0
+        self.operation = "delivery"
+        self.unit_index = unit_index
+        self.phase = TransferPhase.DELIVERY
+        self._step = "delivery_remove_comb"
+        self.error = ""
+        self._paused = False
+        self._motion = None
+        self._comb_removal_started_at = float(now)
+        self._paused_comb_removal_elapsed = 0.0
+        self.scene.registry.set_batch_comb_install_progress(unit_index, 1.0)
+
+    def _begin_delivery_enter(self, index: int, tray: str, now: float) -> None:
+        """Acquire the inspected tray and continue straight into the outlet.
+
+        Normal rack unloading deliberately leaves the X carrier underneath
+        the shared inspection point.  Delivery can therefore reuse the same
+        carrier without retracting and approaching the tray a second time.
+        The small pickup motion is retained only as a compatibility fallback
+        for manually prepared demo/test states.
+        """
+
+        outfeed = self.scene.registry.batch_joint_position("batch_outfeed_joint")
+        if abs(outfeed - self.OUTPUT_HOME_OUTFEED_M) > self.POSITION_TOLERANCE_M:
+            raise RuntimeError(
+                "finished tray is not on the common conveyor centreline: " f"outfeed={outfeed:.4f} m"
+            )
+        output = self.scene.registry.batch_joint_position("batch_output_joint")
+        if abs(output - self.OUTPUT_INSPECTION_M) > self.POSITION_TOLERANCE_M:
+            self._step = "delivery_pickup_position"
+            self._begin_axis("output", self.OUTPUT_INSPECTION_M, now)
+            return
+        self.scene.registry.set_batch_weld(self._output_weld(index), False)
+        self.scene.registry.set_batch_weld(
+            self._carrier_weld(index),
+            True,
+            recompute=("batch_output_carriage", tray),
+        )
+        self._step = "delivery_enter"
+        self._begin_axis("output", self.DELIVERY_INSIDE_M, now)
 
     def _complete(self) -> None:
         batch = self._batch()
@@ -372,6 +470,8 @@ class BatchTransferActor:
         self._parallel_motions = []
         self._hold_until = None
         self._paused_hold_remaining = 0.0
+        self._comb_removal_started_at = None
+        self._paused_comb_removal_elapsed = 0.0
 
     def _advance_index(self) -> None:
         assert self.unit_index is not None
@@ -384,28 +484,16 @@ class BatchTransferActor:
         unit = batch.units[index]
         shelf_index = unit.layer_index
         shelf = batch.rack.shelves[shelf_index]
-        height = shelf.height_m
-        if self._step == "load_outfeed":
-            self.phase = TransferPhase.LIFTING
-            self._step = "load_lift"
-            self._begin_axis("lift", height, now)
-        elif self._step == "load_lift":
-            self._begin_hold(
-                "load_align",
-                TransferPhase.ALIGNING,
-                now,
-                self.ALIGNMENT_DWELL_SECONDS,
-            )
-        elif self._step == "load_align":
-            self.phase = TransferPhase.PUSHING
-            self._step = "load_push"
-            self._begin_axis("pusher", self.PUSHER_TARGET_M, now)
-        elif self._step == "load_push":
+        if self._step == "load_conveyor_in":
             tray = self._tray_name(index)
-            if self.fast:
-                pose = self.scene.registry.site_pose("batch_transfer_pose")
-                self.scene.registry.set_free_body_pose(tray, pose, forward=True)
+            # The direct belt has reached the enclosed furnace. Hide for the
+            # single simulation step in which the internal rack assigns the
+            # requested shelf, then reveal it at that shelf. No external
+            # lift/pusher geometry or motion is involved.
+            self.scene.registry.set_batch_tray_visible(index, carrier=False, payload=False)
             self.scene.registry.set_batch_weld(self._carrier_weld(index), False)
+            shelf_pose = self.scene.registry.site_pose(f"batch_rack_shelf_site_{shelf_index}")
+            self.scene.registry.set_free_body_pose(tray, shelf_pose, forward=True)
             self.scene.registry.set_batch_weld(
                 self._rack_weld(index, shelf_index),
                 True,
@@ -417,6 +505,7 @@ class BatchTransferActor:
                     True,
                     recompute=(f"batch_rack_shelf_{shelf_index}", tray),
                 )
+            self.scene.registry.set_batch_tray_visible(index, carrier=True, payload=True)
             self.scene.registry.set_batch_rack_lock(shelf_index, True, teleport=self.fast)
             self._begin_hold(
                 "load_lock",
@@ -433,14 +522,10 @@ class BatchTransferActor:
             shelf.lock_engaged = True
             unit.phase = TrayUnitPhase.LOCKED
             unit.loaded_at = float(now)
-            self.phase = TransferPhase.RETRACTING
-            self._step = "load_retract"
-            self._begin_axis("pusher", 0.0, now)
-        elif self._step == "load_retract":
-            self.phase = TransferPhase.LOWERING
-            self._step = "load_parallel_return"
-            self._begin_parallel_axes((("lift", 0.0), ("outfeed", 0.0)), now)
-        elif self._step == "load_parallel_return":
+            self.phase = TransferPhase.CONVEYING_OUT
+            self._step = "load_conveyor_home"
+            self._begin_axis("outfeed", self.OUTPUT_HOME_OUTFEED_M, now)
+        elif self._step == "load_conveyor_home":
             self._complete()
         else:
             raise RuntimeError(f"unknown rack-load step: {self._step}")
@@ -452,24 +537,9 @@ class BatchTransferActor:
         unit = batch.units[index]
         shelf_index = unit.layer_index
         shelf = batch.rack.shelves[shelf_index]
-        height = shelf.height_m
-        if self._step == "unload_outfeed":
-            self.phase = TransferPhase.LIFTING
-            self._step = "unload_lift"
-            self._begin_axis("lift", height, now)
-        elif self._step == "unload_lift":
-            self._begin_hold(
-                "unload_align",
-                TransferPhase.ALIGNING,
-                now,
-                self.ALIGNMENT_DWELL_SECONDS,
-            )
-        elif self._step == "unload_align":
-            self.phase = TransferPhase.PUSHING
-            self._step = "unload_push"
-            self._begin_axis("pusher", self.PUSHER_TARGET_M, now)
-        elif self._step == "unload_push":
+        if self._step == "unload_conveyor_in":
             tray = self._tray_name(index)
+            self.scene.registry.set_batch_tray_visible(index, carrier=False, payload=False)
             self.scene.registry.set_batch_weld(self._rack_weld(index, shelf_index), False)
             if shelf_index == index:
                 self.scene.registry.set_batch_weld(
@@ -477,11 +547,14 @@ class BatchTransferActor:
                     False,
                 )
             self.scene.registry.set_batch_rack_lock(shelf_index, False, teleport=self.fast)
+            carrier_pose = self.scene.registry.site_pose("batch_transfer_pose")
+            self.scene.registry.set_free_body_pose(tray, carrier_pose, forward=True)
             self.scene.registry.set_batch_weld(
                 self._carrier_weld(index),
                 True,
-                recompute=("batch_pusher_carriage", tray),
+                recompute=("batch_output_carriage", tray),
             )
+            self.scene.registry.set_batch_tray_visible(index, carrier=True, payload=True)
             shelf.lock_engaged = False
             self._begin_hold(
                 "unload_unlock",
@@ -490,22 +563,14 @@ class BatchTransferActor:
                 self.UNLOCK_DWELL_SECONDS,
             )
         elif self._step == "unload_unlock":
-            lock_position = self.scene.registry.batch_joint_position(f"batch_rack_lock_joint_{index}")
+            lock_position = self.scene.registry.batch_joint_position(f"batch_rack_lock_joint_{shelf_index}")
             if not self.fast and lock_position > 0.002:
                 self._hold_until = float(now) + 0.05
                 return
-            self.phase = TransferPhase.RETRACTING
-            self._step = "unload_retract"
-            self._begin_axis("pusher", 0.0, now)
-        elif self._step == "unload_retract":
-            self.phase = TransferPhase.LOWERING
-            self._step = "unload_lower"
-            self._begin_axis("lift", 0.0, now)
-        elif self._step == "unload_lower":
-            self.phase = TransferPhase.RETRACTING
-            self._step = "unload_buffer_position"
-            self._begin_axis("outfeed", self.OUTPUT_BUFFER_OUTFEED_M, now)
-        elif self._step == "unload_buffer_position":
+            self.phase = TransferPhase.CONVEYING_OUT
+            self._step = "unload_conveyor_out"
+            self._begin_axis("outfeed", self.OUTPUT_HOME_OUTFEED_M, now)
+        elif self._step == "unload_conveyor_out":
             self.phase = TransferPhase.OUTPUT
             self._step = "unload_output"
             self._begin_axis("output", self.OUTPUT_TARGETS_M[index], now)
@@ -524,12 +589,80 @@ class BatchTransferActor:
             unit.phase = TrayUnitPhase.UNLOADED
             unit.output_slot = index
             unit.unloaded_at = float(now)
-            self._step = "unload_parallel_return"
-            self._begin_parallel_axes((("output", 0.0), ("outfeed", 0.0)), now)
-        elif self._step == "unload_parallel_return":
+            # Keep the X carriage parked under the inspection point. Arm3 can
+            # scan here, then delivery continues directly toward the outlet.
             self._complete()
         else:
             raise RuntimeError(f"unknown rack-unload step: {self._step}")
+
+    def _advance_delivery(self, now: float) -> None:
+        assert self.unit_index is not None
+        batch = self._batch()
+        index = self.unit_index
+        unit = batch.units[index]
+        tray = self._tray_name(index)
+        if self._step == "delivery_gate_open":
+            if not self.fast and self.scene.registry.finished_output_gate_fraction < 0.98:
+                self._begin_axis("delivery_gate", self.DELIVERY_GATE_OPEN_M, now)
+                return
+            self._begin_delivery_enter(index, tray, now)
+        elif self._step == "delivery_pickup_position":
+            self._begin_delivery_enter(index, tray, now)
+        elif self._step == "delivery_enter":
+            self._begin_hold(
+                "delivery_unload",
+                TransferPhase.DELIVERY,
+                now,
+                self.DELIVERY_DWELL_SECONDS,
+            )
+        elif self._step == "delivery_unload":
+            # The whole slotted fixture entered the box as one rigid assembly.
+            # Simulate manual product removal only after it has stopped inside;
+            # the tray plate and press bars remain attached and visibly retrace
+            # the inbound path. The comb was removed before the gate opened.
+            self.scene.registry.handoff_batch_payload(index)
+            self._step = "delivery_return_home"
+            self._begin_axis("output", 0.0, now)
+        elif self._step == "delivery_return_home":
+            # Close only after the empty tray has completely cleared the
+            # outlet opening. No Y correction is required on the common lane.
+            self._step = "delivery_gate_close"
+            self._begin_axis("delivery_gate", 0.0, now)
+        elif self._step == "delivery_gate_close":
+            if not self.fast and self.scene.registry.finished_output_gate_fraction > 0.02:
+                self._begin_axis("delivery_gate", 0.0, now)
+                return
+            self.scene.registry.retire_batch_tray(index)
+            unit.phase = TrayUnitPhase.DELIVERED
+            batch.transfer.delivered_count += 1
+            self._complete()
+        else:
+            raise RuntimeError(f"unknown finished-delivery step: {self._step}")
+
+    def _poll_comb_removal(self, now: float) -> bool:
+        """Withdraw the suspended comb before opening the finished-goods gate."""
+
+        if self.operation != "delivery" or self._step != "delivery_remove_comb":
+            return False
+        assert self.unit_index is not None
+        started = float(now) if self._comb_removal_started_at is None else self._comb_removal_started_at
+        duration = 0.0 if self.fast else self.COMB_REMOVAL_SECONDS
+        linear = 1.0 if duration <= 0.0 else min(1.0, max(0.0, (float(now) - started) / duration))
+        progress = quintic_time_scaling(linear)
+        self.scene.registry.set_batch_comb_install_progress(self.unit_index, 1.0 - progress)
+        batch = self._batch()
+        batch.transfer.phase = self.phase
+        batch.transfer.step = self._step
+        batch.transfer.comb_removal_progress = progress
+        batch.transfer.moving = progress < 1.0
+        if progress < 1.0:
+            return True
+        self._comb_removal_started_at = None
+        self._step = "delivery_gate_open"
+        batch.transfer.step = self._step
+        batch.transfer.moving = True
+        self._begin_axis("delivery_gate", self.DELIVERY_GATE_OPEN_M, now)
+        return False
 
     def poll(self, now: float) -> TaskStatus:
         if self.error:
@@ -540,6 +673,8 @@ class BatchTransferActor:
             self._poll_prefetch(now)
             if not self.operation:
                 return TaskStatus.RUNNING if self._index_motion is not None else TaskStatus.SUCCEEDED
+            if self._poll_comb_removal(now):
+                return TaskStatus.RUNNING
             for _ in range(16 if self.fast else 1):
                 holding = self._hold_until is not None
                 parallel = bool(self._parallel_motions)
@@ -563,25 +698,31 @@ class BatchTransferActor:
                     self._advance_load(now)
                 elif operation == "unload":
                     self._advance_unload(now)
+                elif operation == "delivery":
+                    self._advance_delivery(now)
                 if not self.operation:
                     return TaskStatus.SUCCEEDED
             batch = self._batch()
             batch.transfer.phase = self.phase
             batch.transfer.step = self._step
-            batch.transfer.lift_height_m = self.scene.registry.batch_joint_position("batch_lift_joint")
-            batch.transfer.outfeed_position_m = self.scene.registry.batch_joint_position(
-                "batch_outfeed_joint"
-            )
-            batch.transfer.pusher_position_m = self.scene.registry.batch_joint_position("batch_pusher_joint")
-            batch.transfer.pusher_extension_ratio = max(
+            conveyor_position = self.scene.registry.batch_joint_position("batch_outfeed_joint")
+            batch.transfer.outfeed_position_m = conveyor_position
+            batch.transfer.conveyor_position_m = conveyor_position
+            batch.transfer.conveyor_progress = max(
                 0.0,
-                min(1.0, batch.transfer.pusher_position_m / self.PUSHER_TARGET_M),
+                min(1.0, conveyor_position / self.OUTFEED_TARGET_M),
             )
+            # Legacy fields remain in the public schema for older clients but
+            # are permanently zero because the lift and pusher no longer exist.
+            batch.transfer.lift_height_m = 0.0
+            batch.transfer.pusher_position_m = 0.0
+            batch.transfer.pusher_extension_ratio = 0.0
             if self.unit_index in {0, 1, 2}:
                 batch.transfer.lock_position_m = self.scene.registry.batch_joint_position(
                     f"batch_rack_lock_joint_{self.unit_index}"
                 )
             batch.transfer.output_position_m = self.scene.registry.batch_joint_position("batch_output_joint")
+            batch.transfer.output_gate_fraction = self.scene.registry.finished_output_gate_fraction
             return TaskStatus.RUNNING
         except Exception as exc:
             self.error = str(exc)
@@ -599,6 +740,11 @@ class BatchTransferActor:
         timestamp = float(self.scene.time if now is None else now)
         if self._hold_until is not None:
             self._paused_hold_remaining = max(0.0, self._hold_until - timestamp)
+        if self._step == "delivery_remove_comb" and self._comb_removal_started_at is not None:
+            self._paused_comb_removal_elapsed = max(
+                0.0,
+                timestamp - self._comb_removal_started_at,
+            )
         if self._motion is not None:
             self._resume_target = (self._motion.joint, self._motion.target)
             measured = self.scene.registry.batch_joint_position(self._motion.joint)
@@ -621,6 +767,7 @@ class BatchTransferActor:
                 self._index_motion.actuator,
                 measured,
             )
+        self._paused_phase = self.phase
         self._paused = True
         self.phase = TransferPhase.PAUSED
 
@@ -628,9 +775,13 @@ class BatchTransferActor:
         if not self._paused:
             return
         self._paused = False
+        self.phase = self._paused_phase
         if self._hold_until is not None:
             self._hold_until = float(now) + self._paused_hold_remaining
             self._paused_hold_remaining = 0.0
+        if self._step == "delivery_remove_comb":
+            self._comb_removal_started_at = float(now) - self._paused_comb_removal_elapsed
+            self._paused_comb_removal_elapsed = 0.0
         if self._motion is not None:
             target = self._motion.target
             key = next(key for key, value in self.AXES.items() if value[0] == self._motion.joint)
@@ -671,9 +822,12 @@ class BatchTransferActor:
         self._index_unit = None
         self._prefetched_index = None
         self._paused = False
+        self._paused_phase = TransferPhase.IDLE
         self._resume_target = None
         self._hold_until = None
         self._paused_hold_remaining = 0.0
+        self._comb_removal_started_at = None
+        self._paused_comb_removal_elapsed = 0.0
 
     @property
     def busy(self) -> bool:
@@ -700,14 +854,23 @@ class BatchTransferActor:
                 not self._paused
                 and (len(self._parallel_motions) > 1 or (self.operation and self._index_motion))
             ),
-            "pusher_extension_ratio": max(
+            "conveyor_position_m": self.scene.registry.batch_joint_position("batch_outfeed_joint"),
+            "conveyor_progress": max(
                 0.0,
                 min(
                     1.0,
-                    self.scene.registry.batch_joint_position("batch_pusher_joint") / self.PUSHER_TARGET_M,
+                    self.scene.registry.batch_joint_position("batch_outfeed_joint") / self.OUTFEED_TARGET_M,
                 ),
             ),
+            "pusher_extension_ratio": 0.0,
             "lock_position_m": lock_position,
+            "finished_output_gate_fraction": self.scene.registry.finished_output_gate_fraction,
+            "comb_removal_progress": (
+                self._batch().transfer.comb_removal_progress if self._batch_source() is not None else 0.0
+            ),
+            "delivered_count": (
+                self._batch().transfer.delivered_count if self._batch_source() is not None else 0
+            ),
             "error": self.error,
         }
 

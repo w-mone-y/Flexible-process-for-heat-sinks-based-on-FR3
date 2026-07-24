@@ -1,0 +1,21 @@
+schema_version: 1
+scenario_id: SCENARIO_01
+random_seed: 42
+faults:
+  - fault_type: BRAZING_MISSING
+    trigger:
+      unit_id: ORDER_001_UNIT_01
+      after_task_type: DISPENSE_BRAZING
+    payload:
+      path_ids: [slot_03_left]
+  - fault_type: RACK_LAYER_UNAVAILABLE
+    trigger:
+      sim_time: 20.0
+    payload:
+      layer_id: 1
+  - fault_type: ARM_UNAVAILABLE
+    trigger:
+      sim_time: 35.0
+    payload:
+      resource_id: ARM3
+      duration: 10.0

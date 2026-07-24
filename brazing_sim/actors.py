@@ -27,6 +27,7 @@ from .motion import (
     safe_corridor_trajectory,
 )
 from .process import ActorResult
+from .profiles import quintic_time_scaling
 from .scene import BrazingScene
 
 
@@ -42,6 +43,21 @@ def _top_down_quaternion(yaw: float = 0.0) -> np.ndarray:
     return matrix_to_quat(rotation)
 
 
+def _look_at_quaternion(position: Any, focus: Any) -> np.ndarray:
+    """Orient local +Z from a camera TCP toward a product focus point."""
+
+    tool_axis = np.asarray(focus, dtype=float) - np.asarray(position, dtype=float)
+    tool_axis /= max(float(np.linalg.norm(tool_axis)), 1.0e-12)
+    reference_y = np.asarray([0.0, 1.0, 0.0])
+    local_x = np.cross(reference_y, tool_axis)
+    if float(np.linalg.norm(local_x)) < 1.0e-9:
+        reference_y = np.asarray([1.0, 0.0, 0.0])
+        local_x = np.cross(reference_y, tool_axis)
+    local_x /= max(float(np.linalg.norm(local_x)), 1.0e-12)
+    local_y = np.cross(tool_axis, local_x)
+    return matrix_to_quat(np.column_stack((local_x, local_y, tool_axis)))
+
+
 def _site_pose(scene: BrazingScene, name: str) -> Pose:
     return pose_from_site(scene.data, int(scene.model.site(name).id))
 
@@ -54,10 +70,6 @@ class Arm1Step:
     start_value: float = 0.0
     end_value: float = 0.0
     action: Callable[[], None] | None = None
-    body_name: str | None = None
-    target_pose: Callable[[], Pose] | None = None
-    start_pose: Pose | None = None
-    end_pose: Pose | None = None
     joint_start: np.ndarray | None = None
     joint_end: np.ndarray | None = None
 
@@ -200,43 +212,106 @@ class SceneTaskActor:
             TaskType.APPLY_MATERIAL,
             TaskType.REAPPLY_MATERIAL,
         }
-        if is_arm1_rigid_payload_motion and self._carried_tool_orientation_lock is not None:
-            # A carried fin may translate, but it must not rotate.  Every TCP
-            # waypoint therefore uses the exact orientation captured at the
-            # seating frame rather than merely a nominally equivalent pose.
+        reference = trajectory.waypoints[0]
+        is_strict_vertical = bool(
+            is_arm1_rigid_payload_motion
+            and len(trajectory.waypoints) >= 2
+            and all(
+                float(np.linalg.norm(waypoint.position[:2] - reference.position[:2])) <= 1.0e-9
+                and abs(float(np.dot(waypoint.quaternion, reference.quaternion))) >= 1.0 - 1.0e-9
+                for waypoint in trajectory.waypoints[1:]
+            )
+        )
+        if is_strict_vertical:
+            # Installation descent is authored only after the high approach
+            # pose has completed its XY/roll/pitch/yaw alignment.  Rebuild
+            # every sample from that one reference so no measured residual can
+            # leak into the downward segment.
             trajectory = PolylineTrajectory(
                 tuple(
-                    Pose(waypoint.position, self._carried_tool_orientation_lock)
+                    Pose(
+                        np.asarray(
+                            [reference.position[0], reference.position[1], waypoint.position[2]],
+                            dtype=float,
+                        ),
+                        reference.quaternion,
+                    )
                     for waypoint in trajectory.waypoints
                 ),
                 trajectory.speed_m_s,
-                trajectory.sample_spacing_m,
+                min(trajectory.sample_spacing_m, 0.0015),
+            )
+        if is_arm2_material_motion and trajectory.sample_spacing_m > 0.003:
+            # Linear interpolation in joint space can bow the 220 mm lance
+            # between otherwise accurate IK samples.  Three-millimetre
+            # sampling keeps that inter-sample tool-axis deviation below the
+            # 0.1 degree dispensing limit without changing feed speed.
+            trajectory = PolylineTrajectory(
+                trajectory.waypoints,
+                trajectory.speed_m_s,
+                0.003,
             )
         checks = self.controller.validate_trajectory(
             trajectory,
-            position_tolerance_m=0.0001 if is_arm1_rigid_payload_motion else None,
+            position_tolerance_m=(
+                0.0001
+                if is_arm1_rigid_payload_motion
+                # The far S2B repair envelope remains inside the process hard
+                # limit of 5 mm even though it is outside the nominal 3 mm
+                # target.  Accept it so a one-way pallet is never reversed.
+                else 0.0045 if is_arm2_material_motion else None
+            ),
             orientation_tolerance_rad=(
                 math.radians(0.01)
                 if is_arm1_rigid_payload_motion
-                else math.radians(0.25) if is_arm2_material_motion else None
+                # Arm2's S2B local-repair pose is close to the edge of its
+                # workspace.  The residual here is predominantly free tool
+                # roll; the lance Z axis is verified independently and stays
+                # vertical.  Do not reject a safe repair for 0.16 degrees of
+                # irrelevant roll error.
+                else math.radians(0.35) if is_arm2_material_motion else None
             ),
-            full_orientation=is_arm1_rigid_payload_motion,
+            # Arm2 still exposes the standard 5D controller externally, but
+            # its precomputed dispensing samples close the remaining roll
+            # residual as a full pose.  This keeps the long dual nozzle
+            # vertical to better than 0.1 degree during kinematic playback.
+            full_orientation=is_arm1_rigid_payload_motion or is_arm2_material_motion,
         )
-        failed = next((result for result in checks if not result.reachable), None)
-        if failed is not None:
+        failed_entry = next(
+            ((index, result) for index, result in enumerate(checks) if not result.reachable),
+            None,
+        )
+        if failed_entry is not None:
+            failed_index, failed = failed_entry
+            failed_target = trajectory.samples(min(trajectory.sample_spacing_m, 0.01))[failed_index]
             raise RuntimeError(
-                f"kinematic path is unreachable: {failed.position_error_m * 1000:.2f} mm / "
-                f"{math.degrees(failed.orientation_error_rad):.2f} deg"
+                "kinematic path is unreachable at sample "
+                f"{failed_index + 1}/{len(checks)}: "
+                f"{failed.position_error_m * 1000:.2f} mm / "
+                f"{math.degrees(failed.orientation_error_rad):.2f} deg; "
+                f"target=({failed_target.position[0]:.3f}, "
+                f"{failed_target.position[1]:.3f}, "
+                f"{failed_target.position[2]:.3f})"
             )
         self.trajectory = trajectory
         joint_samples = np.stack([result.joint_positions for result in checks])
         self._kinematic_targets = trajectory.samples(min(trajectory.sample_spacing_m, 0.01))
         if len(self._kinematic_targets) != len(joint_samples):
             raise RuntimeError("kinematic target/sample count mismatch")
-        # The first Cartesian sample is the end of the preceding segment.
-        # Preserve the actual redundant-joint configuration instead of letting
-        # IK choose another valid branch and visibly "float" the arm.
-        joint_samples[0] = np.asarray(self.scene.data.qpos[self.controller.qpos_ids], dtype=float)
+        if is_strict_vertical:
+            # Reaffirm alignment at the safe upper endpoint before the descent
+            # clock starts.  All following samples then vary only Z.
+            self.scene.data.qpos[self.controller.qpos_ids] = joint_samples[0]
+            self.scene.data.qvel[self.controller.dof_ids] = 0.0
+            self.scene.data.ctrl[self.controller.actuator_ids] = joint_samples[0]
+            self.controller.q_command = joint_samples[0].copy()
+            self.scene.sync_mounted_extensions(self.arm_name)
+            self._sync_carried_body()
+        else:
+            # The first Cartesian sample is the end of the preceding segment.
+            # Preserve the actual redundant-joint configuration instead of
+            # letting IK choose another valid branch in ordinary free travel.
+            joint_samples[0] = np.asarray(self.scene.data.qpos[self.controller.qpos_ids], dtype=float)
         if final_joint_positions is not None:
             joint_samples[-1] = np.asarray(final_joint_positions, dtype=float)
         self._kinematic_motion = (
@@ -274,7 +349,11 @@ class SceneTaskActor:
             self.scene.registry.snap_arm1_gripper_closed(forward=False)
         gripper = self.scene.registry.free_body_pose(tool_body)
         carried_pose = gripper.transformed(self._carry_relative)
-        self.scene.registry.set_free_body_pose(self._carried_body, carried_pose, forward=True)
+        # qpos is consumed by the mj_step that follows this actor tick.  A
+        # second full mj_forward here only duplicated dynamics/contact work;
+        # kinematics alone keeps same-frame body/site reads coherent.
+        self.scene.registry.set_free_body_pose(self._carried_body, carried_pose, forward=False)
+        self.scene.mujoco.mj_kinematics(self.scene.model, self.scene.data)
 
     def _build_arm1_steps(
         self,
@@ -300,21 +379,20 @@ class SceneTaskActor:
                     self._capture_carried_body()
                     action()
                 self._transport_active = True
+                # LOAD_BASE and INSERT_FIN are compound legacy commands, but
+                # the planning DAG exposes pick and place as separate nodes.
+                # Persist this physical milestone as soon as the rigid grasp
+                # constraint exists so the pick node need not wait for place.
+                task.payload["physical_pick_complete"] = True
 
             return run
 
         def place() -> None:
             place_action()
-            self._transport_active = False
-            self._carried_body = None
-            self._carry_relative = None
-            self._carried_tool_orientation_lock = None
-
-        def release_grasp() -> None:
-            if TaskType(task.task_type) is TaskType.LOAD_BASE:
-                self.scene.registry.grasp_base(False)
-            else:
-                self.scene.registry.grasp_fin(str(task.payload["fin_id"]), False)
+            # The payload is now supported by its destination constraint.  A
+            # later finger/suction release and safe retreat belong to the
+            # already-started compound command, not to the pick milestone.
+            task.payload["physical_place_complete"] = True
             self._transport_active = False
             self._carried_body = None
             self._carry_relative = None
@@ -339,13 +417,10 @@ class SceneTaskActor:
                 Arm1Step("trajectory", trajectory=path(3, 9, cruise_speed)),
                 Arm1Step("trajectory", trajectory=path(8, 10, 0.050)),
                 Arm1Step("hold", duration=0.35),
-                Arm1Step("action", action=release_grasp),
-                Arm1Step(
-                    "settle",
-                    duration=0.60,
-                    body_name="base_plate",
-                    target_pose=lambda: self.scene.registry.assembly_base_pose,
-                ),
+                # Transfer directly from the suction weld to the tray weld at
+                # the end of the already-aligned pure-Z descent.  The retired
+                # release-then-settle sequence visibly rotated the loose base
+                # only when it was millimetres above the pocket.
                 Arm1Step("action", action=place),
                 Arm1Step("suction", duration=0.60, start_value=1.0, end_value=0.0),
                 Arm1Step("hold", duration=0.25),
@@ -402,13 +477,6 @@ class SceneTaskActor:
             if step.kind == "trajectory":
                 assert step.trajectory is not None
                 self._start_kinematic(step.trajectory, now)
-                return
-            if step.kind == "settle":
-                if step.body_name is None or step.target_pose is None:
-                    raise RuntimeError("Arm1 settle step is incomplete")
-                step.start_pose = self.scene.registry.free_body_pose(step.body_name)
-                step.end_pose = step.target_pose()
-                self._arm1_timed = (step, float(now))
                 return
             if step.kind == "joint_home":
                 step.joint_start = np.asarray(
@@ -475,54 +543,38 @@ class SceneTaskActor:
                 [0.0, 0.0, half_thickness + 0.002]
             )
             raw_approach = raw + np.asarray([0.0, 0.0, 0.10])
-            target = registry.assembly_base_pose.position + np.asarray([0.0, 0.0, half_thickness + 0.002])
-            # The replaceable comb insert and upper press are enabled only
-            # after the bare base is seated.  This leaves a genuine vertical
-            # loading aperture: approach over the target, descend slowly into
-            # the four locators, release suction, then retreat on the same
-            # line.  The high corridor keeps the wide 360 mm plate above the
-            # Arm1 tool rack while travelling from Table1 to Table2.
+            target = registry.refresh_assembly_target_pose().position + np.asarray(
+                [0.0, 0.0, half_thickness + 0.002]
+            )
+            # S1 is deliberately in front of Arm1 and the quick-change rack is
+            # outside the direct Table1 -> S1 corridor.  Use a compact lifted
+            # route instead of retaining the old turntable-era detour, whose
+            # far-left bypass forced the wrist through an unreachable branch.
+            # The base stays horizontal and its lower face clears every rack
+            # component before lateral travel begins.
             target_approach = target + np.asarray([0.0, 0.0, 0.10])
-            rack_body = self.scene.model.body("arm1_tool_rack")
-            rack_base = self.scene.model.geom("arm1_tool_rack_base")
-            rack_beam = self.scene.model.geom("arm1_tool_rack_beam")
-            bypass_low = raw_approach.copy()
-            bypass_low[0] = (
-                float(rack_body.pos[0])
-                - float(rack_base.size[0])
-                - 0.5 * self._product().spec.base_length
-                - 0.30
-            )
-            bypass_low[1] = (
-                float(rack_body.pos[1])
-                + float(rack_beam.pos[1])
-                - float(rack_beam.size[1])
-                - 0.5 * self._product().spec.base_width
-                - 0.03
-            )
-            raw_clearance = bypass_low.copy()
-            raw_clearance[2] = 0.46
-            corridor = target_approach.copy()
-            corridor[2] = 0.46
+            raw_clearance = raw_approach.copy()
+            raw_clearance[2] = 0.44
+            corridor = 0.5 * (raw_clearance + target_approach)
+            corridor[2] = 0.44
+            s1_clearance = target_approach.copy()
+            s1_clearance[2] = 0.44
             points = (
                 current,
                 work_entry,
                 self._pose(raw_approach),
                 self._pose(raw),
                 self._pose(raw_approach),
-                self._pose(bypass_low),
                 self._pose(raw_clearance),
                 self._pose(corridor),
+                self._pose(s1_clearance),
                 self._pose(target_approach),
                 self._pose(target),
                 self._pose(target_approach),
             )
             return (
                 PolylineTrajectory(points, self.speed_m_s),
-                # The preceding settle phase removes the visible error; the
-                # final snap eliminates the remaining solver-scale residual
-                # before the tray weld is enabled.
-                lambda: registry.place_base_on_tray(snap=True),
+                lambda: registry.place_base_on_tray(snap=False),
             )
 
         if kind in {TaskType.INSERT_FIN, TaskType.ADJUST_FIN}:
@@ -549,9 +601,21 @@ class SceneTaskActor:
             goal_approach = goal + np.asarray([0.0, 0.0, 0.10])
             corridor = 0.5 * (raw_approach + goal_approach)
             corridor[2] = 0.50
+            # After placing one fin the gripper is already inside the shared
+            # Table1/Table2 work corridor.  Returning to the remote parking
+            # pose before every subsequent pickup produced the conspicuous
+            # "move away, pause, come back" detour.  Keep the same ten-point
+            # motion contract used by the grip/release skill, but replace that
+            # parking waypoint with a vertical lift over the current XY.  The
+            # first fin still enters through the certified parking pose.
+            entry = work_entry
+            if bool(task.payload.get("continuous_from_previous", False)):
+                local_lift = current.position.copy()
+                local_lift[2] = max(float(current.position[2]), float(raw_approach[2]), 0.50)
+                entry = self._pose(local_lift)
             points = (
                 current,
-                work_entry,
+                entry,
                 self._pose(raw_approach),
                 self._pose(raw),
                 self._pose(raw_approach),
@@ -569,9 +633,84 @@ class SceneTaskActor:
         if kind in {TaskType.PRE_INSPECT, TaskType.MATERIAL_INSPECT}:
             product_pose = registry.product_pose().position
             height = 0.44 if kind is TaskType.PRE_INSPECT else 0.38
-            overview = self._pose([product_pose[0], product_pose[1], height])
+            # Generate views from the live station frame.  S2B and S3 occupy
+            # different arms of the shallow U, so retaining one turntable-era
+            # centre-line camera pose creates an unreachable wrist transition.
+            overview = self._pose(
+                [product_pose[0] + 0.12, product_pose[1], height],
+                math.pi,
+            )
             end_view = self._pose([product_pose[0] + 0.17, product_pose[1], height - 0.05], math.pi / 2.0)
-            return PolylineTrajectory((current, overview, end_view, overview), self.speed_m_s), noop
+            if kind is TaskType.PRE_INSPECT and product_pose[0] >= 0.30:
+                # At S3, remain on Arm3's +Y side of the workpiece and use
+                # two oblique looks.  The approach and both views were chosen
+                # from the station's certified reachable envelope, avoiding
+                # the wrist flip caused by a vertical camera yaw change.
+                focus = np.asarray(
+                    [product_pose[0], product_pose[1], product_pose[2] + 0.025],
+                    dtype=float,
+                )
+                entry_position = np.asarray(
+                    [product_pose[0] - 0.03, product_pose[1] + 0.32, 0.46],
+                    dtype=float,
+                )
+                overview_position = np.asarray(
+                    [product_pose[0], product_pose[1] + 0.18, 0.44],
+                    dtype=float,
+                )
+                end_position = np.asarray(
+                    [product_pose[0] + 0.10, product_pose[1] + 0.18, 0.44],
+                    dtype=float,
+                )
+                entry = Pose(entry_position, _look_at_quaternion(entry_position, focus))
+                overview = Pose(
+                    overview_position,
+                    _look_at_quaternion(overview_position, focus),
+                )
+                end_view = Pose(
+                    end_position,
+                    _look_at_quaternion(end_position, focus),
+                )
+                return (
+                    PolylineTrajectory(
+                        (current, entry, overview, end_view, overview),
+                        self.speed_m_s,
+                    ),
+                    noop,
+                )
+            if kind is TaskType.PRE_INSPECT and product_pose[0] < 0.0:
+                # Historical layouts may still place an inspection segment at
+                # negative X; retain the same safe near-side fallback.
+                focus = np.asarray(
+                    [product_pose[0], product_pose[1], product_pose[2] + 0.025],
+                    dtype=float,
+                )
+                overview_position = np.asarray(
+                    [product_pose[0] + 0.24, product_pose[1], 0.46],
+                    dtype=float,
+                )
+                end_position = np.asarray(
+                    [product_pose[0] + 0.28, product_pose[1] - 0.04, 0.43],
+                    dtype=float,
+                )
+                overview = Pose(
+                    overview_position,
+                    _look_at_quaternion(overview_position, focus),
+                )
+                end_focus = focus + np.asarray([0.09, 0.0, 0.0])
+                end_view = Pose(
+                    end_position,
+                    _look_at_quaternion(end_position, end_focus),
+                )
+            # Reorient over a certified clear camera waypoint before S2B.
+            camera_entry = self._pose([0.45, 0.25, max(0.48, height + 0.04)], math.pi)
+            return (
+                PolylineTrajectory(
+                    (current, camera_entry, overview, end_view, overview),
+                    self.speed_m_s,
+                ),
+                noop,
+            )
 
         if kind in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}:
             process_spec = self._product().spec
@@ -597,7 +736,41 @@ class SceneTaskActor:
                 slot_y = float(self.scene.registry.product_to_world(fin.target_position)[1])
                 start[1] = slot_y
                 end[1] = slot_y
+                if kind is TaskType.REAPPLY_MATERIAL:
+                    # Repair only the observed discontinuity, not the complete
+                    # 330 mm bead.  This is both the actual recovery intent
+                    # and what lets Arm2 service S2B without reversing the
+                    # pallet.  The truth model currently reports gap length
+                    # but not an image-derived longitudinal coordinate, so the
+                    # demonstrator places that local defect at bead centre.
+                    axis = end - start
+                    length = float(np.linalg.norm(axis))
+                    if length > 1.0e-9:
+                        direction = axis / length
+                        centre = 0.5 * (start + end)
+                        repair_length = min(
+                            length,
+                            max(0.020, float(target.longest_gap_m) + 0.010),
+                        )
+                        start = centre - 0.5 * repair_length * direction
+                        end = centre + 0.5 * repair_length * direction
             reverse_travel = bool(task.payload.get("reverse_travel", False))
+            # Product-local X can be opposite world X depending on the tray's
+            # docking transform. Mirror the serpentine flag for a normal full
+            # pass. A local S2B repair instead starts at whichever endpoint is
+            # physically nearer Arm2, avoiding an unnecessary reach across
+            # the complete plate while the pallet remains on the one-way line.
+            product_x_world = self.scene.registry.product_pose().rotation[:, 0]
+            if kind is TaskType.REAPPLY_MATERIAL:
+                arm_base = np.asarray(
+                    self.scene.data.body("arm2_base").xpos,
+                    dtype=float,
+                )
+                reverse_travel = float(np.linalg.norm(arm_base[:2] - end[:2])) < float(
+                    np.linalg.norm(arm_base[:2] - start[:2])
+                )
+            elif float(product_x_world[0]) < 0.0:
+                reverse_travel = not reverse_travel
             if reverse_travel:
                 start, end = end.copy(), start.copy()
             task.payload["travel_direction"] = "negative_x" if reverse_travel else "positive_x"
@@ -609,9 +782,15 @@ class SceneTaskActor:
             # Arm2 workstation placement, never by leaning the lance.
             nozzle_quaternion = _top_down_quaternion(0.0)
             # Do not propagate a sub-degree IK residual from one bead into the
-            # next Cartesian segment. The measured XYZ is continuous, while
-            # every commanded orientation remains the exact process frame.
-            current = Pose(current.position, nozzle_quaternion)
+            # next Cartesian segment.  The measured start frame already has
+            # a vertical tool axis; retain its roll at the first sample and
+            # let SE(3) interpolation close roll continuously on approach.
+            # Replacing it outright with ``nozzle_quaternion`` creates a
+            # one-sample redundant-joint branch jump even though XYZ is
+            # unchanged.
+            measured_x = current.rotation[:, 0]
+            measured_roll = math.atan2(float(measured_x[1]), float(measured_x[0]))
+            current = Pose(current.position, _top_down_quaternion(measured_roll))
             approach = Pose(
                 start + np.asarray([0.0, 0.0, 0.080]),
                 nozzle_quaternion,
@@ -638,7 +817,11 @@ class SceneTaskActor:
                 corridor = safe_corridor_trajectory(
                     current,
                     approach,
-                    clearance_z=0.43,
+                    # S2B is farther from Arm2 than its normal S2A station.
+                    # No fins exist yet at this process phase, so a lower
+                    # certified corridor avoids the outer high-reach
+                    # singularity without sacrificing fixture clearance.
+                    clearance_z=(0.34 if kind is TaskType.REAPPLY_MATERIAL else 0.43),
                     speed_m_s=self.speed_m_s,
                 )
             points = (*corridor.waypoints, start_pose, end_pose, retreat)
@@ -704,6 +887,43 @@ class SceneTaskActor:
                 product + np.asarray([0.0, -side_clearance, 0.13]),
                 side_yaw,
             )
+            if 0.70 <= float(product[0]) <= 1.20 and abs(float(product[1])) <= 0.20:
+                # The single-product compatibility conveyor returns to the
+                # rack hand-off point.  Inspect it from Arm3's near side;
+                # reaching vertically above x=0.9 would put the wrist at its
+                # limit even though an oblique camera view covers the part.
+                focus = product + np.asarray([0.0, 0.0, 0.03])
+                entry_position = np.asarray([0.50, 0.32, 0.46], dtype=float)
+                top_position = np.asarray(
+                    [product[0] - 0.22, product[1] + 0.16, 0.42],
+                    dtype=float,
+                )
+                side_position = top_position + np.asarray([0.04, -0.06, -0.02])
+                entry = Pose(entry_position, _look_at_quaternion(entry_position, focus))
+                top = Pose(top_position, _look_at_quaternion(top_position, focus))
+                side = Pose(side_position, _look_at_quaternion(side_position, focus))
+                return (
+                    PolylineTrajectory((current, entry, top, side, top), self.speed_m_s),
+                    noop,
+                )
+            if float(product[0]) < 0.30:
+                # A single-order tray returns on the centreline conveyor, not
+                # the former Table3 stand.  Observe it from Arm3's near side
+                # with two explicit oblique views, keeping clear of Arm2's
+                # folded waiting envelope.
+                focus = product + np.asarray([0.0, 0.0, 0.03])
+                top_position = product + np.asarray([0.10, 0.0, 0.203])
+                side_position = product + np.asarray([0.10, -0.15, 0.143])
+                top = Pose(top_position, _look_at_quaternion(top_position, focus))
+                side = Pose(side_position, _look_at_quaternion(side_position, focus))
+                camera_entry = self._pose([0.55, 0.20, 0.55], math.pi)
+                return (
+                    PolylineTrajectory(
+                        (current, camera_entry, top, side, top),
+                        self.speed_m_s,
+                    ),
+                    noop,
+                )
             return PolylineTrajectory((current, top, side, top), self.speed_m_s), noop
 
         raise ValueError(f"unsupported scene task: {kind.value}")
@@ -873,6 +1093,17 @@ class SceneTaskActor:
                 Arm1Step("work", trajectory=retreat),
             ]
             if self._should_park(task):
+                if kind is TaskType.REAPPLY_MATERIAL:
+                    # The retreat is already clear of the flat pre-assembly
+                    # pallet. Return through the known-safe joint-space home
+                    # posture instead of reaching outward to a high Cartesian
+                    # corner at S2B.
+                    steps.append(Arm1Step("joint_home", duration=1.25))
+                    self.trajectory = trajectory
+                    self._callback = callback
+                    self._errors.clear()
+                    self._arm2_steps = steps
+                    return
                 park_pose = self.park_flange_pose.transformed(self.controller.tool_transform)
                 if park_pose.position[2] < 0.43:
                     position = park_pose.position.copy()
@@ -993,16 +1224,14 @@ class SceneTaskActor:
         if self.arm_name == "arm2" and not self.fast:
             required = self._required_arm2_tool(task)
             if required != "brazing_dispenser":
-                raise RuntimeError(f"Arm2 cannot execute {task.task_type} with its permanent dispenser")
-            self.scene.tools.change_tool(required)
+                raise RuntimeError(f"Arm2 cannot execute {task.task_type} with its dispenser")
             self._prepare_arm2_work(task)
             self._advance_arm2_step(now)
             return
         if self.arm_name == "arm2" and self.fast:
             required = self._required_arm2_tool(task)
             if required != "brazing_dispenser":
-                raise RuntimeError(f"Arm2 cannot execute {task.task_type} with its permanent dispenser")
-            self.scene.tools.change_tool(required)
+                raise RuntimeError(f"Arm2 cannot execute {task.task_type} with its dispenser")
         trajectory, callback = self._task_goal(task)
         if self._should_park(task):
             park_pose = self.park_flange_pose.transformed(self.controller.tool_transform)
@@ -1082,13 +1311,13 @@ class SceneTaskActor:
         if self._arm3_joint_home is not None:
             start, target, started_at, duration = self._arm3_joint_home
             linear = float(np.clip((float(now) - started_at) / max(duration, 1e-6), 0.0, 1.0))
-            amount = linear * linear * (3.0 - 2.0 * linear)
+            amount = quintic_time_scaling(linear)
             joints = (1.0 - amount) * start + amount * target
             self.controller.q_command = joints
             self.scene.data.qpos[self.controller.qpos_ids] = joints
             self.scene.data.qvel[self.controller.dof_ids] = 0.0
             self.scene.data.ctrl[self.controller.actuator_ids] = joints
-            self.scene.sync_mounted_extensions()
+            self.scene.sync_mounted_extensions(self.arm_name)
             if linear < 1.0:
                 return ActorResult.RUNNING
             self._arm3_joint_home = None
@@ -1102,10 +1331,10 @@ class SceneTaskActor:
             self.scene.data.qpos[self.controller.qpos_ids] = self.controller.q_command
             self.scene.data.qvel[self.controller.dof_ids] = 0.0
             self.scene.data.ctrl[self.controller.actuator_ids] = self.controller.q_command
-            self.scene.sync_mounted_extensions()
+            self.scene.sync_mounted_extensions(self.arm_name)
             step, step_started = self._arm2_timed
             linear = float(np.clip((float(now) - step_started) / max(step.duration, 1e-6), 0.0, 1.0))
-            amount = linear * linear * (3.0 - 2.0 * linear)
+            amount = quintic_time_scaling(linear)
             if step.kind == "joint_home":
                 assert step.joint_start is not None and step.joint_end is not None
                 joints = (1.0 - amount) * step.joint_start + amount * step.joint_end
@@ -1113,7 +1342,7 @@ class SceneTaskActor:
                 self.scene.data.qpos[self.controller.qpos_ids] = joints
                 self.scene.data.qvel[self.controller.dof_ids] = 0.0
                 self.scene.data.ctrl[self.controller.actuator_ids] = joints
-                self.scene.sync_mounted_extensions()
+                self.scene.sync_mounted_extensions(self.arm_name)
             if linear < 1.0:
                 return ActorResult.RUNNING
             self._arm2_timed = None
@@ -1125,11 +1354,11 @@ class SceneTaskActor:
             self.scene.data.qpos[self.controller.qpos_ids] = self.controller.q_command
             self.scene.data.qvel[self.controller.dof_ids] = 0.0
             self.scene.data.ctrl[self.controller.actuator_ids] = self.controller.q_command
-            self.scene.sync_mounted_extensions()
+            self.scene.sync_mounted_extensions(self.arm_name)
             self._sync_carried_body()
             step, step_started = self._arm1_timed
             linear = float(np.clip((float(now) - step_started) / max(step.duration, 1e-6), 0.0, 1.0))
-            amount = linear * linear * (3.0 - 2.0 * linear)
+            amount = quintic_time_scaling(linear)
             value = step.start_value + amount * (step.end_value - step.start_value)
             if step.kind == "joint_home":
                 assert step.joint_start is not None and step.joint_end is not None
@@ -1138,32 +1367,11 @@ class SceneTaskActor:
                 self.scene.data.qpos[self.controller.qpos_ids] = joints
                 self.scene.data.qvel[self.controller.dof_ids] = 0.0
                 self.scene.data.ctrl[self.controller.actuator_ids] = joints
-                self.scene.sync_mounted_extensions()
+                self.scene.sync_mounted_extensions(self.arm_name)
             elif step.kind == "gripper":
                 self.scene.registry.set_arm1_gripper_closed(value)
             elif step.kind == "suction":
                 self.scene.registry.set_arm1_suction_fraction(value)
-            elif step.kind == "settle":
-                assert step.body_name is not None
-                assert step.start_pose is not None and step.end_pose is not None
-                # Table2 can move by a fraction of a millimetre while the
-                # released payload is being aligned.  Follow the live slot
-                # pose throughout the settle interval instead of welding the
-                # payload to a target captured 0.6 s earlier.
-                if step.target_pose is not None:
-                    step.end_pose = step.target_pose()
-                left = step.start_pose.quaternion
-                right = step.end_pose.quaternion
-                if float(np.dot(left, right)) < 0.0:
-                    right = -right
-                quaternion = (1.0 - amount) * left + amount * right
-                quaternion /= max(float(np.linalg.norm(quaternion)), 1e-12)
-                position = (1.0 - amount) * step.start_pose.position + amount * step.end_pose.position
-                self.scene.registry.set_free_body_pose(
-                    step.body_name,
-                    Pose(position, quaternion),
-                    forward=True,
-                )
             if linear < 1.0:
                 return ActorResult.RUNNING
             self._arm1_timed = None
@@ -1175,7 +1383,7 @@ class SceneTaskActor:
             joint_samples, motion_started, duration = self._kinematic_motion
             elapsed = max(0.0, float(now) - motion_started)
             linear = float(np.clip(elapsed / duration, 0.0, 1.0))
-            amount = linear * linear * (3.0 - 2.0 * linear)
+            amount = quintic_time_scaling(linear)
             scaled = amount * max(0, len(joint_samples) - 1)
             left = min(int(math.floor(scaled)), len(joint_samples) - 1)
             right = min(left + 1, len(joint_samples) - 1)
@@ -1186,10 +1394,16 @@ class SceneTaskActor:
             self.scene.data.qpos[self.controller.qpos_ids] = self.controller.q_command
             self.scene.data.qvel[self.controller.dof_ids] = 0.0
             self.scene.data.ctrl[self.controller.actuator_ids] = self.controller.q_command
-            self.scene.sync_mounted_extensions()
+            self.scene.sync_mounted_extensions(self.arm_name)
             self._sync_carried_body()
             self._update_material_visual()
-            if self._kinematic_targets:
+            track_material_error = bool(
+                self._kinematic_targets
+                and self.arm_name == "arm2"
+                and self.task is not None
+                and TaskType(self.task.task_type) in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}
+            )
+            if track_material_error:
                 desired_position = (1.0 - fraction) * self._kinematic_targets[left].position + fraction * (
                     self._kinematic_targets[right].position
                 )

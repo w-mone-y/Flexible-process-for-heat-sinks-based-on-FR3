@@ -17,6 +17,7 @@ def _ready_scene():
 
     product = create_product_state(order_id="conveyor-physical")
     scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene.registry.dock_assembly_tray_to_station("rack_infeed", snap=True)
     scene.registry.place_base_on_tray(snap=True)
     scene.fixture_controller.configure_product(product.spec, product.fixture)
     for fin in product.active_fins:
@@ -31,6 +32,7 @@ def _ready_scene():
     scene.fixture_controller.start_press(scene.time, fixture)
     scene.fixture_controller.complete_immediately(fixture)
     scene.fixture_controller.lock(fixture)
+    scene.registry.handoff_rack_infeed_to_conveyor()
     product.furnace.door_fraction = 1.0
     scene.registry.set_furnace_door(1.0, teleport=True)
     return scene, product
@@ -148,12 +150,14 @@ def test_physical_press_furnace_cycle_and_return_to_table2() -> None:
     try:
         product = coordinator.start_segment("furnace_cycle", now=scene.time)
         scene.reset(product, raw=True)
+        scene.registry.dock_assembly_tray_to_station("rack_infeed", snap=True)
         scene.registry.place_base_on_tray(snap=True)
         scene.fixture_controller.configure_product(product.spec, product.fixture)
         for fin in product.active_fins:
             scene.registry.place_fin_in_slot(fin.fin_id, snap=True)
         for path in product.active_paths:
             scene.registry.set_path_visible(path.path_id, True, coverage=1.0)
+        scene.registry.handoff_rack_infeed_to_conveyor()
 
         start_pose = scene.registry.free_body_pose("assembly_tray")
         monitor = ContactMonitor(scene.model)

@@ -47,6 +47,7 @@ class SharedState:
         self.lock = threading.RLock()
         self.commands: queue.Queue[dict[str, Any]] = queue.Queue()
         self._state: dict[str, Any] = {
+            "schema_version": 2,
             "status": "starting",
             "viewer_running": False,
             "order_id": "",
@@ -54,6 +55,8 @@ class SharedState:
             "stage": "IDLE",
             "paused": False,
             "simulation_speed": 1.0,
+            "simulation_actual_rtf": 0.0,
+            "simulation_speed_saturated": False,
             "disposition": None,
             "arms": {
                 name: {"task_id": "", "task_type": "", "status": "idle", "error": ""} for name in ARM_NAMES
@@ -88,8 +91,11 @@ class SharedState:
                 "outfeed_position_m": 0.0,
                 "pusher_position_m": 0.0,
                 "pusher_extension_ratio": 0.0,
+                "conveyor_position_m": 0.0,
+                "conveyor_progress": 0.0,
                 "lock_position_m": 0.0,
                 "output_position_m": 0.0,
+                "comb_removal_progress": 0.0,
                 "moving": False,
             },
             "furnace": {"status": "idle", "temperature_c": 25.0, "door_open": False},
@@ -103,14 +109,53 @@ class SharedState:
             "camera_status": "camera starting",
             "camera_frame_time": 0.0,
             "available_orders": ["A", "B", "C"],
+            "scheduler": {
+                "mode": "FIXED_SEQUENCE",
+                "ready_count": 0,
+                "running_count": 0,
+                "replan_count": 0,
+            },
+            "tasks": [],
+            "resources_v2": {},
+            "zone_locks": {},
+            "orders": [],
+            "faults_v2": [],
+            "recoveries": [],
+            "manual_fault_requests": [],
+            "experiment_metrics": {},
+            "workstations": {},
+            "async_line": {},
+            "transfers": {},
+            "tray_routes": {},
+            "motion_plans": [],
+            "space_time_reservations": [],
+            "motion_blockers": {},
+            "gantt_events": [],
             "server_time": time.time(),
         }
         self._camera_frame_ppm = b""
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            result = copy.deepcopy(self._state)
-        return jsonable(result)
+            # Every write path normalizes values before they enter _state.
+            # Re-running the recursive enum/dataclass conversion after a deep
+            # copy doubled the cost of each /state request.
+            return copy.deepcopy(self._state)
+
+    def camera_status_snapshot(self) -> dict[str, Any]:
+        """Return camera metadata without copying the full manufacturing DAG."""
+
+        with self.lock:
+            return {
+                key: self._state.get(key)
+                for key in (
+                    "camera_width",
+                    "camera_height",
+                    "camera_active",
+                    "camera_status",
+                    "camera_frame_time",
+                )
+            }
 
     def update(self, payload: Mapping[str, Any] | None = None, **kwargs: Any) -> None:
         """Atomically update top-level keys.
@@ -125,6 +170,20 @@ class SharedState:
         values.update(kwargs)
         with self.lock:
             self._state.update(jsonable(values))
+            self._state["server_time"] = time.time()
+
+    def update_prepared(self, payload: Mapping[str, Any], **kwargs: Any) -> None:
+        """Update with an already JSON-safe snapshot from the simulation.
+
+        Coordinator snapshots have already converted dataclasses, enums and
+        arrays. This hot-path variant avoids recursively walking the same
+        12-fin/24-path state a second time before publishing it.
+        """
+
+        values = dict(payload)
+        values.update(kwargs)
+        with self.lock:
+            self._state.update(values)
             self._state["server_time"] = time.time()
 
     def replace(self, payload: Mapping[str, Any]) -> None:
@@ -233,6 +292,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/state":
             self._send_json(self.shared.snapshot())
+        elif path == "/camera/status":
+            self._send_json(self.shared.camera_status_snapshot())
         elif path == "/camera.ppm":
             frame = self.shared.camera_frame_ppm
             if frame:
@@ -240,14 +301,44 @@ class RequestHandler(BaseHTTPRequestHandler):
             else:
                 self._send_binary(b"camera frame not ready", "text/plain; charset=utf-8", 503)
         else:
-            self._send_json({"ok": False, "error": "not found"}, 404)
+            state = self.shared.snapshot()
+            from .fault_catalog import fault_catalog_snapshot
+
+            views = {
+                "/scheduler/status": state.get("scheduler", {}),
+                "/tasks": {"tasks": state.get("tasks", [])},
+                "/resources": {
+                    "resources": state.get("resources_v2") or state.get("resources", {}),
+                    "zone_locks": state.get("zone_locks", {}),
+                },
+                "/orders": {"orders": state.get("orders", [])},
+                "/faults": {"faults": state.get("faults_v2") or state.get("faults", [])},
+                "/recoveries": {"recoveries": state.get("recoveries", [])},
+                "/metrics": state.get("experiment_metrics") or state.get("kpi", {}),
+                "/fault-catalog": {"faults": fault_catalog_snapshot()},
+                "/workstations": {
+                    "workstations": state.get("workstations", {}),
+                    "async_line": state.get("async_line", {}),
+                    "transfers": state.get("transfers", {}),
+                    "tray_routes": state.get("tray_routes", {}),
+                },
+                "/motion/reservations": {
+                    "motion_plans": state.get("motion_plans", []),
+                    "reservations": state.get("space_time_reservations", []),
+                },
+            }
+            if path in views:
+                self._send_json(views[path])
+            else:
+                self._send_json({"ok": False, "error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         try:
             payload = self._read_json()
             command = validate_http_command(path, payload)
-            self.shared.enqueue(command)
+            if command.get("type") != "order_plan":
+                self.shared.enqueue(command)
             response = {"ok": True, **command}
             self._send_json(response, 202)
         except KeyError:
@@ -257,6 +348,92 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 
 def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if path == "/faults/inject":
+        from .fault_catalog import validate_manual_fault_payload
+
+        return validate_manual_fault_payload(payload)
+    if path in {"/orders/plan", "/orders/insert"}:
+        from datetime import datetime
+
+        from .flexible import build_custom_plan, build_inline_plan
+        from .planning import build_task_graph
+
+        preset = str(payload.get("preset", "A")).strip().upper()
+        order_id = str(payload.get("order_id", f"UI_{datetime.now().strftime('%H%M%S%f')}")).strip()
+        quantity = int(payload.get("quantity", 1))
+        priority = int(payload.get("priority", 10))
+        due_time = payload.get("due_time")
+        preferred = payload.get("preferred_rack_layer")
+        if preferred in {"", "null"}:
+            preferred = None
+        preferred = None if preferred is None else int(preferred)
+        mode = str(payload.get("mode", "preset")).strip().lower()
+        route_strategy = str(payload.get("route_strategy", "STANDARD")).strip().upper()
+        custom_product = payload.get("custom_product")
+        if mode == "custom":
+            if not isinstance(custom_product, dict):
+                raise ValueError("custom mode requires custom_product object")
+            plan = build_custom_plan(
+                order_id=order_id,
+                quantity=quantity,
+                priority=priority,
+                due_time=due_time,
+                preferred_rack_layer=preferred,
+                product=custom_product,
+                route_strategy=route_strategy,
+            )
+            preset = "CUSTOM"
+        elif mode == "preset":
+            plan = build_inline_plan(
+                preset=preset,
+                order_id=order_id,
+                quantity=quantity,
+                priority=priority,
+                due_time=due_time,
+                preferred_rack_layer=preferred,
+                route_strategy=route_strategy,
+            )
+        else:
+            raise ValueError("mode must be preset or custom")
+        summary = plan.summary()
+        preview_graph = build_task_graph(plan, flexible_cell=True)
+        summary["estimated_task_count"] = len(preview_graph)
+        command = {
+            "type": "order_plan" if path.endswith("/plan") else "order_insert",
+            "order_id": order_id,
+            "preset": preset,
+            "quantity": quantity,
+            "priority": priority,
+            "due_time": due_time,
+            "preferred_rack_layer": preferred,
+            "urgent": bool(payload.get("urgent", False)),
+            "mode": mode,
+            "custom_product": custom_product if mode == "custom" else None,
+            "route_strategy": route_strategy,
+            "plan": summary,
+            "task_preview": preview_graph.snapshot(),
+        }
+        return command
+    if path == "/scheduler/replan":
+        return {"type": "scheduler_replan", "reason": str(payload.get("reason", "operator"))}
+    if path.startswith("/resources/") and path.endswith(("/fault", "/recover")):
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 3 or not parts[1]:
+            raise ValueError("invalid resource route")
+        action = parts[2]
+        result = {"type": f"resource_{action}", "resource_id": parts[1].upper()}
+        if action == "fault":
+            result["fault_code"] = str(payload.get("fault_code", "OPERATOR_FAULT"))
+            result["duration"] = payload.get("duration")
+        return result
+    if path.startswith("/recoveries/") and path.endswith("/action"):
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 3:
+            raise ValueError("invalid recovery route")
+        action = str(payload.get("action", "")).lower()
+        if action not in {"pause", "resume", "retry", "manual_review"}:
+            raise ValueError("recovery action must be pause/resume/retry/manual_review")
+        return {"type": "recovery_action", "recovery_id": parts[1], "action": action}
     if path == "/order":
         preset = str(payload.get("preset", "A")).strip().upper()
         if preset not in {"A", "B", "C"}:

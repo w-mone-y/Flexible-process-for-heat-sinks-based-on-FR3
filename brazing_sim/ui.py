@@ -2,10 +2,88 @@
 
 from __future__ import annotations
 
+import re
 import sys
-from typing import Any
+from typing import Any, Iterable
 
 from .api import get_bytes, get_json, post_json
+from .fault_catalog import MANUAL_FAULT_CATALOG
+from .planning.task_models import task_detail_label_zh, task_status_label_zh, task_type_label_zh
+
+TASK_GRAPH_NODE_SIZE = (190.0, 72.0)
+
+
+def unique_order_id(preferred: str, unavailable: Iterable[str] = ()) -> str:
+    """Return a stable UI order id that does not collide with prior submissions.
+
+    The order runtime intentionally retains completed orders for metrics and task-
+    graph history, so reusing ``UI_ORDER_001`` is a duplicate even after its
+    physical product has left the workcell.  Keep a human-readable numeric suffix
+    instead of hiding that lifecycle rule behind a random UUID.
+    """
+
+    candidate = str(preferred).strip() or "UI_ORDER_001"
+    occupied = {str(value).strip() for value in unavailable if str(value).strip()}
+    if candidate not in occupied:
+        return candidate
+    match = re.fullmatch(r"(.*?)(\d+)", candidate)
+    if match is None:
+        prefix, number, width = f"{candidate}_", 1, 3
+    else:
+        prefix, digits = match.groups()
+        number, width = int(digits) + 1, len(digits)
+    while True:
+        candidate = f"{prefix}{number:0{width}d}"
+        if candidate not in occupied:
+            return candidate
+        number += 1
+
+
+def _place_task_graph_node(item: Any, x: float, y: float) -> None:
+    """Move a node whose rectangle geometry is local to the item origin."""
+
+    item.setPos(float(x), float(y))
+
+
+def _paint_task_graph_node_text(
+    painter: Any,
+    rect: Any,
+    title: str,
+    detail: str,
+    status: str,
+) -> None:
+    """Paint labels in the node's own paint pass for reliable macOS rendering."""
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPainter, QPen
+
+    painter.save()
+    try:
+        painter.setOpacity(1.0)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        font = painter.font()
+        font.setPixelSize(13)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(255, 255, 255, 255), 1))
+        metrics = painter.fontMetrics()
+        top_text = metrics.elidedText(str(title), Qt.ElideRight, int(rect.width() - 16.0))
+        top = rect.adjusted(8.0, 3.0, -6.0, -rect.height() + 28.0)
+        painter.drawText(top, int(Qt.AlignLeft | Qt.AlignVCenter), top_text)
+        font.setPixelSize(10)
+        font.setBold(False)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(235, 242, 248, 255), 1))
+        metrics = painter.fontMetrics()
+        detail_text = metrics.elidedText(str(detail), Qt.ElideRight, int(rect.width() - 16.0))
+        middle = rect.adjusted(8.0, 27.0, -6.0, -rect.height() + 50.0)
+        painter.drawText(middle, int(Qt.AlignLeft | Qt.AlignVCenter), detail_text)
+        painter.setPen(QPen(QColor(255, 255, 255, 255), 1))
+        status_text = metrics.elidedText(f"状态：{status}", Qt.ElideRight, int(rect.width() - 16.0))
+        bottom = rect.adjusted(8.0, 49.0, -6.0, -3.0)
+        painter.drawText(bottom, int(Qt.AlignLeft | Qt.AlignVCenter), status_text)
+    finally:
+        painter.restore()
 
 
 def _base_url(value: Any) -> str:
@@ -25,14 +103,28 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
 
     try:
         from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+        from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QPixmap
+        from PySide6.QtSvg import QSvgGenerator
         from PySide6.QtWidgets import (
             QApplication,
+            QCheckBox,
+            QComboBox,
+            QDoubleSpinBox,
+            QFormLayout,
+            QFileDialog,
+            QGraphicsScene,
+            QGraphicsRectItem,
+            QGraphicsView,
             QGridLayout,
             QGroupBox,
             QHBoxLayout,
             QLabel,
+            QLineEdit,
             QPushButton,
+            QSpinBox,
+            QTabWidget,
+            QTableWidget,
+            QTableWidgetItem,
             QVBoxLayout,
             QWidget,
         )
@@ -92,7 +184,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
 
         def refresh(self) -> None:
             try:
-                state = get_json(base_url + "/state", timeout=0.35)
+                state = get_json(base_url + "/camera/status", timeout=0.35)
                 frame_time = float(state.get("camera_frame_time", 0.0))
                 if frame_time > self.last_frame_time:
                     payload = get_bytes(base_url + "/camera.ppm", timeout=0.35)
@@ -121,11 +213,202 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.show_pixmap()
             super().resizeEvent(event)
 
+    class TaskNodeItem(QGraphicsRectItem):
+        """One graph node with text painted atomically above its fill."""
+
+        def __init__(self, title: str, detail: str, status: str, fill: str) -> None:
+            width, height = TASK_GRAPH_NODE_SIZE
+            super().__init__(0.0, 0.0, width, height)
+            self.title = str(title)
+            self.detail = str(detail)
+            self.status = str(status)
+            self.setPen(QPen(QColor("#8b949e"), 1))
+            self.setBrush(QBrush(QColor(fill)))
+
+        def paint(self, painter: Any, option: Any, widget: Any = None) -> None:  # type: ignore[override]
+            super().paint(painter, option, widget)
+            _paint_task_graph_node_text(
+                painter,
+                self.rect(),
+                self.title,
+                self.detail,
+                self.status,
+            )
+
+    class TaskGraphView(QGraphicsView):
+        COLORS = {
+            "PENDING": "#54606f",
+            "READY": "#2f81f7",
+            "RESERVED": "#a371f7",
+            "RUNNING": "#d29922",
+            "SUCCEEDED": "#238636",
+            "FAILED": "#da3633",
+            "BLOCKED": "#6e3b3b",
+            "CANCELLED": "#484f58",
+            "RETRY_WAIT": "#bf8700",
+        }
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.canvas = QGraphicsScene(self)
+            self.setScene(self.canvas)
+            self.setRenderHint(QPainter.Antialiasing)
+            self.setMinimumHeight(430)
+            self.signature: tuple[Any, ...] = ()
+
+        def set_tasks(self, tasks: list[dict[str, Any]]) -> None:
+            signature = tuple(
+                (
+                    task.get("task_id"),
+                    task.get("task_type"),
+                    task.get("status"),
+                    task.get("assigned_resource"),
+                    task.get("display_name_zh"),
+                    task.get("display_detail_zh"),
+                    task.get("status_zh"),
+                )
+                for task in tasks
+            )
+            if signature == self.signature:
+                return
+            self.signature = signature
+            self.canvas.clear()
+            if not tasks:
+                self.canvas.addText("当前没有任务图。请先在“订单规划”中预览或加入订单。")
+                return
+            by_id = {str(task.get("task_id")): task for task in tasks}
+            levels: dict[str, int] = {}
+            for task in tasks:
+                predecessors = [str(value) for value in task.get("predecessors", ())]
+                levels[str(task.get("task_id"))] = (
+                    0
+                    if not predecessors
+                    else 1 + max((levels.get(value, 0) for value in predecessors), default=0)
+                )
+            rows: dict[int, int] = {}
+            positions: dict[str, tuple[float, float]] = {}
+            for task in tasks:
+                task_id = str(task.get("task_id"))
+                level = levels.get(task_id, 0)
+                row = rows.get(level, 0)
+                rows[level] = row + 1
+                x, y = level * 220.0, row * 98.0
+                positions[task_id] = (x, y)
+                status = str(task.get("status", "PENDING"))
+                node_width, node_height = TASK_GRAPH_NODE_SIZE
+                title_zh = str(task.get("display_name_zh") or task_type_label_zh(task.get("task_type", "")))
+                detail_zh = str(task.get("display_detail_zh") or task_detail_label_zh(task))
+                status_zh = str(task.get("status_zh") or task_status_label_zh(status))
+                rect = TaskNodeItem(
+                    title_zh,
+                    detail_zh,
+                    status_zh,
+                    self.COLORS.get(status, "#54606f"),
+                )
+                self.canvas.addItem(rect)
+                _place_task_graph_node(rect, x, y)
+                rect.setZValue(1.0)
+                rect.setToolTip(
+                    f"{task_id}\n资源: {task.get('assigned_resource') or task.get('eligible_resources')}\n"
+                    f"区域: {task.get('required_zones')}\n错误: {task.get('failure_reason') or '-'}"
+                )
+            for task in tasks:
+                target = str(task.get("task_id"))
+                if target not in positions:
+                    continue
+                tx, ty = positions[target]
+                for predecessor in task.get("predecessors", ()):
+                    source = str(predecessor)
+                    if source not in positions or source not in by_id:
+                        continue
+                    sx, sy = positions[source]
+                    edge = self.canvas.addLine(
+                        sx + node_width,
+                        sy + node_height / 2.0,
+                        tx,
+                        ty + node_height / 2.0,
+                        QPen(QColor("#8b949e"), 1),
+                    )
+                    edge.setZValue(-1.0)
+            self.canvas.setSceneRect(self.canvas.itemsBoundingRect().adjusted(-20, -20, 20, 20))
+
+    class EngineeringDrawing(QWidget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.plan: dict[str, Any] = {}
+            self.setMinimumHeight(480)
+
+        def set_plan(self, plan: dict[str, Any]) -> None:
+            self.plan = dict(plan)
+            self.update()
+
+        def paintEvent(self, event: Any) -> None:  # type: ignore[override]
+            del event
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.fillRect(self.rect(), QColor("#10161d"))
+            painter.setPen(QPen(QColor("#d0d7de"), 1))
+            if not self.plan:
+                painter.drawText(self.rect(), Qt.AlignCenter, "请先预览订单以生成产品工程示意。")
+                return
+            base = self.plan.get("base_size_m", [0.36, 0.22, 0.008])
+            fins = self.plan.get("fin_targets", [])
+            paths = self.plan.get("brazing_paths", [])
+            left, top = 70.0, 70.0
+            width = min(self.width() * 0.60, 650.0)
+            height = width * float(base[1]) / max(1e-9, float(base[0]))
+            painter.setBrush(QBrush(QColor("#66727f")))
+            painter.drawRect(int(left), int(top), int(width), int(height))
+            for fin in fins:
+                y_m = float(fin.get("position", [0, 0, 0])[1])
+                y = top + height * (0.5 - y_m / float(base[1]))
+                painter.setPen(QPen(QColor("#f0f6fc"), 3))
+                painter.drawLine(int(left + 25), int(y), int(left + width - 25), int(y))
+            painter.setPen(QPen(QColor("#f2cc60"), 2))
+            for path in paths:
+                start = path.get("start", [0, 0, 0])
+                end = path.get("end", [0, 0, 0])
+                x1 = left + width * (float(start[0]) / float(base[0]) + 0.5)
+                x2 = left + width * (float(end[0]) / float(base[0]) + 0.5)
+                y = top + height * (0.5 - float(start[1]) / float(base[1]))
+                painter.drawLine(int(x1), int(y), int(x2), int(y))
+            painter.setPen(QPen(QColor("#58a6ff"), 1))
+            painter.drawLine(int(left), int(top - 22), int(left + width), int(top - 22))
+            painter.drawText(
+                int(left + width / 2 - 70), int(top - 28), f"基板长度 {1000*float(base[0]):.0f} mm"
+            )
+            details = [
+                f"产品：{self.plan.get('product_id', '-')} / {self.plan.get('preset', '-')}型",
+                f"基板：{1000*float(base[0]):.0f} × {1000*float(base[1]):.0f} × {1000*float(base[2]):.1f} mm",
+                f"翅片：{self.plan.get('fin_count', 0)}片，节距 {1000*float(self.plan.get('fin_pitch_m', 0)):.1f} mm",
+                f"钎料：{self.plan.get('path_count', 0)}条，边距 {1000*float(self.plan.get('path_margin_m', 0)):.1f} mm",
+                f"喷嘴中心距：{1000*float(self.plan.get('nozzle_spacing_m', 0)):.1f} mm",
+                f"梳齿：{self.plan.get('comb_module', '-')}",
+                f"压紧力：{float(self.plan.get('clamping_force_n', 0)):.1f} N",
+                f"料架层：{[int(v)+1 for v in self.plan.get('rack_layers', [])]}",
+                "注：本图为仿真规划示意，不是生产级CAD图。",
+            ]
+            painter.setPen(QPen(QColor("#d0d7de"), 1))
+            x = left + width + 45
+            for index, line in enumerate(details):
+                painter.drawText(int(x), int(top + 24 * index), line)
+
     class ControlPanel(QWidget):
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("低压配电柜散热组件钎焊 MuJoCo 仿真")
-            root = QVBoxLayout(self)
+            shell = QVBoxLayout(self)
+            self.tabs = QTabWidget()
+            shell.addWidget(self.tabs)
+            overview = QWidget()
+            root = QVBoxLayout(overview)
+            self.tabs.addTab(overview, "运行总览")
+            self.current_plan: dict[str, Any] = {}
+            self.current_recovery_id = ""
+            self.latest_state: dict[str, Any] = {}
+            self._fault_target_signature: tuple[str, ...] = ()
+            self._submitted_order_ids: set[str] = set()
+            self._table_signatures: dict[int, tuple[tuple[str, ...], ...]] = {}
 
             controls = QGroupBox("单段流程控制")
             row = QHBoxLayout(controls)
@@ -150,7 +433,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             )
             self._button(
                 batch_row,
-                "单独运行升降入架",
+                "单独运行直线入炉",
                 "/segment",
                 {"segment": "rack_transfer"},
             )
@@ -159,7 +442,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             speed_controls = QGroupBox("仿真速度")
             speed_row = QHBoxLayout(speed_controls)
             self._button(speed_row, "减速 ÷2", "/speed", {"action": "decelerate"})
-            self.speed = QLabel("当前速度: 1×")
+            self.speed = QLabel("目标速度: 1× | 实际: --")
             self.speed.setAlignment(Qt.AlignCenter)
             speed_row.addWidget(self.speed, 1)
             self._button(speed_row, "加速 ×2", "/speed", {"action": "accelerate"})
@@ -201,7 +484,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             progress_group = QGroupBox("进度、检测与 KPI")
             progress_layout = QVBoxLayout(progress_group)
             self.progress = QLabel("fins 0/5 | paths 0/10")
-            self.arm2_tool = QLabel("Arm2 fixed tool: brazing_dispenser")
+            self.arm2_tool = QLabel("Arm2 固定工具：双喷嘴焊料枪")
             self.conveyor = QLabel("conveyor: IDLE")
             self.inspection = QLabel("inspection: -")
             self.kpi = QLabel("KPI: -")
@@ -219,9 +502,662 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             progress_layout.addWidget(self.plot)
             root.addWidget(progress_group, 1)
 
+            self._build_planning_tabs()
+
             self.timer = QTimer(self)
             self.timer.timeout.connect(self.refresh)
             self.timer.start(250)
+
+        def _build_planning_tabs(self) -> None:
+            order_page = QWidget()
+            order_root = QVBoxLayout(order_page)
+            form_group = QGroupBox("运行时订单规划（不会改写YAML）")
+            form = QFormLayout(form_group)
+            self.order_id_input = QLineEdit("UI_ORDER_001")
+            self.order_mode_input = QComboBox()
+            self.order_mode_input.addItem("预设产品", "preset")
+            self.order_mode_input.addItem("自定义产品", "custom")
+            self.preset_input = QComboBox()
+            self.preset_input.addItems(["A", "B", "C"])
+            self.quantity_input = QSpinBox()
+            self.quantity_input.setRange(1, 3)
+            self.priority_input = QSpinBox()
+            self.priority_input.setRange(0, 100)
+            self.priority_input.setValue(10)
+            self.due_input = QLineEdit()
+            self.due_input.setPlaceholderText("ISO-8601，可留空")
+            self.layer_input = QComboBox()
+            self.layer_input.addItems(["自动", "第1层", "第2层", "第3层"])
+            self.route_strategy_input = QComboBox()
+            self.route_strategy_input.addItem("标准路线", "STANDARD")
+            self.route_strategy_input.addItem("高可靠路线", "HIGH_RELIABILITY")
+            self.route_strategy_input.addItem("首件高可靠", "FIRST_ARTICLE")
+            form.addRow("订单ID", self.order_id_input)
+            form.addRow("规划模式", self.order_mode_input)
+            form.addRow("产品", self.preset_input)
+            form.addRow("数量", self.quantity_input)
+            form.addRow("优先级", self.priority_input)
+            form.addRow("交期", self.due_input)
+            form.addRow("首选料架层", self.layer_input)
+            form.addRow("工艺路线", self.route_strategy_input)
+            order_root.addWidget(form_group)
+
+            self.custom_product_group = QGroupBox("自定义产品与工艺参数（仅匹配实体模块后才允许执行）")
+            custom_form = QFormLayout(self.custom_product_group)
+
+            def millimetres(value: float, minimum: float, maximum: float) -> Any:
+                control = QDoubleSpinBox()
+                control.setRange(minimum, maximum)
+                control.setDecimals(2)
+                control.setValue(value)
+                control.setSuffix(" mm")
+                return control
+
+            self.custom_base_l = millimetres(360.0, 100.0, 440.0)
+            self.custom_base_w = millimetres(220.0, 80.0, 290.0)
+            self.custom_base_t = millimetres(8.0, 1.0, 20.0)
+            self.custom_fin_l = millimetres(300.0, 80.0, 380.0)
+            self.custom_fin_t = millimetres(2.0, 0.5, 8.0)
+            self.custom_fin_h = millimetres(60.0, 10.0, 110.0)
+            self.custom_fin_count = QSpinBox()
+            self.custom_fin_count.setRange(1, 12)
+            self.custom_fin_count.setValue(5)
+            self.custom_pitch = QComboBox()
+            for value in (15, 20, 30, 40):
+                self.custom_pitch.addItem(f"{value} mm", value)
+            self.custom_pitch.setCurrentIndex(1)
+            self.custom_margin = millimetres(15.0, 2.0, 60.0)
+            self.custom_path_width = millimetres(4.0, 1.0, 10.0)
+            self.custom_nozzle_spacing = millimetres(5.0, 2.0, 12.0)
+            self.custom_nozzle_height = millimetres(4.0, 1.0, 20.0)
+            self.custom_material_speed = QDoubleSpinBox()
+            self.custom_material_speed.setRange(0.005, 0.250)
+            self.custom_material_speed.setDecimals(3)
+            self.custom_material_speed.setValue(0.040)
+            self.custom_material_speed.setSuffix(" m/s")
+            self.custom_clamp_force = QDoubleSpinBox()
+            self.custom_clamp_force.setRange(5.0, 60.0)
+            self.custom_clamp_force.setValue(20.0)
+            self.custom_clamp_force.setSuffix(" N")
+            custom_form.addRow("基板长", self.custom_base_l)
+            custom_form.addRow("基板宽", self.custom_base_w)
+            custom_form.addRow("基板厚", self.custom_base_t)
+            custom_form.addRow("翅片长", self.custom_fin_l)
+            custom_form.addRow("翅片厚", self.custom_fin_t)
+            custom_form.addRow("翅片高", self.custom_fin_h)
+            custom_form.addRow("翅片数量", self.custom_fin_count)
+            custom_form.addRow("实体梳齿节距", self.custom_pitch)
+            custom_form.addRow("路径边距", self.custom_margin)
+            custom_form.addRow("焊道宽度", self.custom_path_width)
+            custom_form.addRow("双喷嘴中心距", self.custom_nozzle_spacing)
+            custom_form.addRow("喷嘴高度", self.custom_nozzle_height)
+            custom_form.addRow("涂覆速度", self.custom_material_speed)
+            custom_form.addRow("目标压紧力", self.custom_clamp_force)
+            self.custom_product_group.setVisible(False)
+            self.order_mode_input.currentIndexChanged.connect(
+                lambda: self.custom_product_group.setVisible(self.order_mode_input.currentData() == "custom")
+            )
+            order_root.addWidget(self.custom_product_group)
+            actions = QHBoxLayout()
+            preview = QPushButton("校验并预览")
+            preview.clicked.connect(self.preview_order)
+            normal = QPushButton("加入普通订单")
+            normal.clicked.connect(lambda: self.insert_order(False))
+            urgent = QPushButton("插入紧急订单")
+            urgent.clicked.connect(lambda: self.insert_order(True))
+            actions.addWidget(preview)
+            actions.addWidget(normal)
+            actions.addWidget(urgent)
+            order_root.addLayout(actions)
+            self.order_action_status = QLabel("尚未提交运行时订单")
+            self.order_action_status.setWordWrap(True)
+            self.order_action_status.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            order_root.addWidget(self.order_action_status)
+            self.plan_summary = QLabel("尚未生成计划")
+            self.plan_summary.setWordWrap(True)
+            self.plan_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            order_root.addWidget(self.plan_summary)
+            self.order_table = QTableWidget(0, 7)
+            self.order_table.setHorizontalHeaderLabels(
+                ["订单", "产品", "数量", "优先级", "状态", "进度", "紧急"]
+            )
+            order_root.addWidget(self.order_table, 1)
+            self.tabs.addTab(order_page, "订单规划")
+
+            task_page = QWidget()
+            task_root = QVBoxLayout(task_page)
+            self.scheduler_summary = QLabel("scheduler: FIXED_SEQUENCE")
+            self.scheduler_summary.setWordWrap(True)
+            task_root.addWidget(self.scheduler_summary)
+            task_filters = QHBoxLayout()
+            task_filters.addWidget(QLabel("工位筛选"))
+            self.task_station_filter = QComboBox()
+            self.task_station_filter.addItem("全部工位", "")
+            self.task_station_filter.addItem("S1 基板装载", "S1_BASE_LOADING")
+            self.task_station_filter.addItem("S2A 钎料涂覆", "S2A_DISPENSING")
+            self.task_station_filter.addItem("S2B 材料检测", "S2B_MATERIAL_INSPECTION")
+            self.task_station_filter.addItem("S3 翅片装配", "S3_FIN_ASSEMBLY")
+            self.task_station_filter.addItem("炉前料架入口", "RACK_INFEED")
+            task_filters.addWidget(self.task_station_filter)
+            task_filters.addWidget(QLabel("托盘筛选"))
+            self.task_tray_filter = QComboBox()
+            self.task_tray_filter.addItem("全部托盘", "")
+            for index in range(1, 5):
+                self.task_tray_filter.addItem(f"托盘{index}", f"tray_{index:02d}")
+            task_filters.addWidget(self.task_tray_filter)
+            task_filters.addStretch(1)
+            self.task_station_filter.currentIndexChanged.connect(self._refresh_task_graph)
+            self.task_tray_filter.currentIndexChanged.connect(self._refresh_task_graph)
+            task_root.addLayout(task_filters)
+            self.task_graph = TaskGraphView()
+            task_root.addWidget(self.task_graph, 1)
+            self.scheduler_decisions = QTableWidget(0, 5)
+            self.scheduler_decisions.setHorizontalHeaderLabels(
+                ["任务", "候选资源", "总成本", "是否选中", "阻塞原因"]
+            )
+            task_root.addWidget(self.scheduler_decisions)
+            self.tabs.addTab(task_page, "任务图 / 调度")
+
+            pipeline_page = QWidget()
+            pipeline_root = QVBoxLayout(pipeline_page)
+            pipeline_overview = QGroupBox("浅U型异步流水工位")
+            pipeline_grid = QGridLayout(pipeline_overview)
+            self.async_station_labels = {}
+            station_titles = (
+                ("S1_BASE_LOADING", "S1 基板装载"),
+                ("S2A_DISPENSING", "S2A 钎料涂覆"),
+                ("S2B_MATERIAL_INSPECTION", "S2B 材料检测"),
+                ("S3_FIN_ASSEMBLY", "S3 翅片装配/压紧"),
+                ("RACK_INFEED", "炉前料架入口"),
+            )
+            for index, (station_id, title) in enumerate(station_titles):
+                label = QLabel(f"{title}：空闲")
+                label.setWordWrap(True)
+                self.async_station_labels[station_id] = label
+                pipeline_grid.addWidget(label, index // 2, index % 2)
+            self.async_line_status = QLabel("单向流：S1 → S2A → S2B → S3 → 料架 | WIP 0/3")
+            self.async_line_status.setWordWrap(True)
+            pipeline_grid.addWidget(self.async_line_status, 3, 0, 1, 2)
+            pipeline_root.addWidget(pipeline_overview)
+            self.transfer_table = QTableWidget(0, 7)
+            self.transfer_table.setHorizontalHeaderLabels(
+                ["移载段", "起点", "终点", "托盘", "状态", "进度", "物理位置"]
+            )
+            pipeline_root.addWidget(self.transfer_table)
+            self.tray_route_table = QTableWidget(0, 8)
+            self.tray_route_table.setHorizontalHeaderLabels(
+                ["托盘", "订单/工件", "唯一归属", "当前工位", "阶段", "在制", "模具/梳齿", "压紧"]
+            )
+            pipeline_root.addWidget(self.tray_route_table)
+            self.motion_table = QTableWidget(0, 7)
+            self.motion_table.setHorizontalHeaderLabels(
+                ["机械臂", "请求", "规划器", "起始", "结束", "等待", "预约"]
+            )
+            pipeline_root.addWidget(self.motion_table)
+            self.tabs.addTab(pipeline_page, "异步流水工位")
+
+            gantt_page = QWidget()
+            gantt_root = QVBoxLayout(gantt_page)
+            gantt_note = QLabel(
+                "实时甘特数据来自任务的READY/RUNNING/SUCCEEDED时间戳；等待与路径冲突不使订单直接ERROR。"
+            )
+            gantt_note.setWordWrap(True)
+            gantt_root.addWidget(gantt_note)
+            self.gantt_table = QTableWidget(0, 10)
+            self.gantt_table.setHorizontalHeaderLabels(
+                [
+                    "资源",
+                    "任务",
+                    "工位",
+                    "托盘",
+                    "状态",
+                    "计划时长",
+                    "实际开始",
+                    "实际结束",
+                    "等待",
+                    "冲突/说明",
+                ]
+            )
+            gantt_root.addWidget(self.gantt_table, 1)
+            self.tabs.addTab(gantt_page, "实时甘特图")
+
+            drawing_page = QWidget()
+            drawing_root = QVBoxLayout(drawing_page)
+            drawing_note = QLabel("由当前ProcessPlan生成俯视几何、焊缝和关键尺寸示意。")
+            drawing_root.addWidget(drawing_note)
+            self.engineering_drawing = EngineeringDrawing()
+            drawing_root.addWidget(self.engineering_drawing, 1)
+            drawing_actions = QHBoxLayout()
+            png = QPushButton("导出PNG")
+            png.clicked.connect(lambda: self.export_drawing("png"))
+            svg = QPushButton("导出SVG")
+            svg.clicked.connect(lambda: self.export_drawing("svg"))
+            drawing_actions.addWidget(png)
+            drawing_actions.addWidget(svg)
+            drawing_root.addLayout(drawing_actions)
+            self.tabs.addTab(drawing_page, "产品工程图规划")
+
+            resource_page = QWidget()
+            resource_root = QVBoxLayout(resource_page)
+            self.resource_table = QTableWidget(0, 7)
+            self.resource_table.setHorizontalHeaderLabels(
+                ["资源", "类型", "状态", "任务", "工具", "故障", "区域"]
+            )
+            resource_root.addWidget(self.resource_table, 1)
+            self.zone_status = QLabel("区域锁：-")
+            self.zone_status.setWordWrap(True)
+            resource_root.addWidget(self.zone_status)
+            self.tabs.addTab(resource_page, "资源与区域")
+
+            recovery_page = QWidget()
+            recovery_root = QVBoxLayout(recovery_page)
+            injection_group = QGroupBox("手动故障注入台")
+            injection_root = QVBoxLayout(injection_group)
+            injection_form = QFormLayout()
+            self.fault_type_input = QComboBox()
+            for definition in MANUAL_FAULT_CATALOG.values():
+                self.fault_type_input.addItem(
+                    f"[{definition.category_zh}] {definition.label_zh}",
+                    definition.fault_type,
+                )
+            self.fault_type_input.currentIndexChanged.connect(self._fault_type_changed)
+            self.fault_target_input = QComboBox()
+            self.fault_severity_input = QComboBox()
+            self.fault_severity_input.addItem("可恢复（自动生成修复流程）", "recoverable")
+            self.fault_severity_input.addItem("严重（人工复核/报废）", "severe")
+            self.fault_severity_input.currentIndexChanged.connect(self._fault_severity_changed)
+            self.fault_auto_recover = QCheckBox("设备恢复后自动继续当前物理流程")
+            self.fault_auto_recover.setChecked(True)
+            self.fault_duration_input = QSpinBox()
+            self.fault_duration_input.setRange(1, 600)
+            self.fault_duration_input.setValue(8)
+            self.fault_duration_input.setSuffix(" 仿真秒")
+            injection_form.addRow("故障类型", self.fault_type_input)
+            injection_form.addRow("故障目标", self.fault_target_input)
+            injection_form.addRow("严重度", self.fault_severity_input)
+            injection_form.addRow("自动恢复", self.fault_auto_recover)
+            injection_form.addRow("离线/停顿时间", self.fault_duration_input)
+            injection_root.addLayout(injection_form)
+            self.fault_hint = QLabel()
+            self.fault_hint.setWordWrap(True)
+            self.fault_hint.setStyleSheet(
+                "padding:8px;background:#16202a;border:1px solid #334155;color:#d8e6f3"
+            )
+            injection_root.addWidget(self.fault_hint)
+            injection_actions = QHBoxLayout()
+            start_demo = QPushButton("先启动A型故障演示")
+            start_demo.clicked.connect(lambda: self.post("/order", {"preset": "A"}))
+            injection_actions.addWidget(start_demo)
+            inject = QPushButton("注入所选故障")
+            inject.setStyleSheet("font-weight:bold;padding:7px;background:#a33a2b;color:white")
+            inject.clicked.connect(self.inject_selected_fault)
+            injection_actions.addWidget(inject)
+            self.recover_selected_arm = QPushButton("立即恢复所选机械臂")
+            self.recover_selected_arm.clicked.connect(self.recover_selected_arm_fault)
+            injection_actions.addWidget(self.recover_selected_arm)
+            injection_actions.addStretch(1)
+            injection_root.addLayout(injection_actions)
+            quick_row = QHBoxLayout()
+            quick_actions = (
+                ("快速：翅片偏位", "FIN_POSE", None, "recoverable"),
+                ("快速：漏涂", "BRAZING_MISSING", None, "recoverable"),
+                ("快速：Arm2离线", "ARM_UNAVAILABLE", "ARM2", "recoverable"),
+                ("快速：二层不可用", "RACK_LAYER_UNAVAILABLE", "1", "recoverable"),
+                ("快速：严重炉温", "FURNACE_PROFILE", "furnace", "severe"),
+            )
+            for title, fault_type, target, severity in quick_actions:
+                button = QPushButton(title)
+                button.clicked.connect(
+                    lambda _=False, kind=fault_type, value=target, level=severity: self.quick_fault(
+                        kind, value, level
+                    )
+                )
+                quick_row.addWidget(button)
+            quick_row.addStretch(1)
+            injection_root.addLayout(quick_row)
+            self.fault_injection_result = QLabel("选择故障后点击注入；系统会等待正确工序再触发。")
+            self.fault_injection_result.setWordWrap(True)
+            injection_root.addWidget(self.fault_injection_result)
+            recovery_root.addWidget(injection_group)
+
+            self.manual_fault_table = QTableWidget(0, 6)
+            self.manual_fault_table.setHorizontalHeaderLabels(
+                ["注入请求", "故障", "目标", "状态", "触发时间", "自动恢复"]
+            )
+            recovery_root.addWidget(self.manual_fault_table)
+            self.fault_table = QTableWidget(0, 6)
+            self.fault_table.setHorizontalHeaderLabels(
+                ["故障ID", "类型", "来源", "目标/任务", "可恢复", "状态"]
+            )
+            recovery_root.addWidget(self.fault_table)
+            self.recovery_table = QTableWidget(0, 6)
+            self.recovery_table.setHorizontalHeaderLabels(["恢复ID", "策略", "状态", "重试", "步骤", "信息"])
+            self.recovery_table.itemSelectionChanged.connect(self._select_recovery)
+            recovery_root.addWidget(self.recovery_table)
+            recovery_actions = QHBoxLayout()
+            for title, action in (
+                ("暂停恢复", "pause"),
+                ("继续恢复", "resume"),
+                ("重新尝试", "retry"),
+                ("转人工", "manual_review"),
+            ):
+                button = QPushButton(title)
+                button.clicked.connect(lambda _=False, value=action: self.recovery_action(value))
+                recovery_actions.addWidget(button)
+            replan = QPushButton("手动重规划")
+            replan.clicked.connect(lambda: self.post("/scheduler/replan", {"reason": "qt_operator"}))
+            recovery_actions.addWidget(replan)
+            recovery_root.addLayout(recovery_actions)
+            self.tabs.addTab(recovery_page, "故障与恢复规划")
+            self._fault_type_changed()
+
+            logistics_page = QWidget()
+            logistics_root = QVBoxLayout(logistics_page)
+            self.logistics_batch = QLabel("批次：-")
+            self.logistics_rack = QLabel("料架：EMPTY | EMPTY | EMPTY")
+            self.logistics_transfer = QLabel("移载：IDLE")
+            self.logistics_furnace = QLabel("炉体：IDLE")
+            for label in (
+                self.logistics_batch,
+                self.logistics_rack,
+                self.logistics_transfer,
+                self.logistics_furnace,
+            ):
+                label.setWordWrap(True)
+                label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                logistics_root.addWidget(label)
+            logistics_root.addStretch(1)
+            self.tabs.addTab(logistics_page, "批次与物流")
+
+            metrics_page = QWidget()
+            metrics_root = QVBoxLayout(metrics_page)
+            self.metrics_text = QLabel("尚无V2实验指标")
+            self.metrics_text.setWordWrap(True)
+            self.metrics_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            metrics_root.addWidget(self.metrics_text)
+            self.metrics_table = QTableWidget(0, 4)
+            self.metrics_table.setHorizontalHeaderLabels(["指标", "Fixed", "Dynamic", "变化"])
+            metrics_root.addWidget(self.metrics_table, 1)
+            self.tabs.addTab(metrics_page, "指标与实验")
+
+        def _order_payload(self, urgent: bool = False) -> dict[str, Any]:
+            layer_index = self.layer_input.currentIndex() - 1
+            due = self.due_input.text().strip()
+            payload = {
+                "order_id": self.order_id_input.text().strip(),
+                "mode": str(self.order_mode_input.currentData()),
+                "preset": self.preset_input.currentText(),
+                "quantity": self.quantity_input.value(),
+                "priority": self.priority_input.value(),
+                "due_time": due or None,
+                "preferred_rack_layer": None if layer_index < 0 else layer_index,
+                "urgent": urgent,
+                "route_strategy": str(self.route_strategy_input.currentData()),
+            }
+            if self.order_mode_input.currentData() == "custom":
+                millimetre = 0.001
+                payload["custom_product"] = {
+                    "base_size_m": [
+                        millimetre * self.custom_base_l.value(),
+                        millimetre * self.custom_base_w.value(),
+                        millimetre * self.custom_base_t.value(),
+                    ],
+                    "fin_size_m": [
+                        millimetre * self.custom_fin_l.value(),
+                        millimetre * self.custom_fin_t.value(),
+                        millimetre * self.custom_fin_h.value(),
+                    ],
+                    "fin_count": self.custom_fin_count.value(),
+                    "fin_pitch_m": millimetre * float(self.custom_pitch.currentData()),
+                    "path_margin_m": millimetre * self.custom_margin.value(),
+                    "path_width_m": millimetre * self.custom_path_width.value(),
+                    "nozzle_spacing_m": millimetre * self.custom_nozzle_spacing.value(),
+                    "nozzle_tip_height_m": millimetre * self.custom_nozzle_height.value(),
+                    "material_speed_m_s": self.custom_material_speed.value(),
+                    "target_clamping_force_n": self.custom_clamp_force.value(),
+                    "recipe": "demo_brazing",
+                }
+            return payload
+
+        def preview_order(self) -> None:
+            try:
+                response = post_json(base_url + "/orders/plan", self._order_payload(), timeout=1.0)
+                self.current_plan = dict(response.get("plan", {}))
+                self.engineering_drawing.set_plan(self.current_plan)
+                self.task_graph.set_tasks(list(response.get("task_preview", [])))
+                self.plan_summary.setText(
+                    f"{self.current_plan.get('order_id')} | {self.current_plan.get('product_id')} | "
+                    f"{self.current_plan.get('quantity')}件 | 翅片{self.current_plan.get('fin_count')} | "
+                    f"路径{self.current_plan.get('path_count')} | 任务{self.current_plan.get('estimated_task_count')} | "
+                    f"层位{[int(v)+1 for v in self.current_plan.get('rack_layers', [])]}"
+                )
+            except Exception as exc:
+                self.plan_summary.setText(f"计划校验失败：{exc}")
+
+        def insert_order(self, urgent: bool) -> None:
+            payload = self._order_payload(urgent)
+            known_ids = set(self._submitted_order_ids)
+            for item in self.latest_state.get("orders", []):
+                if isinstance(item, dict) and item.get("order_id"):
+                    known_ids.add(str(item["order_id"]))
+            payload["order_id"] = unique_order_id(str(payload.get("order_id", "")), known_ids)
+            kind = "紧急订单" if urgent else "普通订单"
+            try:
+                response = post_json(base_url + "/orders/insert", payload, timeout=0.8)
+                submitted_id = str(response.get("order_id", payload["order_id"]))
+                self._submitted_order_ids.add(submitted_id)
+                self.order_action_status.setText(f"✓ {kind} {submitted_id} 已加入执行队列")
+                self.result.setText(f"订单提交成功：{submitted_id}")
+                # Prepare a fresh id immediately. This also protects rapid
+                # consecutive clicks before the next /state refresh arrives.
+                known_ids.update(self._submitted_order_ids)
+                self.order_id_input.setText(unique_order_id(submitted_id, known_ids))
+            except Exception as exc:
+                message = f"✗ {kind}提交失败：{exc}"
+                self.order_action_status.setText(message)
+                self.result.setText(message)
+
+        def export_drawing(self, extension: str) -> None:
+            if not self.current_plan:
+                self.result.setText("请先预览订单，再导出工程示意")
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "导出工程示意",
+                f"{self.current_plan.get('order_id', 'plan')}.{extension}",
+                f"{extension.upper()} (*.{extension})",
+            )
+            if not path:
+                return
+            try:
+                if extension == "png":
+                    if not self.engineering_drawing.grab().save(path, "PNG"):
+                        raise RuntimeError("PNG保存失败")
+                else:
+                    generator = QSvgGenerator()
+                    generator.setFileName(path)
+                    generator.setSize(self.engineering_drawing.size())
+                    generator.setViewBox(self.engineering_drawing.rect())
+                    painter = QPainter(generator)
+                    self.engineering_drawing.render(painter)
+                    painter.end()
+                self.result.setText(f"工程示意已导出：{path}")
+            except Exception as exc:
+                self.result.setText(f"导出失败：{exc}")
+
+        def _select_recovery(self) -> None:
+            row = self.recovery_table.currentRow()
+            item = self.recovery_table.item(row, 0) if row >= 0 else None
+            self.current_recovery_id = "" if item is None else item.text()
+
+        def recovery_action(self, action: str) -> None:
+            if not self.current_recovery_id:
+                self.result.setText("请先在恢复计划表中选择一项")
+                return
+            self.post(f"/recoveries/{self.current_recovery_id}/action", {"action": action})
+
+        def _fault_definition(self) -> Any:
+            return MANUAL_FAULT_CATALOG[str(self.fault_type_input.currentData())]
+
+        def _fault_type_changed(self, *_: Any) -> None:
+            definition = self._fault_definition()
+            safety_fault = definition.fault_type in {
+                "CONTACT_SAFETY_STOP",
+                "TRAY_STATE_INCONSISTENT",
+            }
+            severity_index = self.fault_severity_input.findData("severe" if safety_fault else "recoverable")
+            if severity_index >= 0:
+                self.fault_severity_input.setCurrentIndex(severity_index)
+            self.fault_auto_recover.setChecked(not safety_fault)
+            self.fault_hint.setText(
+                f"触发说明：{definition.hint_zh}\n"
+                "提示：点击注入后无需卡准时机，系统会在匹配的任务运行时自动触发。"
+            )
+            self.fault_duration_input.setEnabled(definition.supports_duration)
+            self.fault_auto_recover.setEnabled(definition.runtime_fault is not None)
+            self.recover_selected_arm.setEnabled(definition.target_kind == "arm")
+            self._fault_target_signature = ()
+            self._refresh_fault_targets(self.latest_state)
+
+        def _fault_severity_changed(self, *_: Any) -> None:
+            if self.fault_severity_input.currentData() == "severe":
+                self.fault_auto_recover.setChecked(False)
+
+        def _fault_target_values(self, state: dict[str, Any]) -> list[tuple[str, str]]:
+            definition = self._fault_definition()
+            if definition.target_kind == "fin":
+                values = [
+                    (name, name)
+                    for name, item in sorted(state.get("fins", {}).items())
+                    if isinstance(item, dict) and item.get("active", False)
+                ]
+                return values or [(f"fin_{index:02d}", f"fin_{index:02d}") for index in range(1, 6)]
+            if definition.target_kind == "path":
+                values = [
+                    (name, name)
+                    for name, item in sorted(state.get("paths", {}).items())
+                    if isinstance(item, dict) and item.get("active", False)
+                ]
+                return values or [("slot_01_left", "slot_01_left")]
+            if definition.target_kind == "arm":
+                return [("Arm1", "ARM1"), ("Arm2", "ARM2"), ("Arm3", "ARM3")]
+            if definition.target_kind == "rack_layer":
+                return [("第1层", "0"), ("第2层", "1"), ("第3层", "2")]
+            if definition.target_kind == "furnace_conveyor":
+                return [("炉前黑色传送带", "FURNACE_CONVEYOR")]
+            if definition.target_kind == "furnace":
+                return [("钎焊炉/炉门", "furnace")]
+            active = next(
+                (
+                    str(task.get("display_name_zh") or task.get("task_id"))
+                    for task in state.get("tasks", [])
+                    if isinstance(task, dict) and task.get("status") == "RUNNING"
+                ),
+                "当前运行任务（系统自动匹配）",
+            )
+            return [(active, "")]
+
+        def _refresh_fault_targets(self, state: dict[str, Any]) -> None:
+            values = self._fault_target_values(state)
+            signature = tuple(f"{label}|{value}" for label, value in values)
+            if signature == self._fault_target_signature:
+                return
+            current = self.fault_target_input.currentData()
+            self.fault_target_input.clear()
+            for label, value in values:
+                self.fault_target_input.addItem(label, value)
+            index = self.fault_target_input.findData(current)
+            if index >= 0:
+                self.fault_target_input.setCurrentIndex(index)
+            self._fault_target_signature = signature
+
+        def _manual_fault_payload(self) -> dict[str, Any]:
+            return {
+                "fault_type": str(self.fault_type_input.currentData()),
+                "target": str(self.fault_target_input.currentData() or ""),
+                "severity": str(self.fault_severity_input.currentData()),
+                "auto_recover": self.fault_auto_recover.isChecked(),
+                "duration_s": self.fault_duration_input.value(),
+            }
+
+        def inject_selected_fault(self) -> None:
+            try:
+                stage = str(self.latest_state.get("stage", "IDLE"))
+                if not self.latest_state.get("order_id") or stage in {
+                    "IDLE",
+                    "PASS",
+                    "REWORK_REQUIRED",
+                    "SCRAPPED",
+                    "COMPLETE",
+                    "ERROR",
+                }:
+                    raise RuntimeError("请先启动一个未结束的订单或批次，再注入故障")
+                payload = self._manual_fault_payload()
+                response = post_json(base_url + "/faults/inject", payload, timeout=0.8)
+                definition = self._fault_definition()
+                self.fault_injection_result.setText(
+                    f"✓ 已受理：{definition.label_zh}；目标："
+                    f"{self.fault_target_input.currentText() or '自动匹配'}。"
+                    "等待正确工序触发，进度可在下方注入请求和任务图中查看。"
+                )
+                self.result.setText(f"故障注入已受理：{response.get('label_zh', definition.label_zh)}")
+            except Exception as exc:
+                self.fault_injection_result.setText(f"✗ 注入失败：{exc}")
+
+        def quick_fault(self, fault_type: str, target: str | None, severity: str) -> None:
+            index = self.fault_type_input.findData(fault_type)
+            if index < 0:
+                return
+            self.fault_type_input.setCurrentIndex(index)
+            self._refresh_fault_targets(self.latest_state)
+            if target is not None:
+                target_index = self.fault_target_input.findData(target)
+                if target_index >= 0:
+                    self.fault_target_input.setCurrentIndex(target_index)
+            severity_index = self.fault_severity_input.findData(severity)
+            if severity_index >= 0:
+                self.fault_severity_input.setCurrentIndex(severity_index)
+            self.inject_selected_fault()
+
+        def recover_selected_arm_fault(self) -> None:
+            if self._fault_definition().target_kind != "arm":
+                self.fault_injection_result.setText("当前故障不是机械臂离线故障")
+                return
+            resource = str(self.fault_target_input.currentData() or "")
+            if not resource:
+                self.fault_injection_result.setText("请先选择需要恢复的机械臂")
+                return
+            try:
+                post_json(base_url + f"/resources/{resource}/recover", {}, timeout=0.8)
+                self.fault_injection_result.setText(f"✓ 已请求恢复 {resource}，系统将重新规划待执行任务。")
+            except Exception as exc:
+                self.fault_injection_result.setText(f"✗ 资源恢复失败：{exc}")
+
+        def _refresh_task_graph(self, *_: Any) -> None:
+            tasks = self.latest_state.get("tasks", [])
+            if not isinstance(tasks, list):
+                return
+            station = str(self.task_station_filter.currentData() or "")
+            tray = str(self.task_tray_filter.currentData() or "")
+            filtered = [
+                task
+                for task in tasks
+                if isinstance(task, dict)
+                and (not station or str(task.get("station_id") or "") == station)
+                and (not tray or str(task.get("tray_id") or "") == tray)
+            ]
+            self.task_graph.set_tasks(filtered)
+
+        def _fill_table(self, table: Any, rows: list[list[Any]]) -> None:
+            signature = tuple(tuple(str(value) for value in row) for row in rows)
+            key = id(table)
+            if self._table_signatures.get(key) == signature:
+                return
+            self._table_signatures[key] = signature
+            table.setRowCount(len(rows))
+            for row_index, row in enumerate(rows):
+                for column, value in enumerate(row):
+                    table.setItem(row_index, column, QTableWidgetItem(str(value)))
 
         def _button(self, layout: Any, text: str, path: str, payload: dict[str, Any]) -> None:
             button = QPushButton(text)
@@ -239,11 +1175,16 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
         def refresh(self) -> None:
             try:
                 state = get_json(base_url + "/state", timeout=0.5)
+                self.latest_state = state
+                self._refresh_fault_targets(state)
                 self.order.setText(f"order: {state.get('order_id') or '-'}")
                 paused = " (PAUSED)" if state.get("paused", False) else ""
                 self.stage.setText(f"stage: {state.get('stage', 'IDLE')}{paused}")
                 speed = float(state.get("simulation_speed", 1.0))
-                self.speed.setText(f"当前速度: {speed:g}×")
+                actual_rtf = float(state.get("simulation_actual_rtf", 0.0))
+                saturation = " | 已达计算上限" if state.get("simulation_speed_saturated") else ""
+                actual_text = "采样中" if actual_rtf <= 0.0 else f"{actual_rtf:.1f}×"
+                self.speed.setText(f"目标速度: {speed:g}× | 实际RTF: {actual_text}{saturation}")
                 fixture = state.get("fixture", {})
                 resources = state.get("resources", {})
                 table2 = resources.get("table2_zone", {}) if isinstance(resources, dict) else {}
@@ -297,6 +1238,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                     if isinstance(shelf, dict)
                 )
                 self.rack_status.setText(f"rack: {shelf_text or 'EMPTY | EMPTY | EMPTY'}")
+                self.logistics_batch.setText(self.batch_status.text())
+                self.logistics_rack.setText(self.rack_status.text())
                 if isinstance(transfer, dict):
                     prefetch_index = transfer.get("prefetch_unit_index")
                     prefetched_index = transfer.get("prefetch_complete_index")
@@ -312,11 +1255,12 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                         f"transfer: {transfer.get('phase', 'IDLE')} | "
                         f"step: {transfer.get('step') or '-'} | "
                         f"tray: {transfer.get('unit_id') or '-'} | "
-                        f"lift: {1000.0 * float(transfer.get('lift_height_m', 0.0)):.0f} mm | "
-                        f"fork: {100.0 * float(transfer.get('pusher_extension_ratio', 0.0)):.0f}% | "
+                        f"入炉传送: {100.0 * float(transfer.get('conveyor_progress', 0.0)):.0f}% | "
                         f"lock: {1000.0 * float(transfer.get('lock_position_m', 0.0)):.0f} mm"
                         f"{overlap_text}"
                     )
+                    self.logistics_transfer.setText(self.transfer_status.text())
+                self.logistics_furnace.setText(self.furnace.text())
                 fins = state.get("fins", {})
                 paths = state.get("paths", {})
                 fin_done = sum(bool(item.get("inserted", False)) for item in fins.values())
@@ -326,10 +1270,9 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 self.progress.setText(
                     f"fins {fin_done}/{active_fins or 5} | paths {path_done}/{active_paths or 10}"
                 )
-                arm2_tool = state.get("tools", {}).get("arm2", {})
                 arm2_process = state.get("arm2_process", {})
                 self.arm2_tool.setText(
-                    f"Arm2 fixed tool: {arm2_tool.get('current_tool') or 'brazing_dispenser'} | "
+                    "Arm2 固定工具: 双喷嘴焊料枪 | 位置: 机械臂末端 | "
                     f"path: {arm2_process.get('current_path') or '-'} | "
                     f"applied: {arm2_process.get('completed_paths', 0)}/"
                     f"{arm2_process.get('total_paths', 0)}"
@@ -347,12 +1290,305 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                     f"KPI: elapsed={float(kpi.get('order_elapsed', 0.0)):.1f}s  "
                     f"rework={kpi.get('rework_counts', {})}  score={kpi.get('final_quality_score', '-')}"
                 )
+                scheduler = state.get("scheduler", {})
+                self.scheduler_summary.setText(
+                    f"scheduler: {scheduler.get('mode', 'FIXED_SEQUENCE')} | "
+                    f"READY {scheduler.get('ready_count', 0)} | "
+                    f"RUNNING {scheduler.get('running_count', 0)} | "
+                    f"重规划 {scheduler.get('replan_count', 0)} | "
+                    f"最大并行 {scheduler.get('max_assignments_per_tick', '-') }"
+                )
+                tasks = state.get("tasks", [])
+                if isinstance(tasks, list) and self.tabs.currentIndex() == 2:
+                    self._refresh_task_graph()
+                selected_ids = {
+                    str(item.get("task_id"))
+                    for item in scheduler.get("selected", [])
+                    if isinstance(item, dict)
+                }
+                decision_rows = [
+                    [
+                        item.get("task_id", "-"),
+                        item.get("resource_id", "-"),
+                        f"{float(item.get('cost', 0.0)):.3f}",
+                        "是" if str(item.get("task_id")) in selected_ids else "否",
+                        "-",
+                    ]
+                    for item in scheduler.get("candidates", [])
+                    if isinstance(item, dict)
+                ]
+                decision_rows.extend(
+                    [
+                        item.get("task_id", "-"),
+                        item.get("resource_id") or "-",
+                        "-",
+                        "否",
+                        item.get("reason", "-"),
+                    ]
+                    for item in scheduler.get("blocked_candidates", [])
+                    if isinstance(item, dict)
+                )
+                self._fill_table(self.scheduler_decisions, decision_rows[:80])
+
+                workstations = state.get("workstations", {})
+                station_titles = {
+                    "S1_BASE_LOADING": "S1 基板装载",
+                    "S2A_DISPENSING": "S2A 钎料涂覆",
+                    "S2B_MATERIAL_INSPECTION": "S2B 材料检测",
+                    "S3_FIN_ASSEMBLY": "S3 翅片装配/压紧",
+                    "RACK_INFEED": "炉前料架入口",
+                }
+                for station_id, label in self.async_station_labels.items():
+                    item = workstations.get(station_id, {})
+                    label.setText(
+                        f"{station_titles[station_id]}：{item.get('tray_id') or '空'} | "
+                        f"任务 {item.get('occupied_by') or '无'} | "
+                        f"允许移载 {'是' if item.get('safe_for_transfer', True) else '否'}"
+                    )
+                async_line = state.get("async_line", {})
+                physical_owners = async_line.get("physical_tray_owners", {})
+                physical_summary = ", ".join(
+                    f"{tray}:{owner}" for tray, owner in sorted(physical_owners.items()) if owner != "BUFFER"
+                )
+                router_mode = async_line.get("process_router", {}).get("mode", "")
+                mode_title = {
+                    "VERIFIED_PHYSICAL_QUEUE": "分段同源真实工艺",
+                    "MULTI_PALLET_RUNTIME": "多托盘并行生产",
+                }.get(router_mode, "标准物理流程")
+                parallelism = async_line.get("parallelism", {})
+                active_arms = "/".join(parallelism.get("active_arms", [])) or "无"
+                self.async_line_status.setText(
+                    f"执行模式：{mode_title} | 单向流：S1 → S2A → S2B → S3 → 料架 | "
+                    f"WIP {int(async_line.get('active_wip', 0))}/"
+                    f"{int(async_line.get('wip_limit', 3))} | "
+                    f"当前并行臂 {active_arms}（{int(parallelism.get('current_parallel_arms', 0))}台）| "
+                    f"历史峰值 {int(parallelism.get('max_parallel_arms', 0))}台 | "
+                    f"多臂重叠 {float(parallelism.get('multi_arm_overlap_s', 0.0)):.1f}s | "
+                    f"备用托盘 {', '.join(async_line.get('spare_trays', [])) or '无'} | "
+                    f"实体托盘 {physical_summary or async_line.get('station_owner') or '缓存中/无'}"
+                )
+                physical_positions = async_line.get("transfer_positions_m", {})
+                transfer_rows = []
+                for transfer_id, item in sorted(state.get("transfers", {}).items()):
+                    if not isinstance(item, dict):
+                        continue
+                    physical_key = str(transfer_id).removeprefix("TRANSFER_")
+                    transfer_rows.append(
+                        [
+                            transfer_id,
+                            item.get("source", "-"),
+                            item.get("target", "-"),
+                            item.get("tray_id") or "-",
+                            item.get("status", "IDLE"),
+                            f"{100.0 * float(item.get('progress', 0.0)):.0f}%",
+                            f"{1000.0 * float(physical_positions.get(physical_key, 0.0)):.1f} mm",
+                        ]
+                    )
+                self._fill_table(self.transfer_table, transfer_rows)
+                phase_zh = {
+                    "EMPTY_BUFFER": "空托盘缓存",
+                    "CHANGEOVER": "S1备料",
+                    "MOLD_READY": "模具就绪",
+                    "BASE_READY": "基板就绪",
+                    "MATERIAL_READY": "涂覆就绪",
+                    "ASSEMBLY_READY": "组装就绪",
+                    "LOCKED": "已锁紧",
+                    "OUTFEED": "正在出料",
+                    "FURNACE": "炉内",
+                    "FINISHED_GOODS": "成品出口",
+                    "RETURNING": "空托盘返回",
+                }
+                tray_rows = []
+                for tray_id, item in sorted(state.get("tray_routes", {}).items()):
+                    if not isinstance(item, dict):
+                        continue
+                    tray_rows.append(
+                        [
+                            tray_id,
+                            item.get("product_unit_id") or item.get("order_id") or "-",
+                            item.get("owner") or "-",
+                            item.get("station_id") or "-",
+                            phase_zh.get(str(item.get("phase", "")), item.get("phase", "-")),
+                            "是" if item.get("order_id") else "否",
+                            f"{item.get('mold_name') or '-'}/{item.get('comb_name') or '-'}",
+                            "已锁" if item.get("press_locked") else "未锁",
+                        ]
+                    )
+                self._fill_table(self.tray_route_table, tray_rows)
+                motion_rows = [
+                    [
+                        item.get("resource_id", "-"),
+                        item.get("request_id", "-"),
+                        item.get("planner", "-"),
+                        f"{float(item.get('start_time', 0.0)):.2f}",
+                        f"{float(item.get('end_time', 0.0)):.2f}",
+                        f"{float(item.get('waiting_time', 0.0)):.2f}s",
+                        item.get("reservation_id") or "已释放",
+                    ]
+                    for item in state.get("motion_plans", [])
+                    if isinstance(item, dict)
+                ]
+                self._fill_table(self.motion_table, motion_rows[-80:])
+                gantt_rows = [
+                    [
+                        item.get("resource_id") or "-",
+                        item.get("display_name_zh") or task_type_label_zh(item.get("task_type", "")),
+                        item.get("station_id") or "-",
+                        item.get("tray_id") or "-",
+                        task_status_label_zh(item.get("status", "")),
+                        f"{float(item.get('planned_duration', 0.0)):.2f}s",
+                        "-" if item.get("actual_start") is None else f"{float(item['actual_start']):.2f}",
+                        "-" if item.get("actual_end") is None else f"{float(item['actual_end']):.2f}",
+                        f"{float(item.get('waiting', 0.0)):.2f}s",
+                        ", ".join(item.get("blockers", [])) or "-",
+                    ]
+                    for item in state.get("gantt_events", [])
+                    if isinstance(item, dict)
+                ]
+                self._fill_table(self.gantt_table, gantt_rows[-200:])
+                order_rows = []
+                for item in state.get("orders", []):
+                    if not isinstance(item, dict):
+                        continue
+                    order_rows.append(
+                        [
+                            item.get("order_id", "-"),
+                            item.get("product_id", item.get("preset", "-")),
+                            item.get("quantity", "-"),
+                            item.get("priority", "-"),
+                            item.get("status", "-"),
+                            f"{100.0 * float(item.get('progress', 0.0)):.0f}%",
+                            "是" if item.get("urgent") else "否",
+                        ]
+                    )
+                self._fill_table(self.order_table, order_rows)
+                resource_rows = []
+                resources_v2 = state.get("resources_v2", {})
+                for resource_id, item in sorted(resources_v2.items()):
+                    if not isinstance(item, dict):
+                        continue
+                    resource_rows.append(
+                        [
+                            resource_id,
+                            item.get("resource_type", "-"),
+                            item.get("status", "-"),
+                            item.get("current_task_id") or "-",
+                            item.get("current_tool") or "-",
+                            item.get("fault_code") or "-",
+                            ",".join(item.get("occupied_zones", [])),
+                        ]
+                    )
+                self._fill_table(self.resource_table, resource_rows)
+                zone_locks = state.get("zone_locks", {})
+                locked = [
+                    f"{zone}:{lease.get('task_id')}"
+                    for zone, lease in zone_locks.items()
+                    if isinstance(lease, dict)
+                ]
+                self.zone_status.setText("区域锁：" + (" | ".join(locked) if locked else "全部空闲"))
+                fault_rows = []
+                for item in state.get("faults_v2", []):
+                    if isinstance(item, dict):
+                        definition = MANUAL_FAULT_CATALOG.get(str(item.get("fault_type", "")))
+                        fault_rows.append(
+                            [
+                                item.get("fault_id"),
+                                (definition.label_zh if definition is not None else item.get("fault_type")),
+                                item.get("source"),
+                                item.get("related_task_id") or "-",
+                                item.get("recoverable"),
+                                "已恢复" if item.get("recovered") else "处理中",
+                            ]
+                        )
+                for index, item in enumerate(state.get("faults", []), start=1):
+                    if isinstance(item, dict):
+                        physical_labels = {
+                            "fin_pose": "翅片位置/倾斜偏差",
+                            "brazing_gap": "钎料局部漏涂",
+                            "furnace_profile": "炉温曲线异常",
+                        }
+                        fault_rows.append(
+                            [
+                                f"PHYSICAL_{index:03d}",
+                                physical_labels.get(str(item.get("fault_type")), item.get("fault_type")),
+                                "MuJoCo物理流程",
+                                item.get("target") or "-",
+                                item.get("severity") != "severe",
+                                "已触发" if item.get("applied") else "等待工序",
+                            ]
+                        )
+                self._fill_table(self.fault_table, fault_rows)
+                manual_rows = []
+                request_status_labels = {
+                    "ARMED": "等待匹配工序",
+                    "FIRED": "已触发",
+                    "ACTIVE": "物理流程已暂停",
+                    "RECOVERED": "物理流程已恢复",
+                    "MISSED": "本订单未触发",
+                }
+                for item in state.get("manual_fault_requests", []):
+                    if not isinstance(item, dict):
+                        continue
+                    manual_rows.append(
+                        [
+                            item.get("request_id", "-"),
+                            item.get("label_zh") or item.get("fault_type", "-"),
+                            item.get("target") or "自动匹配",
+                            request_status_labels.get(str(item.get("status", "")), item.get("status", "-")),
+                            item.get("fired_at") or item.get("started_at") or "-",
+                            "是" if item.get("auto_recover", item.get("recoverable", False)) else "否",
+                        ]
+                    )
+                self._fill_table(self.manual_fault_table, manual_rows)
+                recovery_rows = []
+                strategy_labels = {
+                    "LOCAL_BRAZING_REWORK": "局部补涂并复检",
+                    "FIN_REINSTALL": "翅片重装并复检",
+                    "TRANSFER_SAFE_HOME_RETRY": "移载机构回零重试",
+                    "FURNACE_INTERLOCK_RECHECK": "炉门互锁复检",
+                    "RACK_LAYER_REALLOCATION": "料架层重新分配",
+                    "RESOURCE_REALLOCATION": "资源隔离与重新调度",
+                    "MANUAL_REVIEW": "人工安全复核",
+                }
+                recovery_status_labels = {
+                    "PLANNED": "已规划",
+                    "RUNNING": "恢复中",
+                    "PAUSED": "已暂停",
+                    "SUCCEEDED": "恢复成功",
+                    "FAILED": "恢复失败",
+                    "MANUAL_REVIEW": "等待人工处理",
+                }
+                for item in state.get("recoveries", []):
+                    if isinstance(item, dict):
+                        recovery_rows.append(
+                            [
+                                item.get("recovery_id"),
+                                strategy_labels.get(str(item.get("strategy", "")), item.get("strategy")),
+                                recovery_status_labels.get(str(item.get("status", "")), item.get("status")),
+                                f"{item.get('retry_count', 0)}/{item.get('retry_limit', 0)}",
+                                " → ".join(
+                                    task_type_label_zh(step.get("description", ""))
+                                    for step in item.get("steps", [])
+                                    if isinstance(step, dict)
+                                ),
+                                item.get("message", ""),
+                            ]
+                        )
+                self._fill_table(self.recovery_table, recovery_rows)
+                experiment = state.get("experiment_metrics", {})
+                if experiment:
+                    self.metrics_text.setText(
+                        f"Makespan {float(experiment.get('makespan', 0.0)):.2f}s | "
+                        f"吞吐 {float(experiment.get('throughput_per_sim_second', 0.0)):.4f}/s | "
+                        f"平均利用率 {100*float(experiment.get('average_robot_utilization', 0.0)):.1f}% | "
+                        f"恢复率 {100*float(experiment.get('recovery_rate', 0.0)):.1f}%"
+                    )
             except Exception as exc:
                 self.result.setText(f"controller unavailable: {exc}")
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     panel = ControlPanel()
-    panel.resize(1100, 700)
+    panel.resize(1300, 850)
     panel.show()
     camera = CameraWindow()
     camera.resize(760, 620)

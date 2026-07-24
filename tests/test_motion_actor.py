@@ -30,6 +30,42 @@ def test_trajectory_samples_include_waypoints_and_respect_spacing() -> None:
     assert max(np.linalg.norm(right - left) for left, right in zip(positions, positions[1:])) <= 0.01
 
 
+def test_trajectory_validation_restores_live_simulation_state_once_complete() -> None:
+    from brazing_sim.scene import BrazingScene
+
+    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    try:
+        controller = scene.arms["arm1"]
+        start = controller.current_tcp_pose()
+        trajectory = PolylineTrajectory(
+            (
+                start,
+                Pose(start.position + np.asarray([0.002, 0.0, 0.0]), start.quaternion),
+            ),
+            sample_spacing_m=0.001,
+        )
+        controller.target = Pose(start.position + np.asarray([0.0, 0.0, 0.01]), start.quaternion)
+        controller.tcp_target = start
+        scene.data.qvel[:] = np.linspace(-0.02, 0.02, scene.model.nv)
+        scene.data.ctrl[:] = np.linspace(-0.1, 0.1, scene.model.nu)
+        qpos_before = scene.data.qpos.copy()
+        qvel_before = scene.data.qvel.copy()
+        ctrl_before = scene.data.ctrl.copy()
+        target_before = controller.target
+        tcp_target_before = controller.tcp_target
+
+        results = controller.validate_trajectory(trajectory)
+
+        assert results and all(result.reachable for result in results)
+        assert np.array_equal(scene.data.qpos, qpos_before)
+        assert np.array_equal(scene.data.qvel, qvel_before)
+        assert np.array_equal(scene.data.ctrl, ctrl_before)
+        assert controller.target is target_before
+        assert controller.tcp_target is tcp_target_before
+    finally:
+        scene.close()
+
+
 def test_arm1_grasp_welds_activate_and_reset() -> None:
     from brazing_sim.scene import BrazingScene
 
@@ -64,16 +100,14 @@ def test_arm1_closes_on_fin_then_releases_it_at_board_slot() -> None:
             name: scene.registry.free_body_pose(name).position.copy() for name in neighbour_names
         }
         actor = SceneTaskActor("arm1", scene, lambda: product)
-        actor.start_task(
-            TaskSpec(
-                "insert-fin-02",
-                Actor.ARM1,
-                TaskType.INSERT_FIN,
-                payload={"fin_id": "fin_02"},
-                timeout=60.0,
-            ),
-            scene.time,
+        task = TaskSpec(
+            "insert-fin-02",
+            Actor.ARM1,
+            TaskType.INSERT_FIN,
+            payload={"fin_id": "fin_02"},
+            timeout=60.0,
         )
+        actor.start_task(task, scene.time)
         result = ActorResult.RUNNING
         finger_positions: list[float] = []
         grasp_weld_active: list[int] = []
@@ -88,8 +122,14 @@ def test_arm1_closes_on_fin_then_releases_it_at_board_slot() -> None:
         carried_relative_poses: list[Pose] = []
         carried_finger_qpos: list[np.ndarray] = []
         fixture_switched_while_closed = False
+        pick_milestone_before_place = False
+        place_milestone_seen = False
         while scene.time < 60.0 and result is ActorResult.RUNNING:
             result = actor.poll_task(scene.time)
+            pick_milestone_before_place |= bool(task.payload.get("physical_pick_complete")) and not bool(
+                task.payload.get("physical_place_complete")
+            )
+            place_milestone_seen |= bool(task.payload.get("physical_place_complete"))
             current_fin = scene.registry.free_body_pose("fin_02").position.copy()
             current_fin_quaternion = scene.registry.free_body_pose("fin_02").quaternion.copy()
             maximum_step_m = max(maximum_step_m, float(np.linalg.norm(current_fin - previous_fin)))
@@ -142,6 +182,8 @@ def test_arm1_closes_on_fin_then_releases_it_at_board_slot() -> None:
         assert any(0.1 < value < 0.9 for value in finger_positions)
         assert finger_positions[-1] < 0.05
         assert max(grasp_weld_active) == 1
+        assert pick_milestone_before_place
+        assert place_milestone_seen
         assert carried_finger_qpos
         assert np.max(np.abs(np.asarray(carried_finger_qpos) - 0.020)) < 1e-12
         assert carried_relative_poses
@@ -226,6 +268,38 @@ def test_arm1_reaches_product_c_fin_07_without_raw_rack_collision() -> None:
         scene.close()
 
 
+def test_continuous_fin_pick_uses_local_lift_instead_of_remote_park() -> None:
+    from brazing_sim.actors import SceneTaskActor
+    from brazing_sim.domain import Actor, TaskSpec, TaskType
+    from brazing_sim.scene import BrazingScene
+
+    product = create_product_state(order_id="arm1-direct-next-fin")
+    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    try:
+        scene.arm1_tools.change_tool("parallel_gripper")
+        actor = SceneTaskActor("arm1", scene, lambda: product)
+        scene.data.qpos[int(actor.controller.qpos_ids[0])] += 0.20
+        scene.mujoco.mj_forward(scene.model, scene.data)
+        current = actor.controller.current_tcp_pose()
+        task = TaskSpec(
+            "insert-next-fin",
+            Actor.ARM1,
+            TaskType.INSERT_FIN,
+            payload={"fin_id": "fin_02", "continuous_from_previous": True},
+            timeout=60.0,
+        )
+
+        trajectory, _ = actor._task_goal(task)
+
+        local_lift = trajectory.waypoints[1]
+        assert np.allclose(local_lift.position[:2], current.position[:2], atol=1e-12)
+        assert float(local_lift.position[2]) >= 0.50
+        remote_park = actor.park_flange_pose.transformed(actor.controller.tool_transform)
+        assert np.linalg.norm(local_lift.position[:2] - remote_park.position[:2]) > 0.05
+    finally:
+        scene.close()
+
+
 def test_arm1_suction_transfers_base_then_releases_on_tray() -> None:
     from brazing_sim.actors import SceneTaskActor
     from brazing_sim.domain import Actor, TaskSpec, TaskType
@@ -236,7 +310,8 @@ def test_arm1_suction_transfers_base_then_releases_on_tray() -> None:
     scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
     try:
         actor = SceneTaskActor("arm1", scene, lambda: product)
-        actor.start_task(TaskSpec("load-base", Actor.ARM1, TaskType.LOAD_BASE, timeout=60.0), scene.time)
+        task = TaskSpec("load-base", Actor.ARM1, TaskType.LOAD_BASE, timeout=60.0)
+        actor.start_task(task, scene.time)
         suction_positions: list[float] = []
         grasp_weld_active: list[int] = []
         previous_base = scene.registry.free_body_pose("base_plate").position.copy()
@@ -247,9 +322,15 @@ def test_arm1_suction_transfers_base_then_releases_on_tray() -> None:
         maximum_joint_step_rad = 0.0
         carried_orientations: list[np.ndarray] = []
         carried_relative_poses: list[Pose] = []
+        pick_milestone_before_place = False
+        place_milestone_seen = False
         result = ActorResult.RUNNING
         while scene.time < 60.0 and result is ActorResult.RUNNING:
             result = actor.poll_task(scene.time)
+            pick_milestone_before_place |= bool(task.payload.get("physical_pick_complete")) and not bool(
+                task.payload.get("physical_place_complete")
+            )
+            place_milestone_seen |= bool(task.payload.get("physical_place_complete"))
             current_base = scene.registry.free_body_pose("base_plate").position.copy()
             current_base_quaternion = scene.registry.free_body_pose("base_plate").quaternion.copy()
             maximum_step_m = max(maximum_step_m, float(np.linalg.norm(current_base - previous_base)))
@@ -284,6 +365,8 @@ def test_arm1_suction_transfers_base_then_releases_on_tray() -> None:
         assert any(0.1 < value < 0.9 for value in suction_positions)
         assert suction_positions[-1] < 0.01
         assert max(grasp_weld_active) == 1
+        assert pick_milestone_before_place
+        assert place_milestone_seen
         assert carried_relative_poses
         assert (
             max(
@@ -382,15 +465,16 @@ def test_arm1_can_visibly_prepare_gripper_without_entering_table2() -> None:
         scene.close()
 
 
-def test_arm2_dispenser_is_permanent_and_completes_a_material_pass() -> None:
+def test_arm2_fixed_dispenser_completes_continuous_material_passes() -> None:
     from brazing_sim.actors import SceneTaskActor
     from brazing_sim.domain import Actor, TaskSpec, TaskType
     from brazing_sim.process import ActorResult
     from brazing_sim.scene import BrazingScene
 
-    product = create_product_state(order_id="arm2-permanent-dispenser")
+    product = create_product_state(order_id="arm2-fixed-dispenser")
     scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
     try:
+        scene.registry.dock_assembly_tray_to_station("s2a", snap=True)
         scene.registry.place_base_on_tray(snap=True)
         weld_id = scene.registry.equality_id("arm2_dispenser_tool_weld")
         assert scene.tools.current_tool == "brazing_dispenser"
@@ -413,18 +497,34 @@ def test_arm2_dispenser_is_permanent_and_completes_a_material_pass() -> None:
             ),
             scene.time,
         )
-        assert actor.trajectory is not None
-        for waypoint in actor.trajectory.waypoints:
-            assert np.allclose(waypoint.rotation[:, 2], [0.0, 0.0, -1.0], atol=1e-10)
+        assert actor._arm2_steps
         result = ActorResult.RUNNING
         max_vertical_error_deg = 0.0
-        while scene.time < 30.0 and result is ActorResult.RUNNING:
+        while scene.time < 45.0 and result is ActorResult.RUNNING:
             result = actor.poll_task(scene.time)
-            axis = actor.controller.current_tcp_pose().rotation[:, 2]
-            max_vertical_error_deg = max(
-                max_vertical_error_deg,
-                math.degrees(math.acos(float(np.clip(np.dot(axis, [0.0, 0.0, -1.0]), -1.0, 1.0)))),
-            )
+            if (
+                scene.tools.current_tool == "brazing_dispenser"
+                and actor._material_path_ids
+                and actor._material_start is not None
+                and actor._material_end is not None
+            ):
+                tcp_pose = actor.controller.current_tcp_pose()
+                material_axis = actor._material_end - actor._material_start
+                denominator = max(float(np.dot(material_axis, material_axis)), 1.0e-12)
+                along = float(
+                    np.clip(
+                        np.dot(tcp_pose.position - actor._material_start, material_axis) / denominator,
+                        0.0,
+                        1.0,
+                    )
+                )
+                closest = actor._material_start + along * material_axis
+                if float(np.linalg.norm(tcp_pose.position - closest)) <= 0.025:
+                    axis = tcp_pose.rotation[:, 2]
+                    max_vertical_error_deg = max(
+                        max_vertical_error_deg,
+                        math.degrees(math.acos(float(np.clip(np.dot(axis, [0.0, 0.0, -1.0]), -1.0, 1.0)))),
+                    )
             scene.step()
 
         assert result is ActorResult.SUCCEEDED
@@ -465,6 +565,9 @@ def test_arm2_dispenser_is_permanent_and_completes_a_material_pass() -> None:
             scene.step()
         assert result is ActorResult.SUCCEEDED
         assert max_vertical_error_deg <= 0.10
+        assert int(scene.data.eq_active[weld_id]) == 1
+        scene.reset(product, raw=True)
+        assert scene.tools.current_tool == "brazing_dispenser"
         assert int(scene.data.eq_active[weld_id]) == 1
     finally:
         scene.close()

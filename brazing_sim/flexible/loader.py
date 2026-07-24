@@ -181,7 +181,7 @@ def load_product(path: str | Path) -> ProductConfig:
         "material_speed_m_s",
         "recipe",
     }
-    _strict_keys(source, data, field="", required=fields)
+    _strict_keys(source, data, field="", required=fields, optional={"material_system"})
     start = data["start_offset_y_m"]
     if start is not None and (isinstance(start, bool) or not isinstance(start, (int, float))):
         raise FlexibleConfigError(source, "start_offset_y_m", "必须是数值或null")
@@ -215,6 +215,7 @@ def load_product(path: str | Path) -> ProductConfig:
         nozzle_tip_height_m=_number(source, data, "nozzle_tip_height_m"),
         material_speed_m_s=_number(source, data, "material_speed_m_s"),
         recipe=_value(source, data, "recipe", str),
+        material_system=str(data.get("material_system", "demo_brazing_material")),
     )
     if product.schema_version != 1:
         raise FlexibleConfigError(source, "schema_version", "当前仅支持版本1")

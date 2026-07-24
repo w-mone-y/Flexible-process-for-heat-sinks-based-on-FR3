@@ -22,6 +22,7 @@ from .config import (
     make_order_spec,
 )
 from .domain import OrderSpec
+from .layout import SHALLOW_U_LAYOUT
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,11 +251,8 @@ def _check_comb_geometry(report: PreflightReport, model: Any, mujoco: Any, spec:
             _find(model, mujoco, mujoco.mjtObj.mjOBJ_GEOM, f"{end}_comb_{side}_support")
             for side in ("left", "right")
         )
-        beams = tuple(
-            _find(model, mujoco, mujoco.mjtObj.mjOBJ_GEOM, name)
-            for name in (f"{end}_comb_frame_beam", f"{end}_comb_frame_beam_right")
-        )
-        pedestal_ids[end] = beams
+        top_rail = _find(model, mujoco, mujoco.mjtObj.mjOBJ_GEOM, f"{end}_comb_top_rail")
+        pedestal_ids[end] = (top_rail,)
         for support in supports:
             if support < 0:
                 continue
@@ -271,12 +269,12 @@ def _check_comb_geometry(report: PreflightReport, model: Any, mujoco: Any, spec:
                     )
                 )
                 break
-        if end in frame_x and beams[0] >= 0:
-            pedestal_world_x = frame_x[end] + float(model.geom_pos[beams[0], 0])
+        if end in frame_x and top_rail >= 0:
+            pedestal_world_x = frame_x[end] + float(model.geom_pos[top_rail, 0])
             if sign * pedestal_world_x <= base_half_length:
                 report.add(
                     PreflightIssue(
-                        object_name=f"{end}_comb_frame_beam",
+                        object_name=f"{end}_comb_top_rail",
                         object_type="梳齿固定基座",
                         module=f"{spec.preset} 型{end}梳齿",
                         message="梳齿基座侵入基板区域，而不是固定在托盘外侧。",
@@ -387,7 +385,7 @@ def _check_comb_geometry(report: PreflightReport, model: Any, mujoco: Any, spec:
                             module=f"{spec.preset} 型{end}梳齿",
                             message="梳齿与托盘上的固定基座断开，视觉上会悬空。",
                             xml_file=report.xml_file,
-                            suggestion="延长梳齿，使其与 frame beam 在 X/Y/Z 三向实体重叠。",
+                            suggestion="使梳齿与低矮顶轨在 X/Y/Z 三向实体重叠。",
                         )
                     )
         if set(centres) == {"front", "rear"} and abs(centres["front"] - centres["rear"]) > 1e-6:
@@ -488,7 +486,12 @@ def _check_raw_material_clearance(
         fin_low, fin_high = _box_aabb(centre, rotation, fin_half_size)
         for rack_geom_name, rack_low, rack_high in rack_boxes:
             axis_gaps = np.maximum(rack_low - fin_high, fin_low - rack_high)
-            clearance = float(np.max(axis_gaps))
+            # Treat the tool-rack footprint as a keep-out column.  A blank
+            # parked directly above the column can still fall or be swept
+            # through it during pickup, so vertical separation must not hide
+            # an XY intrusion.  Euclidean planar AABB clearance also handles
+            # diagonal corner spacing correctly.
+            clearance = float(np.linalg.norm(np.maximum(axis_gaps[:2], 0.0)))
             if clearance >= required_clearance:
                 continue
             report.add(
@@ -505,6 +508,126 @@ def _check_raw_material_clearance(
                 )
             )
             break
+
+        # Validate against the complete finished-pallet sweep, not just the
+        # narrower black belt that happens to be visible in the viewer.
+        lane_left = SHALLOW_U_LAYOUT.output_lane_x - SHALLOW_U_LAYOUT.output_pallet_half_width_m
+        lane_clearance = lane_left - float(fin_high[0])
+        if lane_clearance < SHALLOW_U_LAYOUT.raw_material_clearance_m:
+            report.add(
+                PreflightIssue(
+                    object_name=f"{site_name}/finished_output_lane",
+                    object_type="原料区与成品物流净距",
+                    module=f"{spec.preset} 型浅U布局",
+                    message=(
+                        f"翅片原料位与成品托盘扫掠区净距仅 {lane_clearance * 1000.0:.1f} mm，"
+                        f"低于要求的 {SHALLOW_U_LAYOUT.raw_material_clearance_m * 1000.0:.1f} mm。"
+                    ),
+                    xml_file=report.xml_file,
+                    suggestion="请将翅片料仓移到成品输送中心线左侧，禁止原料与成品物流重叠。",
+                )
+            )
+
+
+def _check_arm3_camera_mount(
+    report: PreflightReport,
+    scene: Any | None,
+) -> None:
+    """Require the Arm3 camera root to stay on the link7 centre axis."""
+
+    if scene is None or not hasattr(scene, "data"):
+        return
+    link = scene.data.body("arm3_fr3_link7")
+    rig = scene.data.body("arm3_camera_rig")
+    rotation = np.asarray(link.xmat, dtype=float).reshape(3, 3)
+    local = rotation.T @ (np.asarray(rig.xpos, dtype=float) - np.asarray(link.xpos, dtype=float))
+    lateral_error = float(np.linalg.norm(local[:2]))
+    if lateral_error > 1.0e-6 or abs(float(local[2]) - 0.107) > 1.0e-6:
+        report.add(
+            PreflightIssue(
+                object_name="arm3_camera_rig/arm3_fr3_link7",
+                object_type="末端相机安装",
+                module="Arm3 同轴腕部相机",
+                message=(
+                    f"相机根部相对法兰轴线偏移 {lateral_error * 1000.0:.3f} mm，"
+                    f"轴向安装距离为 {float(local[2]) * 1000.0:.3f} mm。"
+                ),
+                xml_file=report.xml_file,
+                suggestion="相机根部必须安装在link7局部(0, 0, 0.107)处。",
+            )
+        )
+
+
+def _check_shallow_u_station_layout(
+    report: PreflightReport,
+    scene: Any | None,
+) -> None:
+    """Verify non-overlapping stations and their authoritative coordinates."""
+
+    if scene is None or not hasattr(scene, "data"):
+        return
+    expected = {
+        "station_s1_anchor": SHALLOW_U_LAYOUT.station_s1_xy,
+        "station_s2a_anchor": SHALLOW_U_LAYOUT.station_s2a_xy,
+        "station_s2b_anchor": SHALLOW_U_LAYOUT.station_s2b_xy,
+        "station_s3_anchor": SHALLOW_U_LAYOUT.station_s3_xy,
+        "station_rack_infeed_anchor": SHALLOW_U_LAYOUT.rack_infeed_xy,
+    }
+    for body_name, xy in expected.items():
+        actual = np.asarray(scene.data.body(body_name).xpos[:2], dtype=float)
+        error = float(np.linalg.norm(actual - np.asarray(xy, dtype=float)))
+        if error <= 1.0e-6:
+            continue
+        report.add(
+            PreflightIssue(
+                object_name=body_name,
+                object_type="异步工位坐标",
+                module="浅U单向物流",
+                message=f"工位偏离统一布局配置 {error * 1000.0:.2f} mm。",
+                xml_file=report.xml_file,
+                suggestion="请同步修改MJCF工位anchor与brazing_sim.layout。",
+            )
+        )
+
+    table_pairs = (
+        ("s1_table", "s2a_table"),
+        ("s2a_table", "s2b_table"),
+        ("s2b_table", "s3_table"),
+    )
+    minimum_gap = 0.025
+    for left_name, right_name in table_pairs:
+        left_id = int(scene.model.geom(left_name).id)
+        right_id = int(scene.model.geom(right_name).id)
+        left_low, left_high = _box_aabb(
+            np.asarray(scene.data.geom_xpos[left_id], dtype=float),
+            np.asarray(scene.data.geom_xmat[left_id], dtype=float).reshape(3, 3),
+            np.asarray(scene.model.geom_size[left_id, :3], dtype=float),
+        )
+        right_low, right_high = _box_aabb(
+            np.asarray(scene.data.geom_xpos[right_id], dtype=float),
+            np.asarray(scene.data.geom_xmat[right_id], dtype=float).reshape(3, 3),
+            np.asarray(scene.model.geom_size[right_id, :3], dtype=float),
+        )
+        horizontal_gaps = np.maximum(
+            right_low[:2] - left_high[:2],
+            left_low[:2] - right_high[:2],
+        )
+        clearance = float(np.max(horizontal_gaps))
+        if clearance >= minimum_gap:
+            continue
+        report.add(
+            PreflightIssue(
+                object_name=f"{left_name}/{right_name}",
+                object_type="相邻工位净距",
+                module="浅U单向物流",
+                message=(
+                    f"相邻工位水平净距仅 {clearance * 1000.0:.1f} mm，"
+                    f"低于要求的 {minimum_gap * 1000.0:.1f} mm。"
+                ),
+                xml_file=report.xml_file,
+                suggestion="扩大工位中心距并同步重算对应slide joint轴向与行程。",
+            )
+        )
 
 
 def _check_nozzles(
@@ -725,8 +848,7 @@ def preflight_check(
             "arm2_dual_brazing_dispenser_tool",
             "batch_transfer_base",
             "batch_outfeed_carriage",
-            "batch_lift_carriage",
-            "batch_pusher_carriage",
+            "batch_output_carriage",
             "batch_tray_01",
             "batch_tray_02",
             "batch_tray_03",
@@ -736,6 +858,9 @@ def preflight_check(
             "batch_output_slot_01",
             "batch_output_slot_02",
             "batch_output_slot_03",
+            "finished_output_conveyor",
+            "finished_output_box",
+            "finished_output_gate",
         ),
         type_label="body",
         module="基础工装结构",
@@ -767,9 +892,18 @@ def preflight_check(
             "batch_rack_0_lock_pin",
             "batch_rack_1_lock_pin",
             "batch_rack_2_lock_pin",
-            "batch_output_slot_01_deck",
-            "batch_output_slot_02_deck",
-            "batch_output_slot_03_deck",
+            "finished_output_belt",
+            "finished_output_gate_panel",
+            "finished_output_sign",
+            *(
+                f"batch_tray_{unit:02d}_{part}"
+                for unit in range(1, 4)
+                for part in (
+                    "template_plate",
+                    "front_comb_base",
+                    "rear_comb_base",
+                )
+            ),
             *module_rails,
         ),
         type_label="geom",
@@ -802,6 +936,7 @@ def preflight_check(
             "batch_output_slot_01_site",
             "batch_output_slot_02_site",
             "batch_output_slot_03_site",
+            "finished_output_inside_site",
         ),
         type_label="site",
         module="产品槽位、压紧与双喷嘴",
@@ -815,11 +950,10 @@ def preflight_check(
             "fixture_press_slide",
             "fixture_press_floating_joint",
             "batch_outfeed_joint",
-            "batch_lift_joint",
-            "batch_pusher_joint",
             "batch_output_joint",
             "batch_tray_02_index_joint",
             "batch_tray_03_index_joint",
+            "finished_output_gate_joint",
         ),
         type_label="joint",
         module="上压板与三层移载机构",
@@ -832,11 +966,10 @@ def preflight_check(
         (
             "fixture_press_actuator",
             "batch_outfeed_actuator",
-            "batch_lift_actuator",
-            "batch_pusher_actuator",
             "batch_output_actuator",
             "batch_tray_02_index_actuator",
             "batch_tray_03_index_actuator",
+            "finished_output_gate_actuator",
         ),
         type_label="actuator",
         module="上压板与三层移载机构",
@@ -850,10 +983,9 @@ def preflight_check(
             "fixture_press_touch_sensor",
             "fixture_press_jointpos_sensor",
             "fixture_press_force_sensor",
-            "batch_lift_position_sensor",
-            "batch_pusher_position_sensor",
             "batch_output_position_sensor",
             "batch_outfeed_position_sensor",
+            "finished_output_gate_position_sensor",
         ),
         type_label="sensor",
         module="上压板与三层移载机构",
@@ -902,6 +1034,8 @@ def preflight_check(
         _check_base_shape(report, model, mujoco, specs[0])
         _check_current_sites(report, model, mujoco, specs[0])
         _check_raw_material_clearance(report, scene, model, mujoco, specs[0])
+        _check_arm3_camera_mount(report, scene)
+        _check_shallow_u_station_layout(report, scene)
 
     # Ensure the press axis and configured travel agree with the control
     # model.  This catches a renamed joint that still happens to exist with a

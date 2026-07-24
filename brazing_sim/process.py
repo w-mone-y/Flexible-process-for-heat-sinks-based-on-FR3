@@ -81,7 +81,14 @@ class FaultSpec:
     applied: bool = False
 
     def __post_init__(self) -> None:
-        if self.fault_type not in {"fin_pose", "brazing_gap", "furnace_profile"}:
+        if self.fault_type not in {
+            "fin_pose",
+            "fin_pick",
+            "fin_insert",
+            "brazing_gap",
+            "brazing_deviation",
+            "furnace_profile",
+        }:
             raise ValueError(f"unsupported fault type: {self.fault_type}")
         if self.severity not in {"recoverable", "severe"}:
             raise ValueError("fault severity must be recoverable or severe")
@@ -251,6 +258,10 @@ class ProcessCoordinator:
         self.pause_after_stage: OrderStage | None = None
         self.status = "idle"
         self.process_plan: ProcessPlan | None = None
+        # Optional physical-cell interlock.  The application uses this to
+        # hold a stage at READY while its independent transfer moves the product
+        # to the station required by that stage.
+        self.stage_gate: Callable[[OrderStage, float], bool] | None = None
 
     @property
     def running(self) -> bool:
@@ -426,10 +437,12 @@ class ProcessCoordinator:
         fault = (
             fault_type if isinstance(fault_type, FaultSpec) else FaultSpec(str(fault_type), target, severity)
         )
-        if fault.fault_type == "fin_pose" and not fault.target.startswith("fin_"):
-            raise ValueError("fin_pose target must be fin_XX")
-        if fault.fault_type == "brazing_gap" and not fault.target.startswith(("slot_", "fin_")):
-            raise ValueError("brazing_gap target must be slot_XX_left/right")
+        if fault.fault_type in {"fin_pose", "fin_pick", "fin_insert"} and not fault.target.startswith("fin_"):
+            raise ValueError("fin fault target must be fin_XX")
+        if fault.fault_type in {"brazing_gap", "brazing_deviation"} and not fault.target.startswith(
+            ("slot_", "fin_")
+        ):
+            raise ValueError("brazing fault target must be slot_XX_left/right")
         self.faults.append(fault)
         return fault
 
@@ -816,17 +829,28 @@ class ProcessCoordinator:
             self.product.fail(f"{task.task_id}: {reason}", now)
         self._event(now, "task_failed", reason, task)
 
-    def _apply_armed_fault(self, kind: str) -> None:
+    def _apply_armed_fault(self, kind: str, *, target_id: str | None = None) -> None:
         assert self.product is not None
         for fault in self.faults:
             if not fault.armed or fault.applied or fault.fault_type != kind:
                 continue
-            if kind == "fin_pose":
+            if kind in {"fin_pose", "fin_pick", "fin_insert"}:
+                if target_id is not None and fault.target != target_id:
+                    continue
                 fin = next((item for item in self.product.active_fins if item.fin_id == fault.target), None)
                 if fin is None:
                     raise ValueError(f"unknown active fin: {fault.target}")
-                offset = 0.006 if fault.severity == "recoverable" else 0.012
-                angle = 6.0 if fault.severity == "recoverable" else 12.0
+                if kind == "fin_pick":
+                    offset = 0.050 if fault.severity == "recoverable" else 0.090
+                    angle = 0.0
+                    fin.root_gap_m = 0.020
+                elif kind == "fin_insert":
+                    offset = 0.009 if fault.severity == "recoverable" else 0.016
+                    angle = 10.0 if fault.severity == "recoverable" else 18.0
+                    fin.root_gap_m = 0.008 if fault.severity == "recoverable" else 0.016
+                else:
+                    offset = 0.006 if fault.severity == "recoverable" else 0.012
+                    angle = 6.0 if fault.severity == "recoverable" else 12.0
                 fin.position_error_m = offset
                 fin.verticality_error_deg = angle
                 fin.actual_position = (
@@ -840,11 +864,23 @@ class ProcessCoordinator:
                     # Compatibility with the original terminal command while
                     # product paths now use slot_XX_left/right identifiers.
                     path_target = f"slot_{path_target.removeprefix('fin_')}"
+                if target_id is not None and path_target != target_id:
+                    continue
                 path = next((item for item in self.product.active_paths if item.path_id == path_target), None)
                 if path is None:
                     raise ValueError(f"unknown active path: {path_target}")
                 path.coverage_ratio = 0.70 if fault.severity == "recoverable" else 0.20
                 path.longest_gap_m = 0.020 if fault.severity == "recoverable" else 0.100
+            elif kind == "brazing_deviation":
+                path_target = fault.target
+                if path_target.startswith("fin_"):
+                    path_target = f"slot_{path_target.removeprefix('fin_')}"
+                if target_id is not None and path_target != target_id:
+                    continue
+                path = next((item for item in self.product.active_paths if item.path_id == path_target), None)
+                if path is None:
+                    raise ValueError(f"unknown active path: {path_target}")
+                path.lateral_error_m = 0.005 if fault.severity == "recoverable" else 0.012
             fault.applied = True
             fault.armed = False
 
@@ -887,8 +923,13 @@ class ProcessCoordinator:
             fin.pitch_error_m = 0.0
             self.product.fixture.temporary_fin_welds.add(fin_id)
             self.product.fixture.status = FixtureStatus.TEMPORARY
+            if kind is TaskType.INSERT_FIN:
+                # Assembly faults originate at the corresponding Arm1 action.
+                # Arm3 later observes this already-existing physical defect;
+                # inspection must never be the moment that creates it.
+                for fault_kind in ("fin_pose", "fin_pick", "fin_insert"):
+                    self._apply_armed_fault(fault_kind, target_id=fin_id)
         elif kind is TaskType.PRE_INSPECT:
-            self._apply_armed_fault("fin_pose")
             result = self.quality.pre_inspection(self.product, now)
             self.product.fixture.fins_passed = result.passed
             if not result.passed:
@@ -916,8 +957,12 @@ class ProcessCoordinator:
                 path.trajectory_max_error_m = float(
                     max_error_by_path.get(path_id, task.payload.get("trajectory_max_error_m", 0.0))
                 )
+                if kind is TaskType.APPLY_MATERIAL:
+                    # Material faults originate while Arm2 deposits this bead
+                    # and remain visible throughout the subsequent Arm3 scan.
+                    self._apply_armed_fault("brazing_gap", target_id=path_id)
+                    self._apply_armed_fault("brazing_deviation", target_id=path_id)
         elif kind is TaskType.MATERIAL_INSPECT:
-            self._apply_armed_fault("brazing_gap")
             result = self.quality.material_inspection(self.product, now)
             self.product.fixture.material_passed = result.passed
             if result.passed:
@@ -1041,6 +1086,14 @@ class ProcessCoordinator:
             self._poll_task(timestamp)
             if self.product.terminal:
                 return self.product
+        if (
+            self.active_task is None
+            and self.tasks
+            and self.stage_gate is not None
+            and not self.stage_gate(self.product.stage, timestamp)
+        ):
+            self.status = f"waiting for async transfer to {self.product.stage.value}"
+            return self.product
         if self.active_task is None and self.tasks:
             task = self.tasks[0]
             actor_key = task.actor.value if isinstance(task.actor, Actor) else str(task.actor)

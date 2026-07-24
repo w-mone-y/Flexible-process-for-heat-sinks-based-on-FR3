@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Callable
 
 from .domain import ProductState, TaskSpec, TaskStatus, TaskType
+from .profiles import quintic_time_scaling
 
 
 class ConveyorPhase(str, Enum):
@@ -56,17 +57,12 @@ class ConveyorTaskActor:
             raise RuntimeError("当前没有活动订单，传送带无法运行")
         return product
 
-    @staticmethod
-    def _smoothstep(fraction: float) -> float:
-        amount = min(1.0, max(0.0, float(fraction)))
-        return amount * amount * (3.0 - 2.0 * amount)
-
     def _validate_start(self, kind: TaskType, product: ProductState) -> None:
         registry = self.scene.registry
-        if not bool(self.scene.data.eq_active[registry.equality_id("tray_fixture_weld")]):
-            raise RuntimeError("传送前托盘必须刚性连接到传送滑台")
         if not product.fixture.locked or not product.fixture.press_force_held:
             raise RuntimeError("传送带启动前必须完成横梁压紧和夹具锁定")
+        if not bool(self.scene.data.eq_active[registry.equality_id("tray_fixture_weld")]):
+            raise RuntimeError("传送前托盘必须刚性连接到传送滑台")
         if not all(fin.inserted for fin in product.active_fins):
             raise RuntimeError("所有活动翅片安装完成后才能启动传送带")
         if not product.furnace.door_open:
@@ -117,7 +113,7 @@ class ConveyorTaskActor:
         registry = self.scene.registry
         if not self.fast:
             elapsed = max(0.0, timestamp - self._started_at)
-            progress = self._smoothstep(elapsed / self._duration_s)
+            progress = quintic_time_scaling(elapsed / self._duration_s)
             command = self._start_m + (self._target_m - self._start_m) * progress
             registry.set_conveyor_target(command)
 

@@ -46,6 +46,11 @@ from .flexible import (
     validate_process_plan,
 )
 from .preflight import PreflightCheckError, PreflightReport, preflight_check
+from .events import EventBus, EventType, SystemEvent
+from .manufacturing_runtime import ManufacturingRuntime
+from .planning import ManufacturingTask
+from .planning import TaskStatus as ManufacturingTaskStatus
+from .planning import TaskType as ManufacturingTaskType
 
 __all__ = [
     "A_ORDER_SPEC",
@@ -63,8 +68,14 @@ __all__ = [
     "FixtureTaskActor",
     "FlexibleConfigError",
     "FlexiblePreflightError",
+    "EventBus",
+    "EventType",
     "FinTarget",
     "OrderConfig",
+    "ManufacturingRuntime",
+    "ManufacturingTask",
+    "ManufacturingTaskStatus",
+    "ManufacturingTaskType",
     "OrderSpec",
     "OrderStage",
     "PreflightCheckError",
@@ -80,6 +91,7 @@ __all__ = [
     "RackAssignment",
     "RackConfig",
     "TaskSpec",
+    "SystemEvent",
     "TransferPhase",
     "TransferState",
     "TrayUnitPhase",
@@ -94,4 +106,4 @@ __all__ = [
     "validate_process_plan",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

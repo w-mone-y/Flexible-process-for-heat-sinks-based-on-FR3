@@ -30,6 +30,12 @@
     <default class="visual">
       <geom contype="0" conaffinity="0" density="0" group="1"/>
     </default>
+    <!-- Replaceable modules are constrained by ownership welds and lock
+         interlocks.  Their detailed geometry is visual-only so tightly packed
+         rack copies cannot inject artificial impulses into the home scene. -->
+    <default class="changeover_component">
+      <geom contype="0" conaffinity="0"/>
+    </default>
   </default>
 
   <asset>
@@ -38,6 +44,9 @@
              rgb1="0.18 0.22 0.26" rgb2="0.12 0.15 0.18" mark="edge" markrgb="0.35 0.38 0.42"/>
     <texture name="worktop_tex" type="2d" builtin="checker" width="128" height="128"
              rgb1="0.30 0.33 0.37" rgb2="0.25 0.28 0.32"/>
+    <texture name="finished_output_sign_tex" type="2d" file="assets/finished_output_sign.png"/>
+    <mesh name="finished_output_sign_mesh" file="assets/finished_output_sign.obj"
+          scale="0.175 0.004 0.050"/>
     <material name="floor_mat" texture="floor_tex" texuniform="true" texrepeat="6 6" reflectance="0.12"/>
     <material name="worktop_mat" texture="worktop_tex" texuniform="true" texrepeat="5 3"
               rgba="0.75 0.77 0.80 1" metallic="0.35" roughness="0.48"/>
@@ -65,6 +74,8 @@
     <material name="hot_mat" rgba="0.90 0.22 0.06 0.40" emission="0.45"/>
     <material name="tool_blue" rgba="0.10 0.38 0.78 1"/>
     <material name="tool_yellow" rgba="0.92 0.67 0.10 1"/>
+    <material name="finished_output_sign_mat" texture="finished_output_sign_tex"
+              rgba="1 1 1 1" emission="0.18" roughness="0.48"/>
   </asset>
 
   <visual>
@@ -72,13 +83,16 @@
     <!-- Balanced real-time profile: the small industrial fasteners still use
          smooth 16-sided silhouettes, while shadow-map and offscreen costs are
          bounded for interactive camera orbiting on integrated GPUs. -->
-    <quality shadowsize="2048" offsamples="2" numslices="16" numstacks="8" numquads="2"/>
+    <!-- Real-time object shadows are intentionally disabled.  The product
+         geometry remains fully lit, while viewer orbiting and high RTF modes
+         no longer pay for a 2048 px shadow-map pass. -->
+    <quality shadowsize="0" offsamples="2" numslices="16" numstacks="8" numquads="2"/>
     <global azimuth="90" elevation="-28"/>
     <rgba haze="0.10 0.14 0.18 1"/>
   </visual>
 
   <worldbody>
-    <light pos="0 0.40 2.2" dir="0 0 -1" directional="true" castshadow="true"
+    <light pos="0 0.40 2.2" dir="0 0 -1" directional="true" castshadow="false"
            diffuse="0.85 0.85 0.82"/>
     <light pos="-1.2 -0.8 1.4" dir="0.5 0.5 -1" castshadow="false"
            diffuse="0.35 0.38 0.45"/>
@@ -89,42 +103,66 @@
     <geom name="floor" type="plane" size="0 0 0.05" material="floor_mat"
           contype="1" conaffinity="3"/>
 
-    <!-- Software-owned shared zones.  Sites remain visual-only. -->
-    <site name="zone_assembly_fixture" type="box" pos="0 0.45 0.185" size="0.29 0.22 0.002"
-          rgba="0.20 0.75 0.95 0.11" group="1"/>
-    <site name="zone_brazing" type="box" pos="0 0.45 0.34" size="0.31 0.24 0.15"
+    <!-- Software-owned zones for the shallow-U asynchronous line. -->
+    <site name="zone_s1_arm1" type="box" pos="-0.48 0 0.225" size="0.25 0.19 0.12"
+          rgba="0.20 0.75 0.95 0.08" group="1"/>
+    <site name="zone_s2a_arm2" type="box" pos="-0.30 0.40 0.30" size="0.25 0.19 0.20"
+          rgba="0.95 0.58 0.12 0.07" group="1"/>
+    <site name="zone_s2b_arm3" type="box" pos="0.30 0.40 0.30" size="0.25 0.19 0.20"
+          rgba="0.25 0.90 0.40 0.07" group="1"/>
+    <site name="zone_s3_shared" type="box" pos="0.48 0 0.30" size="0.25 0.19 0.20"
+          rgba="0.72 0.40 0.96 0.07" group="1"/>
+    <site name="zone_assembly_fixture" type="box" pos="0.48 0 0.185" size="0.25 0.18 0.002"
+          rgba="0.20 0.75 0.95 0.08" group="1"/>
+    <site name="zone_brazing" type="box" pos="-0.30 0.40 0.34" size="0.25 0.18 0.15"
           rgba="0.95 0.58 0.12 0.06" group="1"/>
-    <site name="zone_furnace_mouth" type="box" pos="0 0.845 0.31" size="0.35 0.18 0.18"
+    <site name="zone_furnace_mouth" type="box" pos="1.22 0 0.31" size="0.38 0.20 0.18"
           rgba="0.95 0.28 0.12 0.08" group="1"/>
-    <site name="zone_inspection" type="box" pos="0.60 -0.25 0.30" size="0.23 0.18 0.14"
+    <site name="zone_inspection" type="box" pos="1.65 -0.55 0.30" size="0.25 0.20 0.14"
           rgba="0.25 0.90 0.40 0.07" group="1"/>
 
     <!-- MOCAP goals used by the independent arm controllers. -->
     <body name="arm1_target" mocap="true" pos="-0.35 0.25 0.59" quat="0 0.967157 0.254180 0">
       <geom class="marker" name="arm1_target_marker" type="sphere" size="0.018" rgba="0.95 0.25 0.20 0.35"/>
     </body>
-    <body name="arm2_target" mocap="true" pos="0 0.13 0.59" quat="0 0.923880 0.382683 0">
+    <body name="arm2_target" mocap="true" pos="0.14 0.13 0.59" quat="0 0.923880 0.382683 0">
       <geom class="marker" name="arm2_target_marker" type="sphere" size="0.018" rgba="0.20 0.75 0.95 0.35"/>
     </body>
     <body name="arm3_target" mocap="true" pos="0.35 0.25 0.59" quat="0 0.253983 0.967209 0">
       <geom class="marker" name="arm3_target_marker" type="sphere" size="0.018" rgba="0.25 0.90 0.40 0.35"/>
     </body>
 
-    <!-- Shallow triangular robot layout.  Each frame points toward Table2. -->
-    <frame pos="-0.62 0.10 0" euler="0 0 0.514">
+    <!-- Runtime fault overlays are presentation-only.  They are attached to
+         real scene coordinates by fault_visuals.py and never participate in
+         collision or dynamics. -->
+    <body name="fault_contact_marker" mocap="true" pos="0 0 -2">
+      <geom class="marker" name="fault_contact_marker_geom" type="sphere" size="0.035"
+            rgba="1.0 0.03 0.02 0"/>
+    </body>
+    <body name="fault_tray_ghost" mocap="true" pos="0 0 -2">
+      <geom class="marker" name="fault_tray_ghost_geom" type="box" size="0.230 0.160 0.012"
+            rgba="1.0 0.02 0.40 0"/>
+    </body>
+
+    <!-- Shallow-U robot layout from the asynchronous-line design. -->
+    <!-- Arm1 stays outside the raw-fin magazine's near field.  The earlier
+         +120/-430 mm position put link1 through the middle pickup row and
+         made the low quick-change socket singular. -->
+    <frame pos="0 -0.52 0" euler="0 0 1.57079632679">
       <attach model="fr3_asset" body="base" prefix="arm1_"/>
     </frame>
-    <!-- Arm2 is 30 mm closer to Table2 so its long dispenser can reach every
-         A-preset slot while remaining strictly vertical. -->
-    <frame pos="0 -0.15 0" euler="0 0 1.57079632679">
+    <!-- Shifted toward the S2A/S2B midpoint after sampled IK validation.
+         This preserves the shallow-U concept while making a detected S2B
+         bead gap physically repairable without reversing the pallet. -->
+    <frame pos="-0.32 0.70 0" euler="0 0 -0.8726646260">
       <attach model="fr3_asset" body="base" prefix="arm2_"/>
     </frame>
-    <frame pos="0.62 0.10 0" euler="0 0 2.628">
+    <frame pos="0.45 0.65 0" euler="0 0 -1.9198621772">
       <attach model="fr3_asset" body="base" prefix="arm3_"/>
     </frame>
 
     <!-- Arm1 quick-change rack. Both tools hang downward from their adapters. -->
-    <body name="arm1_tool_rack" pos="-0.49 0.42 0">
+    <body name="arm1_tool_rack" pos="0 -0.18 0">
       <geom class="cell" name="arm1_tool_rack_base" size="0.075 0.14 0.025" pos="0 0 0.025"/>
       <geom class="cell" name="arm1_tool_rack_column" size="0.030 0.025 0.145" pos="0 0.095 0.170"/>
       <geom class="cell" name="arm1_tool_rack_beam" size="0.045 0.12 0.020" pos="0 0 0.315"/>
@@ -143,7 +181,7 @@
     </body>
 
     <!-- Arm1 parallel gripper, initially parked on the quick-change rack. -->
-    <body name="arm1_parallel_gripper" pos="-0.49 0.380 0.295" quat="0 1 0 0" gravcomp="1">
+    <body name="arm1_parallel_gripper" pos="0 -0.220 0.295" quat="0 1 0 0" gravcomp="1">
       <freejoint name="arm1_parallel_gripper_free"/>
       <inertial pos="0 0 0.025" mass="0.28" diaginertia="0.00045 0.00042 0.00018"/>
       <geom name="arm1_gripper_palm" type="box" size="0.025 0.035 0.018" pos="0 0 0.018"
@@ -171,7 +209,7 @@
     </body>
 
     <!-- Arm1 suction tool, initially parked beside the gripper. -->
-    <body name="arm1_suction_tool" pos="-0.49 0.460 0.295" quat="0 1 0 0" gravcomp="1">
+    <body name="arm1_suction_tool" pos="0 -0.140 0.295" quat="0 1 0 0" gravcomp="1">
       <freejoint name="arm1_suction_tool_free"/>
       <inertial pos="0 0 0.035" mass="0.20" diaginertia="0.00028 0.00026 0.00010"/>
       <geom name="arm1_suction_adapter" type="cylinder" size="0.025 0.010" pos="0 0 0.010"
@@ -194,8 +232,11 @@
       <site name="arm1_suction_tcp" pos="0 0 0.090" size="0.005" rgba="0.2 0.9 0.95 0.8"/>
     </body>
 
-    <!-- Arm3 fixed wrist camera. Camera looks along its local -Z. -->
-    <body name="arm3_camera_rig" pos="0.543353 0.143235 0.926" quat="0 0.253983 0.967209 0" gravcomp="1">
+    <!-- Arm3 fixed wrist camera.  Its root is exactly coaxial with link7's
+         attachment site; there is no lateral adapter offset. Camera looks
+         along local -Z, directly below the flange in every wrist pose. -->
+    <body name="arm3_camera_rig" pos="0.344993 0.361496 0.590270"
+          quat="0 0.216634 -0.976253 0" gravcomp="1">
       <freejoint name="arm3_camera_rig_free"/>
       <inertial pos="0 0 0.025" mass="0.16" diaginertia="0.00018 0.00016 0.00010"/>
       <geom name="arm3_camera_housing" type="box" size="0.027 0.020 0.020" pos="0 0 0.025"
@@ -212,262 +253,326 @@
       <camera name="arm3_wrist_camera" pos="0 0 0.055" euler="3.14159265359 0 0" fovy="52"/>
     </body>
 
-    <!-- Table1 uses X (the Arm1-Arm3 line) as left-right.  Its 1.20 x 0.60 m
-         top is twice as long left-right as front-back.  The base is horizontal
-         on the left and the X-aligned fins occupy the right half. -->
-    <body name="raw_material_rack" pos="-1.079 0.508 0">
-      <geom class="cell" name="raw_material_rack_top" size="0.60 0.30 0.05" pos="0 0 0.05"
-            material="worktop_mat"/>
-      <geom class="visual" name="raw_rack_front_apron" type="box" size="0.595 0.012 0.032"
-            pos="0 -0.292 0.058" material="frame_steel"/>
-      <geom class="visual" name="raw_rack_rear_apron" type="box" size="0.595 0.012 0.032"
-            pos="0 0.292 0.058" material="frame_steel"/>
-      <geom class="visual" name="raw_rack_left_apron" type="box" size="0.012 0.280 0.032"
-            pos="-0.592 0 0.058" material="frame_steel"/>
-      <geom class="visual" name="raw_rack_right_apron" type="box" size="0.012 0.280 0.032"
-            pos="0.592 0 0.058" material="frame_steel"/>
-      <geom class="visual" name="raw_rack_base_label" type="box" size="0.085 0.004 0.020"
-            pos="-0.23 -0.236 0.055" material="safety_yellow"/>
-      <geom class="visual" name="raw_rack_fin_label" type="box" size="0.085 0.004 0.020"
-            pos="0.23 -0.236 0.055" material="tool_blue"/>
-      <site name="raw_base_site" type="box" pos="-0.23 0 0.104" size="0.182 0.112 0.002"
+    <!-- The former monolithic Table1 crossed S1 and the quick-change zone.
+         The shallow-U line uses two independent magazines with a clear tool
+         aisle in the middle, matching the order-flow layout document. -->
+    <body name="raw_material_rack">
+      <geom class="cell" name="raw_material_rack_top" size="0.24 0.20 0.05"
+            pos="-0.60 -0.42 0.05" material="worktop_mat"/>
+      <geom class="cell" name="fin_magazine_top" size="0.18 0.25 0.05"
+            pos="0.32 -0.46 0.05" material="worktop_mat"/>
+      <geom class="visual" name="fin_magazine_pick_surface" type="box"
+            size="0.18 0.25 0.010" pos="0.32 -0.46 0.240"
+            material="brushed_aluminium"/>
+      <!-- Open upper tier: the former 360 x 500 mm solid shelf hid every
+           lower blank from the operator and from the MuJoCo view.  Two slim
+           Y rails support only the fin ends, leaving the complete pickup
+           window open through the middle. -->
+      <geom class="visual" name="fin_magazine_upper_left_rail" type="box"
+            size="0.015 0.235 0.006" pos="0.17 -0.46 0.344" material="brushed_aluminium"/>
+      <geom class="visual" name="fin_magazine_upper_right_rail" type="box"
+            size="0.015 0.235 0.006" pos="0.47 -0.46 0.344" material="brushed_aluminium"/>
+      <geom class="visual" name="fin_magazine_upper_rear_support_left" type="box"
+            size="0.012 0.012 0.175" pos="0.17 -0.685 0.175" material="frame_steel"/>
+      <geom class="visual" name="fin_magazine_upper_rear_support_right" type="box"
+            size="0.012 0.012 0.175" pos="0.47 -0.685 0.175" material="frame_steel"/>
+      <geom class="visual" name="fin_magazine_upper_front_support_left" type="box"
+            size="0.012 0.012 0.175" pos="0.17 -0.235 0.175" material="frame_steel"/>
+      <geom class="visual" name="fin_magazine_upper_front_support_right" type="box"
+            size="0.012 0.012 0.175" pos="0.47 -0.235 0.175" material="frame_steel"/>
+      <body name="base_plate_magazine" pos="-0.60 -0.42 0">
+        <geom class="visual" name="base_magazine_front" type="box" size="0.235 0.012 0.032"
+              pos="0 -0.192 0.058" material="frame_steel"/>
+        <geom class="visual" name="base_magazine_rear" type="box" size="0.235 0.012 0.032"
+              pos="0 0.192 0.058" material="frame_steel"/>
+        <geom class="visual" name="base_magazine_left_locator" type="box" size="0.010 0.150 0.020"
+              pos="-0.205 0 0.120" material="safety_yellow"/>
+        <geom class="visual" name="base_magazine_right_locator" type="box" size="0.010 0.150 0.020"
+              pos="0.205 0 0.120" material="safety_yellow"/>
+        <geom class="visual" name="raw_rack_base_label" type="box" size="0.085 0.004 0.020"
+              pos="0 -0.196 0.055" material="safety_yellow"/>
+      </body>
+      <body name="fin_magazine" pos="0.32 -0.46 0">
+        <geom class="visual" name="fin_magazine_front" type="box" size="0.175 0.012 0.032"
+              pos="0 -0.242 0.058" material="frame_steel"/>
+        <geom class="visual" name="fin_magazine_rear" type="box" size="0.175 0.012 0.032"
+              pos="0 0.242 0.058" material="frame_steel"/>
+        <geom class="visual" name="fin_magazine_comb_left" type="box" size="0.150 0.010 0.025"
+              pos="0 -0.225 0.115" material="tool_blue"/>
+        <geom class="visual" name="fin_magazine_comb_right" type="box" size="0.150 0.010 0.025"
+              pos="0 0.225 0.115" material="tool_blue"/>
+        <geom class="visual" name="raw_rack_fin_label" type="box" size="0.085 0.004 0.020"
+              pos="0 -0.246 0.055" material="tool_blue"/>
+      </body>
+      <site name="raw_base_site" type="box" pos="-0.60 -0.42 0.104" size="0.182 0.112 0.002"
             rgba="0.72 0.76 0.80 0.18" group="1"/>
-      <site name="raw_fin_01_site" pos="0.12 -0.1875 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_02_site" pos="0.12 -0.1125 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_03_site" pos="0.12 -0.0375 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_04_site" pos="0.12 0.0375 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_05_site" pos="0.12 0.1125 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_06_site" pos="0.12 0.1875 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_07_site" pos="0.35 -0.16875 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_08_site" pos="0.35 -0.09375 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_09_site" pos="0.35 -0.01875 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_10_site" pos="0.35 0.05625 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_11_site" pos="0.35 0.13125 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_12_site" pos="0.35 0.20625 0.130" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_01_site" pos="0.32 -0.6475 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_02_site" pos="0.32 -0.5725 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_03_site" pos="0.32 -0.4975 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_04_site" pos="0.32 -0.4225 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_05_site" pos="0.32 -0.3475 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_06_site" pos="0.32 -0.2725 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_07_site" pos="0.32 -0.6475 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_08_site" pos="0.32 -0.5725 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_09_site" pos="0.32 -0.4975 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_10_site" pos="0.32 -0.4225 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_11_site" pos="0.32 -0.3475 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_12_site" pos="0.32 -0.2725 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
     </body>
 
-    <!-- Table2-to-furnace conveyor.  Rollers and belt are visual guides; the
-         actuator-driven fixture slide provides stable, straight-line motion. -->
-    <body name="table2_furnace_conveyor">
-      <geom name="conveyor_belt" type="box" size="0.230 0.465 0.008" pos="0 0.765 0.192"
+    <!-- Shallow-U asynchronous pallet line.  Each station has an independent
+         dock and every inter-station movement is a real actuator-driven slide. -->
+    <body name="station_s1_base_loading" pos="-0.48 0 0">
+      <geom class="cell" name="s1_table" type="box" size="0.245 0.175 0.090"
+            pos="0 0 0.090" material="worktop_mat"/>
+      <geom class="visual" name="s1_blue_apron" type="box" size="0.230 0.010 0.030"
+            pos="0 -0.178 0.105" material="tool_blue"/>
+      <geom class="visual" name="s1_dock_left" type="box" size="0.010 0.145 0.016"
+            pos="-0.225 0 0.196" material="stainless"/>
+      <geom class="visual" name="s1_dock_right" type="box" size="0.010 0.145 0.016"
+            pos="0.225 0 0.196" material="stainless"/>
+      <site name="s1_entry_site" pos="0 0 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
+      <site name="s1_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
+      <site name="s1_exit_site" pos="0.12 0.108 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+    <body name="station_s1_anchor" pos="-0.48 0 0.209"/>
+
+    <body name="station_s2a_dispensing" pos="-0.30 0.40 0">
+      <geom class="cell" name="s2a_table" type="box" size="0.245 0.175 0.090"
+            pos="0 0 0.090" material="worktop_mat"/>
+      <geom class="visual" name="s2a_orange_apron" type="box" size="0.230 0.010 0.030"
+            pos="0 0.178 0.105" material="safety_orange"/>
+      <geom class="visual" name="s2a_dock_left" type="box" size="0.010 0.145 0.016"
+            pos="-0.225 0 0.196" material="stainless"/>
+      <geom class="visual" name="s2a_dock_right" type="box" size="0.010 0.145 0.016"
+            pos="0.225 0 0.196" material="stainless"/>
+      <site name="s2a_entry_site" pos="-0.12 -0.108 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
+      <site name="s2a_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
+      <site name="s2a_exit_site" pos="0.18 0 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+    <body name="station_s2a_anchor" pos="-0.30 0.40 0.209"/>
+
+    <body name="station_s2b_material_inspection" pos="0.30 0.40 0">
+      <geom class="cell" name="s2b_table" type="box" size="0.245 0.175 0.090"
+            pos="0 0 0.090" material="worktop_mat"/>
+      <geom class="visual" name="s2b_green_apron" type="box" size="0.230 0.010 0.030"
+            pos="0 0.178 0.105" material="indicator_green"/>
+      <geom class="visual" name="s2b_light_left" type="capsule" size="0.008"
+            fromto="-0.210 -0.145 0.225 -0.210 0.145 0.225" material="stainless"/>
+      <geom class="visual" name="s2b_light_right" type="capsule" size="0.008"
+            fromto="0.210 -0.145 0.225 0.210 0.145 0.225" material="stainless"/>
+      <site name="s2b_entry_site" pos="-0.18 0 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
+      <site name="s2b_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
+      <site name="s2b_exit_site" pos="0.12 -0.108 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+    <body name="station_s2b_anchor" pos="0.30 0.40 0.209"/>
+
+    <body name="station_s3_fin_assembly" pos="0.48 0 0">
+      <geom class="cell" name="s3_table" type="box" size="0.245 0.175 0.090"
+            pos="0 0 0.090" material="worktop_mat"/>
+      <geom class="visual" name="s3_purple_apron" type="box" size="0.230 0.010 0.030"
+            pos="0 -0.178 0.105" rgba="0.46 0.22 0.70 1"/>
+      <site name="s3_entry_site" pos="-0.12 0.108 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
+      <site name="s3_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
+      <site name="s3_exit_site" pos="0.21 0 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+    <body name="station_s3_anchor" pos="0.48 0 0.209"/>
+    <body name="station_rack_infeed_anchor" pos="0.75 0 0.209">
+      <site name="rack_infeed_target_site" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
+    </body>
+
+    <!-- Segment 12: diagonal S1 -> S2A. -->
+    <body name="transfer_s1_s2a_frame">
+      <geom class="visual" name="transfer_12_rail_left" type="capsule" size="0.009"
+            fromto="-0.512 0.014 0.184 -0.332 0.414 0.184" material="stainless"/>
+      <geom class="visual" name="transfer_12_rail_right" type="capsule" size="0.009"
+            fromto="-0.448 -0.014 0.184 -0.268 0.386 0.184" material="stainless"/>
+    </body>
+    <body name="transfer_s1_s2a_carriage" pos="-0.48 0 0.209" gravcomp="1">
+      <joint name="transfer_s1_s2a_joint" type="slide" axis="0.410365 0.911922 0"
+             range="0 0.438634244" damping="90"/>
+      <inertial pos="0 0 -0.020" mass="6" diaginertia="0.08 0.08 0.10"/>
+      <geom class="visual" name="transfer_s1_s2a_carriage_geom" type="box"
+            size="0.225 0.155 0.010" pos="0 0 -0.020" material="frame_steel"/>
+      <site name="transfer_s1_s2a_site" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+
+    <!-- Segment 2A-2B: straight rear cross-transfer. -->
+    <body name="transfer_s2a_s2b_frame">
+      <geom class="visual" name="transfer_2a2b_rail_front" type="capsule" size="0.009"
+            fromto="-0.30 0.365 0.184 0.30 0.365 0.184" material="stainless"/>
+      <geom class="visual" name="transfer_2a2b_rail_rear" type="capsule" size="0.009"
+            fromto="-0.30 0.435 0.184 0.30 0.435 0.184" material="stainless"/>
+    </body>
+    <body name="transfer_s2a_s2b_carriage" pos="-0.30 0.40 0.209" gravcomp="1">
+      <joint name="transfer_s2a_s2b_joint" type="slide" axis="1 0 0" range="0 0.60" damping="90"/>
+      <inertial pos="0 0 -0.020" mass="6" diaginertia="0.08 0.08 0.10"/>
+      <geom class="visual" name="transfer_s2a_s2b_carriage_geom" type="box"
+            size="0.225 0.155 0.010" pos="0 0 -0.020" material="frame_steel"/>
+      <site name="transfer_s2a_s2b_site" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+
+    <!-- Segment 23: diagonal S2B -> S3. -->
+    <body name="transfer_s2b_s3_frame">
+      <geom class="visual" name="transfer_23_rail_left" type="capsule" size="0.009"
+            fromto="0.332 0.414 0.184 0.512 0.014 0.184" material="stainless"/>
+      <geom class="visual" name="transfer_23_rail_right" type="capsule" size="0.009"
+            fromto="0.268 0.386 0.184 0.448 -0.014 0.184" material="stainless"/>
+    </body>
+    <body name="transfer_s2b_s3_carriage" pos="0.30 0.40 0.209" gravcomp="1">
+      <joint name="transfer_s2b_s3_joint" type="slide" axis="0.410365 -0.911922 0"
+             range="0 0.438634244" damping="90"/>
+      <inertial pos="0 0 -0.020" mass="6" diaginertia="0.08 0.08 0.10"/>
+      <geom class="visual" name="transfer_s2b_s3_carriage_geom" type="box"
+            size="0.225 0.155 0.010" pos="0 0 -0.020" material="frame_steel"/>
+      <site name="transfer_s2b_s3_site" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+
+    <!-- Segment 3R: S3 -> furnace-rack infeed. -->
+    <body name="transfer_s3_rack_frame">
+      <geom class="visual" name="transfer_3r_rail_front" type="capsule" size="0.009"
+            fromto="0.48 -0.055 0.184 0.75 -0.055 0.184" material="stainless"/>
+      <geom class="visual" name="transfer_3r_rail_rear" type="capsule" size="0.009"
+            fromto="0.48 0.055 0.184 0.75 0.055 0.184" material="stainless"/>
+    </body>
+    <body name="transfer_s3_rack_carriage" pos="0.48 0 0.209" gravcomp="1">
+      <joint name="transfer_s3_rack_joint" type="slide" axis="1 0 0" range="0 0.27" damping="90"/>
+      <inertial pos="0 0 -0.020" mass="6" diaginertia="0.08 0.08 0.10"/>
+      <geom class="visual" name="transfer_s3_rack_carriage_geom" type="box"
+            size="0.225 0.155 0.010" pos="0 0 -0.020" material="frame_steel"/>
+      <site name="transfer_s3_rack_site" size="0.006" rgba="1 0.6 0.1 0.8"/>
+    </body>
+
+    <!-- Fourth empty pallet: three pallets may be WIP, one remains spare. -->
+    <body name="async_spare_tray_04" pos="-0.90 -0.05 0.209" gravcomp="1">
+      <freejoint name="async_spare_tray_04_free"/>
+      <geom name="async_spare_tray_04_geom" type="box" size="0.230 0.160 0.009"
+            mass="3" material="tray_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="async_spare_tray_04_locator" type="box"
+            size="0.190 0.120 0.006" pos="0 0 0.018" material="fixture_mat"/>
+      <site name="async_spare_tray_04_site" size="0.006" rgba="0.2 0.8 1 0.8"/>
+    </body>
+
+    <!-- Table2-to-furnace transport is intentionally minimal: one continuous
+         black belt and one hidden actuator carriage.  The former roller bed,
+         orange pusher, lift and their frames were removed because they hid and
+         intersected the product at S3. -->
+    <body name="table2_furnace_conveyor" pos="0.75 0 0" euler="0 0 -1.57079632679">
+      <geom name="conveyor_belt" type="box" size="0.230 0.465 0.008" pos="0 0.380 0.192"
             material="black_rubber" contype="0" conaffinity="0"/>
-      <geom name="conveyor_left_frame" type="box" size="0.018 0.465 0.025" pos="-0.255 0.765 0.175"
-            material="frame_steel" contype="0" conaffinity="0"/>
-      <geom name="conveyor_right_frame" type="box" size="0.018 0.465 0.025" pos="0.255 0.765 0.175"
-            material="frame_steel" contype="0" conaffinity="0"/>
-      <geom name="conveyor_roller_01" type="cylinder" size="0.025 0.225" pos="0 0.45 0.188"
-            quat="0.70710678 0 0.70710678 0" rgba="0.50 0.54 0.58 1" contype="0" conaffinity="0"/>
-      <geom name="conveyor_roller_02" type="cylinder" size="0.025 0.225" pos="0 0.66 0.188"
-            quat="0.70710678 0 0.70710678 0" rgba="0.50 0.54 0.58 1" contype="0" conaffinity="0"/>
-      <geom name="conveyor_roller_03" type="cylinder" size="0.025 0.225" pos="0 0.87 0.188"
-            quat="0.70710678 0 0.70710678 0" rgba="0.50 0.54 0.58 1" contype="0" conaffinity="0"/>
-      <geom name="conveyor_roller_04" type="cylinder" size="0.025 0.225" pos="0 1.08 0.188"
-            quat="0.70710678 0 0.70710678 0" rgba="0.50 0.54 0.58 1" contype="0" conaffinity="0"/>
-      <!-- Dense visual roller bed and extrusion details.  The original belt
-           and four named rollers remain the stable public/physical contract. -->
-      <geom class="visual" name="conveyor_roller_05" type="cylinder" size="0.019 0.225" pos="0 0.345 0.188"
-            quat="0.70710678 0 0.70710678 0" material="stainless"/>
-      <geom class="visual" name="conveyor_roller_06" type="cylinder" size="0.019 0.225" pos="0 0.555 0.188"
-            quat="0.70710678 0 0.70710678 0" material="stainless"/>
-      <geom class="visual" name="conveyor_roller_07" type="cylinder" size="0.019 0.225" pos="0 0.765 0.188"
-            quat="0.70710678 0 0.70710678 0" material="stainless"/>
-      <geom class="visual" name="conveyor_roller_08" type="cylinder" size="0.019 0.225" pos="0 0.975 0.188"
-            quat="0.70710678 0 0.70710678 0" material="stainless"/>
-      <geom class="visual" name="conveyor_roller_09" type="cylinder" size="0.019 0.225" pos="0 1.185 0.188"
-            quat="0.70710678 0 0.70710678 0" material="stainless"/>
-      <geom class="visual" name="conveyor_left_upper_profile" type="box" size="0.010 0.465 0.010"
-            pos="-0.255 0.765 0.210" material="brushed_aluminium"/>
-      <geom class="visual" name="conveyor_right_upper_profile" type="box" size="0.010 0.465 0.010"
-            pos="0.255 0.765 0.210" material="brushed_aluminium"/>
-      <geom class="visual" name="conveyor_left_inner_guide" type="box" size="0.006 0.445 0.020"
-            pos="-0.238 0.765 0.229" material="safety_yellow"/>
-      <geom class="visual" name="conveyor_right_inner_guide" type="box" size="0.006 0.445 0.020"
-            pos="0.238 0.765 0.229" material="safety_yellow"/>
-      <geom class="visual" name="conveyor_crossmember_front" type="box" size="0.270 0.018 0.018"
-            pos="0 0.340 0.135" material="frame_steel"/>
-      <geom class="visual" name="conveyor_crossmember_middle" type="box" size="0.270 0.018 0.018"
-            pos="0 0.765 0.135" material="frame_steel"/>
-      <geom class="visual" name="conveyor_crossmember_rear" type="box" size="0.270 0.018 0.018"
-            pos="0 1.190 0.135" material="frame_steel"/>
-      <geom class="visual" name="conveyor_leg_fl" type="box" size="0.022 0.022 0.070"
-            pos="-0.250 0.365 0.070" material="frame_steel"/>
-      <geom class="visual" name="conveyor_leg_fr" type="box" size="0.022 0.022 0.070"
-            pos="0.250 0.365 0.070" material="frame_steel"/>
-      <geom class="visual" name="conveyor_leg_ml" type="box" size="0.022 0.022 0.070"
-            pos="-0.250 0.765 0.070" material="frame_steel"/>
-      <geom class="visual" name="conveyor_leg_mr" type="box" size="0.022 0.022 0.070"
-            pos="0.250 0.765 0.070" material="frame_steel"/>
-      <geom class="visual" name="conveyor_leg_rl" type="box" size="0.022 0.022 0.070"
-            pos="-0.250 1.165 0.070" material="frame_steel"/>
-      <geom class="visual" name="conveyor_leg_rr" type="box" size="0.022 0.022 0.070"
-            pos="0.250 1.165 0.070" material="frame_steel"/>
-      <geom class="visual" name="conveyor_foot_fl" type="cylinder" size="0.038 0.006" pos="-0.250 0.365 0.006" material="black_rubber"/>
-      <geom class="visual" name="conveyor_foot_fr" type="cylinder" size="0.038 0.006" pos="0.250 0.365 0.006" material="black_rubber"/>
-      <geom class="visual" name="conveyor_foot_rl" type="cylinder" size="0.038 0.006" pos="-0.250 1.165 0.006" material="black_rubber"/>
-      <geom class="visual" name="conveyor_foot_rr" type="cylinder" size="0.038 0.006" pos="0.250 1.165 0.006" material="black_rubber"/>
-      <geom class="visual" name="conveyor_drive_motor" type="cylinder" size="0.052 0.090"
-            pos="0.360 1.080 0.135" quat="0.70710678 0 0.70710678 0" material="motor_blue"/>
-      <geom class="visual" name="conveyor_drive_endcap" type="cylinder" size="0.043 0.012"
-            pos="0.462 1.080 0.135" quat="0.70710678 0 0.70710678 0" material="dark_steel"/>
-      <geom class="visual" name="conveyor_gearbox" type="box" size="0.060 0.055 0.060"
-            pos="0.290 1.080 0.135" material="brushed_aluminium"/>
-      <geom class="visual" name="conveyor_home_sensor" type="box" size="0.012 0.020 0.025"
-            pos="-0.278 0.450 0.230" material="sensor_blue" rgba="0.04 0.42 0.72 1"/>
-      <geom class="visual" name="conveyor_furnace_sensor" type="box" size="0.012 0.020 0.025"
-            pos="-0.278 1.080 0.230" material="sensor_blue" rgba="0.04 0.42 0.72 1"/>
-      <geom class="visual" name="conveyor_sensor_led_home" type="sphere" size="0.004"
-            pos="-0.291 0.450 0.249" material="indicator_green"/>
-      <geom class="visual" name="conveyor_sensor_led_furnace" type="sphere" size="0.004"
-            pos="-0.291 1.080 0.249" material="indicator_red"/>
-      <site name="conveyor_home_site" pos="0 0.45 0.209" size="0.006" rgba="0.2 0.9 0.5 0.65"/>
-      <site name="conveyor_furnace_site" pos="0 1.08 0.209" size="0.006" rgba="1 0.35 0.1 0.65"/>
+      <site name="conveyor_home_site" pos="0 0 0.209" size="0.006" rgba="0.2 0.9 0.5 0.65"/>
+      <site name="conveyor_furnace_site" pos="0 0.84 0.209" size="0.006" rgba="1 0.35 0.1 0.65"/>
     </body>
 
-    <!-- Three-layer batch transfer cell.  The nested actuator stack gives the
-         carrier four independent, continuously simulated motions: short
-         Table2 outfeed, vertical lift, furnace pusher and finished-buffer X. -->
-    <body name="batch_transfer_base" pos="0 0.45 0.209">
-      <geom name="batch_transfer_pedestal" type="box" size="0.285 0.055 0.018"
-            pos="0 0 -0.040" rgba="0.24 0.29 0.34 1" contype="0" conaffinity="0"/>
-      <geom class="visual" name="batch_transfer_left_mast" type="box" size="0.030 0.035 0.250"
-            pos="-0.292 0.220 0.190" material="frame_steel"/>
-      <geom class="visual" name="batch_transfer_right_mast" type="box" size="0.030 0.035 0.250"
-            pos="0.292 0.220 0.190" material="frame_steel"/>
-      <geom class="visual" name="batch_transfer_mast_header" type="box" size="0.322 0.040 0.025"
-            pos="0 0.220 0.455" material="brushed_aluminium"/>
-      <geom class="visual" name="batch_transfer_left_track" type="box" size="0.010 0.040 0.205"
-            pos="-0.260 0.220 0.190" material="stainless"/>
-      <geom class="visual" name="batch_transfer_right_track" type="box" size="0.010 0.040 0.205"
-            pos="0.260 0.220 0.190" material="stainless"/>
-      <geom class="visual" name="batch_transfer_servo" type="cylinder" size="0.050 0.075"
-            pos="0.370 0.220 -0.005" quat="0.70710678 0 0.70710678 0" material="motor_blue"/>
-      <geom class="visual" name="batch_transfer_servo_guard" type="box" size="0.095 0.070 0.075"
-            pos="0.360 0.220 -0.005" material="frame_steel" rgba="0.22 0.26 0.30 0.48"/>
+    <!-- Hidden carrier: the infeed slide follows the black belt directly.
+         The orthogonal output slide remains for the existing finished-goods
+         outlet, but no visible mechanism overlaps the heatsink. -->
+    <body name="batch_transfer_base" pos="0.75 0 0.209" euler="0 0 -1.57079632679">
       <body name="batch_outfeed_carriage" gravcomp="1">
-        <joint name="batch_outfeed_joint" type="slide" axis="0 1 0" range="0 0.250" damping="180"/>
-        <geom name="batch_outfeed_deck" type="box" size="0.245 0.085 0.010"
-              rgba="0.20 0.25 0.30 1" mass="4.0" contype="0" conaffinity="0"/>
-        <geom class="visual" name="batch_outfeed_front_roller" type="cylinder" size="0.018 0.225"
-              pos="0 -0.060 0.012" quat="0.70710678 0 0.70710678 0" material="stainless"/>
-        <geom class="visual" name="batch_outfeed_rear_roller" type="cylinder" size="0.018 0.225"
-              pos="0 0.060 0.012" quat="0.70710678 0 0.70710678 0" material="stainless"/>
-        <body name="batch_lift_carriage" gravcomp="1">
-          <joint name="batch_lift_joint" type="slide" axis="0 0 1" range="0 0.302" damping="220"/>
-          <geom name="batch_lift_deck" type="box" size="0.240 0.075 0.012"
-                rgba="0.16 0.34 0.48 1" mass="5.0" contype="0" conaffinity="0"/>
-          <geom name="batch_lift_left_guide" type="box" size="0.012 0.075 0.075"
-                pos="-0.252 0 0.065" rgba="0.18 0.40 0.56 1" contype="0" conaffinity="0"/>
-          <geom name="batch_lift_right_guide" type="box" size="0.012 0.075 0.075"
-                pos="0.252 0 0.065" rgba="0.18 0.40 0.56 1" contype="0" conaffinity="0"/>
-          <geom class="visual" name="batch_lift_left_bearing" type="cylinder" size="0.022 0.013"
-                pos="-0.270 0.040 0.045" quat="0.70710678 0.70710678 0 0" material="safety_orange"/>
-          <geom class="visual" name="batch_lift_right_bearing" type="cylinder" size="0.022 0.013"
-                pos="0.270 0.040 0.045" quat="0.70710678 0.70710678 0 0" material="safety_orange"/>
-          <geom class="visual" name="batch_lift_safety_edge" type="box" size="0.238 0.006 0.012"
-                pos="0 -0.078 0.015" material="safety_yellow"/>
-          <body name="batch_output_carriage" gravcomp="1">
-            <joint name="batch_output_joint" type="slide" axis="1 0 0" range="0 1.040" damping="180"/>
-            <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
-            <!-- Fixed outer stage of the telescopic rack pusher.  It follows
-                 the lift but remains still while the orange inner stage and
-                 tray advance into the furnace. -->
-            <geom class="visual" name="batch_pusher_outer_left_housing" type="box"
-                  size="0.040 0.145 0.024" pos="-0.180 0.015 -0.035" material="dark_steel"/>
-            <geom class="visual" name="batch_pusher_outer_right_housing" type="box"
-                  size="0.040 0.145 0.024" pos="0.180 0.015 -0.035" material="dark_steel"/>
-            <geom class="visual" name="batch_pusher_outer_left_rail" type="box"
-                  size="0.027 0.138 0.004" pos="-0.180 0.015 -0.008" material="stainless"/>
-            <geom class="visual" name="batch_pusher_outer_right_rail" type="box"
-                  size="0.027 0.138 0.004" pos="0.180 0.015 -0.008" material="stainless"/>
-            <geom class="visual" name="batch_pusher_outer_rear_bridge" type="box"
-                  size="0.225 0.025 0.035" pos="0 -0.145 -0.025" material="frame_steel"/>
-            <geom class="visual" name="batch_pusher_ballscrew_tube" type="capsule" size="0.012"
-                  fromto="0 -0.120 -0.047 0 0.165 -0.047" material="brushed_aluminium"/>
-            <geom class="visual" name="batch_pusher_home_switch" type="box"
-                  size="0.015 0.022 0.018" pos="-0.235 -0.112 -0.005" material="sensor_blue"/>
-            <geom class="visual" name="batch_pusher_home_switch_led" type="sphere"
-                  size="0.004" pos="-0.252 -0.112 0.008" material="indicator_green"/>
-            <body name="batch_pusher_carriage" gravcomp="1">
-              <joint name="batch_pusher_joint" type="slide" axis="0 1 0" range="0 0.380" damping="180"/>
-              <geom name="batch_pusher_crossbar" type="box" size="0.220 0.015 0.010"
-                    pos="0 -0.055 -0.020" rgba="0.95 0.55 0.12 1" mass="2.0"
-                    contype="0" conaffinity="0"/>
-              <geom name="batch_pusher_left_fork" type="box" size="0.016 0.115 0.008"
-                    pos="-0.180 0.045 -0.012" rgba="0.95 0.55 0.12 1"
-                    contype="0" conaffinity="0"/>
-              <geom name="batch_pusher_right_fork" type="box" size="0.016 0.115 0.008"
-                    pos="0.180 0.045 -0.012" rgba="0.95 0.55 0.12 1"
-                    contype="0" conaffinity="0"/>
-              <!-- Moving inner stage.  Long contrasting rails, a vertical
-                   contact beam and rubber pads make the tray/pusher coupling
-                   readable from the normal overview camera. -->
-              <geom class="visual" name="batch_pusher_inner_left_beam" type="box"
-                    size="0.025 0.175 0.016" pos="-0.180 0 -0.020" material="safety_orange"/>
-              <geom class="visual" name="batch_pusher_inner_right_beam" type="box"
-                    size="0.025 0.175 0.016" pos="0.180 0 -0.020" material="safety_orange"/>
-              <geom class="visual" name="batch_pusher_inner_left_glide" type="box"
-                    size="0.018 0.168 0.004" pos="-0.180 0 -0.001" material="stainless"/>
-              <geom class="visual" name="batch_pusher_inner_right_glide" type="box"
-                    size="0.018 0.168 0.004" pos="0.180 0 -0.001" material="stainless"/>
-              <geom class="visual" name="batch_pusher_drive_rod" type="capsule" size="0.008"
-                    fromto="0 -0.155 -0.047 0 0.155 -0.047" material="stainless"/>
-              <geom class="visual" name="batch_pusher_contact_beam" type="box"
-                    size="0.222 0.012 0.034" pos="0 -0.172 0.025" material="safety_orange"/>
-              <geom class="visual" name="batch_pusher_left_contact_pad" type="box"
-                    size="0.070 0.006 0.024" pos="-0.115 -0.158 0.025" material="black_rubber"/>
-              <geom class="visual" name="batch_pusher_right_contact_pad" type="box"
-                    size="0.070 0.006 0.024" pos="0.115 -0.158 0.025" material="black_rubber"/>
-              <geom class="visual" name="batch_pusher_left_side_plate" type="box"
-                    size="0.010 0.030 0.050" pos="-0.232 -0.158 0.025" material="dark_steel"/>
-              <geom class="visual" name="batch_pusher_right_side_plate" type="box"
-                    size="0.010 0.030 0.050" pos="0.232 -0.158 0.025" material="dark_steel"/>
-              <geom class="visual" name="batch_pusher_left_fork_tip" type="box" size="0.022 0.014 0.014"
-                    pos="-0.180 0.165 -0.006" material="safety_orange"/>
-              <geom class="visual" name="batch_pusher_right_fork_tip" type="box" size="0.022 0.014 0.014"
-                    pos="0.180 0.165 -0.006" material="safety_orange"/>
-              <geom class="visual" name="batch_pusher_status_lamp" type="sphere" size="0.007"
-                    pos="0 -0.186 0.068" material="indicator_green"/>
-              <site name="batch_transfer_pose" size="0.006" rgba="1 0.55 0.1 0.8"/>
-              <site name="batch_pusher_tip_site" pos="0 0.180 -0.006" size="0.008"
-                    rgba="1 0.55 0.1 0.85"/>
-            </body>
-          </body>
+        <joint name="batch_outfeed_joint" type="slide" axis="0 1 0" range="0 0.840" damping="180"/>
+        <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+        <body name="batch_output_carriage" gravcomp="1">
+          <joint name="batch_output_joint" type="slide" axis="1 0 0" range="0 1.120" damping="180"/>
+          <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+          <site name="batch_transfer_pose" size="0.006" rgba="1 0.55 0.1 0.8"/>
         </body>
       </body>
     </body>
 
-    <!-- Empty-tray cache.  Tray 01 starts at Table2; trays 02/03 enter from
-         the right using their own physical slide actuators. -->
-    <body name="batch_tray_01_station_anchor" pos="0 0.45 0.209"/>
-    <body name="batch_tray_02_indexer_anchor" pos="0.60 0.45 0.209" gravcomp="1">
-      <joint name="batch_tray_02_index_joint" type="slide" axis="-1 0 0" range="0 0.60" damping="160"/>
-      <geom name="batch_tray_02_index_carriage" type="box" size="0.245 0.175 0.010"
-            pos="0 0 -0.025" rgba="0.21 0.28 0.34 1" mass="3.0" contype="0" conaffinity="0"/>
+    <!-- Empty-tray cache aligned with the shallow-U rack infeed.  Tray 01 is
+         handed off at (0.75, 0); trays 02/03 index from the front-side cache
+         only while the finished-output lane is idle. -->
+    <body name="batch_tray_01_station_anchor" pos="0.75 0 0.209"/>
+    <body name="batch_tray_02_indexer_anchor" pos="0.75 -0.60 0.209" gravcomp="1">
+      <joint name="batch_tray_02_index_joint" type="slide" axis="0 1 0" range="0 0.60" damping="160"/>
+      <!-- The former light-blue cache tabletop is intentionally absent. The
+           invisible inertia preserves identical actuator dynamics. -->
+      <inertial pos="0 0 -0.025" mass="3.0" diaginertia="0.030725 0.060125 0.090625"/>
     </body>
-    <body name="batch_tray_03_indexer_anchor" pos="0.82 0.45 0.209" gravcomp="1">
-      <joint name="batch_tray_03_index_joint" type="slide" axis="-1 0 0" range="0 0.82" damping="160"/>
-      <geom name="batch_tray_03_index_carriage" type="box" size="0.245 0.175 0.010"
-            pos="0 0 -0.025" rgba="0.21 0.28 0.34 1" mass="3.0" contype="0" conaffinity="0"/>
+    <body name="batch_tray_03_indexer_anchor" pos="0.75 -0.82 0.209" gravcomp="1">
+      <joint name="batch_tray_03_index_joint" type="slide" axis="0 1 0" range="0 0.82" damping="160"/>
+      <inertial pos="0 0 -0.025" mass="3.0" diaginertia="0.030725 0.060125 0.090625"/>
     </body>
 
-    <!-- Three finished-product anchors keep unloaded trays separate. -->
-    <body name="batch_output_slot_01" pos="0.08 0.55 0.209">
-      <geom name="batch_output_slot_01_deck" type="box" size="0.235 0.170 0.010" pos="0 0 -0.025" rgba="0.20 0.36 0.31 1" contype="0" conaffinity="0"/>
+    <!-- The former three large finished-product tables are deleted. These
+         geom-free bodies are invisible weld/site anchors at one shared
+         inspection point; the real visible support is the narrow conveyor. -->
+    <body name="batch_output_slot_01" pos="0.75 -0.10 0.209">
       <site name="batch_output_slot_01_site" size="0.006" rgba="0.2 0.9 0.5 0.8"/>
     </body>
-    <body name="batch_output_slot_02" pos="0.56 0.55 0.209">
-      <geom name="batch_output_slot_02_deck" type="box" size="0.235 0.170 0.010" pos="0 0 -0.025" rgba="0.20 0.36 0.31 1" contype="0" conaffinity="0"/>
+    <body name="batch_output_slot_02" pos="0.75 -0.10 0.209">
       <site name="batch_output_slot_02_site" size="0.006" rgba="0.2 0.9 0.5 0.8"/>
     </body>
-    <body name="batch_output_slot_03" pos="1.04 0.55 0.209">
-      <geom name="batch_output_slot_03_deck" type="box" size="0.235 0.170 0.010" pos="0 0 -0.025" rgba="0.20 0.36 0.31 1" contype="0" conaffinity="0"/>
+    <body name="batch_output_slot_03" pos="0.75 -0.10 0.209">
       <site name="batch_output_slot_03_site" size="0.006" rgba="0.2 0.9 0.5 0.8"/>
+    </body>
+
+    <!-- Low-polygon finished-product conveyor and enclosed delivery box.  All
+         detail geoms are visual-only so the upgrade adds no contact workload. -->
+    <body name="finished_output_conveyor" pos="0.75 -0.61 0.165" euler="0 0 -1.57079632679">
+      <geom class="visual" name="finished_output_belt" type="box" size="0.540 0.165 0.012"
+            material="black_rubber"/>
+      <geom class="visual" name="finished_output_left_rail" type="box" size="0.540 0.012 0.035"
+            pos="0 -0.170 0.005" material="frame_steel"/>
+      <geom class="visual" name="finished_output_right_rail" type="box" size="0.540 0.012 0.035"
+            pos="0 0.170 0.005" material="frame_steel"/>
+      <geom class="visual" name="finished_output_front_roller" type="cylinder" size="0.024 0.160"
+            pos="-0.500 0 0.010" quat="0.70710678 0.70710678 0 0" material="stainless"/>
+      <geom class="visual" name="finished_output_rear_roller" type="cylinder" size="0.024 0.160"
+            pos="0.500 0 0.010" quat="0.70710678 0.70710678 0 0" material="stainless"/>
+      <geom class="visual" name="finished_output_motor" type="cylinder" size="0.045 0.060"
+            pos="0.485 0.215 -0.010" quat="0.70710678 0.70710678 0 0" material="motor_blue"/>
+      <geom class="visual" name="finished_output_motor_guard" type="box" size="0.075 0.055 0.060"
+            pos="0.485 0.195 -0.010" material="frame_steel" rgba="0.22 0.26 0.30 0.55"/>
+      <geom class="visual" name="finished_output_support_1" type="box" size="0.035 0.155 0.085"
+            pos="-0.320 0 -0.095" material="dark_steel"/>
+      <geom class="visual" name="finished_output_support_2" type="box" size="0.035 0.155 0.085"
+            pos="0.270 0 -0.095" material="dark_steel"/>
+    </body>
+
+    <body name="finished_output_box" pos="0.75 -1.375 0.165" euler="0 0 -1.57079632679">
+      <geom class="visual" name="finished_output_box_floor" type="box" size="0.315 0.195 0.018"
+            pos="0 0 -0.010" material="dark_steel"/>
+      <geom class="visual" name="finished_output_box_back" type="box" size="0.018 0.195 0.235"
+            pos="0.315 0 0.225" material="frame_steel"/>
+      <geom class="visual" name="finished_output_box_front_wall" type="box" size="0.315 0.018 0.235"
+            pos="0 -0.195 0.225" material="frame_steel"/>
+      <geom class="visual" name="finished_output_box_rear_wall" type="box" size="0.315 0.018 0.235"
+            pos="0 0.195 0.225" material="frame_steel"/>
+      <geom class="visual" name="finished_output_box_roof" type="box" size="0.315 0.195 0.018"
+            pos="0 0 0.460" material="brushed_aluminium"/>
+      <geom class="visual" name="finished_output_window" type="box" size="0.165 0.006 0.105"
+            pos="0.045 -0.216 0.245" material="dark_glass"/>
+      <geom class="visual" name="finished_output_left_bezel" type="box" size="0.025 0.200 0.245"
+            pos="-0.315 0 0.225" material="safety_yellow"/>
+      <geom class="visual" name="finished_output_sign" type="mesh" mesh="finished_output_sign_mesh"
+            pos="0.020 -0.217 0.395" material="finished_output_sign_mat"/>
+      <geom class="visual" name="finished_output_status_panel" type="box" size="0.055 0.008 0.035"
+            pos="0.245 -0.217 0.390" material="dark_steel"/>
+      <geom class="visual" name="finished_output_ready_lamp" type="sphere" size="0.009"
+            pos="0.225 -0.228 0.396" material="indicator_green"/>
+      <geom class="visual" name="finished_output_busy_lamp" type="sphere" size="0.009"
+            pos="0.260 -0.228 0.396" material="indicator_red"/>
+      <site name="finished_output_inside_site" pos="0.035 0 0.044" size="0.008"
+            rgba="0.1 0.9 0.4 0.75"/>
+    </body>
+    <body name="finished_output_gate" pos="0.75 -1.060 0.165" euler="0 0 -1.57079632679" gravcomp="1">
+      <!-- 500 mm travel lifts the complete yellow panel, including its black
+           lower edge, above the outlet roof line before a tray may enter. -->
+      <joint name="finished_output_gate_joint" type="slide" axis="0 0 1" range="0 0.500" damping="90"/>
+      <inertial pos="0 0 0.215" mass="12" diaginertia="0.25 0.25 0.08"/>
+      <geom class="visual" name="finished_output_gate_panel" type="box" size="0.018 0.195 0.205"
+            pos="0 0 0.215" material="safety_yellow"/>
+      <geom class="visual" name="finished_output_gate_window" type="box" size="0.020 0.125 0.075"
+            pos="-0.001 0 0.225" material="dark_glass"/>
+      <geom class="visual" name="finished_output_gate_bottom_edge" type="box" size="0.024 0.200 0.018"
+            pos="0 0 0.015" material="black_rubber"/>
     </body>
 
     <!-- Table2: the actuator-driven assembly_fixture is the conveyor slide.
          Every physical fixture component remains a child of assembly_tray and
          follows this anchor through the stiff tray_fixture_weld. -->
-    <body name="table2" pos="0 0.45 0">
+    <body name="table2" pos="0 0.45 -5">
       <geom class="cell" name="table2_top" size="0.31 0.24 0.055" pos="0 0 0.055" material="worktop_mat"/>
       <geom class="cell" name="table2_column" size="0.08 0.08 0.050" pos="0 0 0.145" rgba="0.22 0.24 0.28 1"/>
       <geom class="visual" name="table2_front_skirt" type="box" size="0.292 0.012 0.035"
@@ -483,12 +588,268 @@
       <geom class="visual" name="table2_emergency_stop" type="cylinder" size="0.011 0.008"
             pos="0.215 -0.251 0.076" quat="0.70710678 0.70710678 0 0" material="indicator_red"/>
     </body>
-    <body name="assembly_fixture" pos="0 0.45 0.209" gravcomp="1">
-      <joint name="conveyor_slide_joint" type="slide" axis="0 1 0" range="0 0.630" damping="120"/>
+
+    <!-- Flexible-cell upgrade: a real 180 degree two-nest indexing table.
+         Legacy assembly_fixture remains available below for segmented demos;
+         complete flexible orders use the two nest anchors and weld ownership. -->
+    <!-- The rotor/nest stack itself supplies 211 mm of height.  Keeping the
+         base at world Z=0 aligns both nests with the legacy Table2 product
+         plane instead of creating a second, floating target plane. -->
+    <body name="table2_turntable_base" pos="0 0.40 -5">
+      <geom class="visual" name="table2_turntable_pedestal" type="cylinder" size="0.115 0.070"
+            pos="0 0 0.070" material="dark_steel"/>
+      <geom class="visual" name="table2_turntable_bearing_outer" type="cylinder" size="0.155 0.022"
+            pos="0 0 0.153" material="frame_steel"/>
+      <geom class="visual" name="table2_turntable_bearing_inner" type="cylinder" size="0.122 0.024"
+            pos="0 0 0.157" material="black_rubber"/>
+      <body name="table2_turntable_rotor" pos="0 0 0.164">
+        <joint name="table2_turntable_joint" type="hinge" axis="0 0 1" range="-12.5664 12.5664"
+               damping="42" armature="0.08"/>
+        <inertial pos="0 0 0.018" mass="34" diaginertia="1.20 1.20 2.20"/>
+        <geom name="table2_turntable_disk" type="cylinder" size="0.365 0.018"
+              material="tray_mat" contype="0" conaffinity="0"/>
+        <geom class="visual" name="table2_turntable_index_ring" type="cylinder" size="0.330 0.004"
+              pos="0 0 0.021" material="tool_blue"/>
+        <geom class="visual" name="table2_turntable_crossbeam" type="box" size="0.305 0.035 0.022"
+              pos="0 0 0.025" material="frame_steel"/>
+        <body name="table2_nest_a_anchor" pos="-0.240 0 0.047">
+          <geom class="visual" name="table2_nest_a_plate" type="box" size="0.218 0.145 0.010"
+                material="worktop_mat"/>
+          <geom class="visual" name="table2_nest_a_locator_fl" type="cylinder" size="0.006 0.012"
+                pos="-0.185 -0.110 0.018" material="tool_yellow"/>
+          <geom class="visual" name="table2_nest_a_locator_rr" type="cylinder" size="0.006 0.012"
+                pos="0.185 0.110 0.018" material="tool_yellow"/>
+          <site name="table2_nest_a_site" pos="0 0 0.020" size="0.007" rgba="0.1 0.9 0.4 0.8"/>
+        </body>
+        <body name="table2_nest_b_anchor" pos="0.240 0 0.047">
+          <geom class="visual" name="table2_nest_b_plate" type="box" size="0.218 0.145 0.010"
+                material="worktop_mat"/>
+          <geom class="visual" name="table2_nest_b_locator_fl" type="cylinder" size="0.006 0.012"
+                pos="-0.185 -0.110 0.018" material="tool_yellow"/>
+          <geom class="visual" name="table2_nest_b_locator_rr" type="cylinder" size="0.006 0.012"
+                pos="0.185 0.110 0.018" material="tool_yellow"/>
+          <site name="table2_nest_b_site" pos="0 0 0.020" size="0.007" rgba="0.1 0.7 1 0.8"/>
+        </body>
+        <body name="table2_nest_a_lock" pos="-0.240 -0.145 0.048">
+          <joint name="table2_nest_a_lock_joint" type="slide" axis="0 1 0" range="0 0.025" damping="20"/>
+          <geom name="table2_nest_a_lock_pin" type="box" size="0.030 0.014 0.014"
+                material="tool_yellow" contype="0" conaffinity="0"/>
+        </body>
+        <body name="table2_nest_b_lock" pos="0.240 -0.145 0.048">
+          <joint name="table2_nest_b_lock_joint" type="slide" axis="0 1 0" range="0 0.025" damping="20"/>
+          <geom name="table2_nest_b_lock_pin" type="box" size="0.030 0.014 0.014"
+                material="tool_yellow" contype="0" conaffinity="0"/>
+        </body>
+      </body>
+      <geom class="visual" name="table2_turntable_index_sensor_a" type="box" size="0.018 0.012 0.018"
+            pos="-0.270 -0.330 0.190" material="dark_steel"/>
+      <geom class="visual" name="table2_turntable_index_lamp_green" type="sphere" size="0.008"
+            pos="-0.270 -0.344 0.190" material="indicator_green"/>
+      <geom class="visual" name="table2_turntable_motion_lamp_yellow" type="sphere" size="0.008"
+            pos="-0.240 -0.344 0.190" material="tool_yellow"/>
+      <geom class="visual" name="table2_turntable_fault_lamp_red" type="sphere" size="0.008"
+            pos="-0.210 -0.344 0.190" material="indicator_red"/>
+    </body>
+
+    <!-- Visible cross-transfer from the left nest to the centreline furnace
+         conveyor: (-0.24, 0.40, 0.211) -> (0, 0.37, 0.209). -->
+    <body name="table2_handoff_frame" pos="0 0 -5">
+      <geom class="visual" name="table2_handoff_rail_front" type="capsule" size="0.010"
+            fromto="-0.255 0.350 0.185 0.015 0.316 0.183" material="stainless"/>
+      <geom class="visual" name="table2_handoff_rail_rear" type="capsule" size="0.010"
+            fromto="-0.255 0.450 0.185 0.015 0.416 0.183" material="stainless"/>
+      <geom class="visual" name="table2_handoff_drive" type="cylinder" size="0.028 0.020"
+            pos="-0.274 0.403 0.184" quat="0.70710678 0 0.70710678 0" material="motor_blue"/>
+    </body>
+    <body name="table2_outfeed_handoff" pos="-0.24 0.40 -4.789" gravcomp="1">
+      <joint name="table2_handoff_joint" type="slide"
+             axis="0.992244 -0.124031 -0.008269" range="0 0.241876"
+             damping="85" armature="0.03"/>
+      <inertial pos="0 0 -0.020" mass="8" diaginertia="0.10 0.10 0.12"/>
+      <geom class="visual" name="table2_handoff_carriage" type="box" size="0.205 0.135 0.012"
+            pos="0 0 -0.020" material="frame_steel"/>
+      <geom class="visual" name="table2_handoff_locator_left" type="cylinder" size="0.007 0.012"
+            pos="-0.180 -0.105 -0.004" material="tool_yellow"/>
+      <geom class="visual" name="table2_handoff_locator_right" type="cylinder" size="0.007 0.012"
+            pos="0.180 0.105 -0.004" material="tool_yellow"/>
+      <site name="table2_handoff_site" size="0.007" rgba="1 0.55 0.1 0.8"/>
+    </body>
+
+    <!-- Three-axis visible changeover gantry. X serves the module library and
+         assembly nest, Y performs local alignment and Z performs slow insert. -->
+    <body name="changeover_gantry" pos="-0.58 0.40 -4.85">
+      <geom class="visual" name="changeover_gantry_left_column" type="box" size="0.035 0.035 0.300"
+            pos="0 -0.265 0.300" material="frame_steel"/>
+      <geom class="visual" name="changeover_gantry_right_column" type="box" size="0.035 0.035 0.300"
+            pos="0 0.265 0.300" material="frame_steel"/>
+      <geom class="visual" name="changeover_gantry_top_beam" type="box" size="0.390 0.035 0.035"
+            pos="0.355 0 0.615" material="frame_steel"/>
+      <geom class="visual" name="changeover_gantry_x_rail_front" type="box" size="0.360 0.012 0.016"
+            pos="0.355 -0.030 0.570" material="dark_steel"/>
+      <geom class="visual" name="changeover_gantry_x_rail_rear" type="box" size="0.360 0.012 0.016"
+            pos="0.355 0.030 0.570" material="dark_steel"/>
+      <body name="changeover_gantry_x_carriage" pos="0 0 0.570" gravcomp="1">
+        <joint name="changeover_gantry_x_joint" type="slide" axis="1 0 0" range="-0.16 0.710" damping="55"/>
+        <geom name="changeover_gantry_x_carriage_geom" type="box" size="0.050 0.060 0.035"
+              mass="5" material="tool_blue" contype="0" conaffinity="0"/>
+        <body name="changeover_gantry_y_carriage" gravcomp="1">
+          <joint name="changeover_gantry_y_joint" type="slide" axis="0 1 0" range="-0.36 0.36" damping="45"/>
+          <inertial pos="0 0 0" mass="3.0" diaginertia="0.025 0.025 0.025"/>
+          <geom class="visual" name="changeover_gantry_y_carriage_geom" type="box" size="0.045 0.085 0.025"
+                material="frame_steel"/>
+          <body name="changeover_gantry_z_carriage" gravcomp="1">
+            <joint name="changeover_gantry_z_joint" type="slide" axis="0 0 -1" range="-0.15 0.360" damping="45"/>
+            <geom name="changeover_gantry_z_spindle" type="box" size="0.022 0.030 0.105"
+                  pos="0 0 -0.105" mass="3" material="tool_blue" contype="0" conaffinity="0"/>
+            <body name="changeover_gantry_dual_hook" pos="0 0 -0.220">
+              <geom name="changeover_gantry_hook_crossbar" type="box" size="0.135 0.018 0.015"
+                    material="dark_steel" contype="0" conaffinity="0"/>
+              <geom name="changeover_gantry_hook_left" type="box" size="0.012 0.018 0.055"
+                    pos="-0.115 0 -0.050" material="tool_yellow" contype="0" conaffinity="0"/>
+              <geom name="changeover_gantry_hook_right" type="box" size="0.012 0.018 0.055"
+                    pos="0.115 0 -0.050" material="tool_yellow" contype="0" conaffinity="0"/>
+              <site name="changeover_gantry_hook_site" pos="0 0 -0.105" size="0.007" rgba="1 0.65 0.1 0.8"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Labelled physical module library.  Each slot contains two visible
+         front/rear sets so two in-process trays may share one pitch. -->
+    <body name="changeover_module_library" pos="-0.62 0.67 -4.84">
+      <geom class="visual" name="module_library_back" type="box" size="0.205 0.025 0.255"
+            pos="0 0.100 0.255" material="dark_steel"/>
+      <geom class="visual" name="module_library_left" type="box" size="0.018 0.120 0.275"
+            pos="-0.205 0 0.275" material="frame_steel"/>
+      <geom class="visual" name="module_library_right" type="box" size="0.018 0.120 0.275"
+            pos="0.205 0 0.275" material="frame_steel"/>
+      <geom class="visual" name="module_library_shelf_15" type="box" size="0.190 0.105 0.010"
+            pos="0 0 0.095" material="frame_steel"/>
+      <geom class="visual" name="module_library_shelf_20" type="box" size="0.190 0.105 0.010"
+            pos="0 0 0.205" material="frame_steel"/>
+      <geom class="visual" name="module_library_shelf_30" type="box" size="0.190 0.105 0.010"
+            pos="0 0 0.315" material="frame_steel"/>
+      <geom class="visual" name="module_library_shelf_40" type="box" size="0.190 0.105 0.010"
+            pos="0 0 0.425" material="frame_steel"/>
+      <geom class="visual" name="module_library_label_15" type="box" size="0.035 0.006 0.016"
+            pos="-0.145 -0.112 0.120" rgba="0.54 0.32 0.78 1"/>
+      <geom class="visual" name="module_library_label_20" type="box" size="0.035 0.006 0.016"
+            pos="-0.145 -0.112 0.230" material="tool_blue"/>
+      <geom class="visual" name="module_library_label_30" type="box" size="0.035 0.006 0.016"
+            pos="-0.145 -0.112 0.340" material="tool_yellow"/>
+      <geom class="visual" name="module_library_label_40" type="box" size="0.035 0.006 0.016"
+            pos="-0.145 -0.112 0.450" rgba="0.42 0.72 0.58 1"/>
+      <site name="module_library_15_slot_a" pos="-0.075 -0.040 0.120" size="0.006" rgba="0.54 0.32 0.78 0.8"/>
+      <site name="module_library_15_slot_b" pos="0.075 -0.040 0.120" size="0.006" rgba="0.54 0.32 0.78 0.8"/>
+      <site name="module_library_20_slot_a" pos="-0.075 -0.040 0.230" size="0.006" rgba="0.1 0.5 0.9 0.8"/>
+      <site name="module_library_20_slot_b" pos="0.075 -0.040 0.230" size="0.006" rgba="0.1 0.5 0.9 0.8"/>
+      <site name="module_library_30_slot_a" pos="-0.075 -0.040 0.340" size="0.006" rgba="1 0.65 0.1 0.8"/>
+      <site name="module_library_30_slot_b" pos="0.075 -0.040 0.340" size="0.006" rgba="1 0.65 0.1 0.8"/>
+      <site name="module_library_40_slot_a" pos="-0.075 -0.040 0.450" size="0.006" rgba="0.42 0.72 0.58 0.8"/>
+      <site name="module_library_40_slot_b" pos="0.075 -0.040 0.450" size="0.006" rgba="0.42 0.72 0.58 0.8"/>
+    </body>
+
+    <!-- Runtime-owned module pairs. Geometry is compact but unmistakably
+         pitch-coded; welds below move each body rack -> gantry -> tray. -->
+    <body name="changeover_module_15_a" pos="-0.695 0.630 -4.720" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_15_a_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_15_a_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" rgba="0.54 0.32 0.78 1"/>
+      <geom name="changeover_module_15_a_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" rgba="0.54 0.32 0.78 1"/>
+    </body>
+    <body name="changeover_module_15_b" pos="-0.545 0.630 -4.720" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_15_b_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_15_b_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" rgba="0.54 0.32 0.78 1"/>
+      <geom name="changeover_module_15_b_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" rgba="0.54 0.32 0.78 1"/>
+    </body>
+    <body name="changeover_module_20_a" pos="-0.695 0.630 -4.610" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_20_a_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_20_a_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" material="tool_blue"/>
+      <geom name="changeover_module_20_a_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" material="tool_blue"/>
+    </body>
+    <body name="changeover_module_20_b" pos="-0.545 0.630 -4.610" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_20_b_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_20_b_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" material="tool_blue"/>
+      <geom name="changeover_module_20_b_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" material="tool_blue"/>
+    </body>
+    <body name="changeover_module_30_a" pos="-0.695 0.630 -4.500" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_30_a_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_30_a_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" material="tool_yellow"/>
+      <geom name="changeover_module_30_a_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" material="tool_yellow"/>
+    </body>
+    <body name="changeover_module_30_b" pos="-0.545 0.630 -4.500" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_30_b_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_30_b_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" material="tool_yellow"/>
+      <geom name="changeover_module_30_b_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" material="tool_yellow"/>
+    </body>
+    <body name="changeover_module_40_a" pos="-0.695 0.630 -4.390" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_40_a_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_40_a_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" rgba="0.42 0.72 0.58 1"/>
+      <geom name="changeover_module_40_a_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" rgba="0.42 0.72 0.58 1"/>
+    </body>
+    <body name="changeover_module_40_b" pos="-0.545 0.630 -4.390" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_module_40_b_free"/>
+      <inertial pos="0 0 0" mass="1.2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_module_40_b_front" type="box" size="0.105 0.014 0.018" pos="-0.120 0 0" rgba="0.42 0.72 0.58 1"/>
+      <geom name="changeover_module_40_b_rear" type="box" size="0.105 0.014 0.018" pos="0.120 0 0" rgba="0.42 0.72 0.58 1"/>
+    </body>
+    <!-- Low-profile replaceable mold plates are independent from combs. -->
+    <body name="changeover_mold_15_a" pos="-0.695 0.730 -4.720" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_15_a_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_15_a_geom" type="box" size="0.190 0.105 0.006" rgba="0.54 0.32 0.78 1"/>
+    </body>
+    <body name="changeover_mold_15_b" pos="-0.545 0.730 -4.720" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_15_b_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_15_b_geom" type="box" size="0.190 0.105 0.006" rgba="0.54 0.32 0.78 1"/>
+    </body>
+    <body name="changeover_mold_20_a" pos="-0.695 0.730 -4.610" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_20_a_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_20_a_geom" type="box" size="0.190 0.105 0.006" material="tool_blue"/>
+    </body>
+    <body name="changeover_mold_20_b" pos="-0.545 0.730 -4.610" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_20_b_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_20_b_geom" type="box" size="0.190 0.105 0.006" material="tool_blue"/>
+    </body>
+    <body name="changeover_mold_30_a" pos="-0.695 0.730 -4.500" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_30_a_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_30_a_geom" type="box" size="0.190 0.105 0.006" material="tool_yellow"/>
+    </body>
+    <body name="changeover_mold_30_b" pos="-0.545 0.730 -4.500" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_30_b_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_30_b_geom" type="box" size="0.190 0.105 0.006" material="tool_yellow"/>
+    </body>
+    <body name="changeover_mold_40_a" pos="-0.695 0.730 -4.390" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_40_a_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_40_a_geom" type="box" size="0.190 0.105 0.006" rgba="0.42 0.72 0.58 1"/>
+    </body>
+    <body name="changeover_mold_40_b" pos="-0.545 0.730 -4.390" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_mold_40_b_free"/><inertial pos="0 0 0" mass="1.8" diaginertia="0.02 0.02 0.02"/>
+      <geom name="changeover_mold_40_b_geom" type="box" size="0.190 0.105 0.006" rgba="0.42 0.72 0.58 1"/>
+    </body>
+    <!-- Two independent short-press pairs; no decorative long beam. -->
+    <body name="changeover_press_a" pos="-0.695 0.550 -4.810" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_press_a_free"/><inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_press_a_front" type="box" size="0.012 0.080 0.004" pos="-0.085 0 0" material="tool_yellow"/>
+      <geom name="changeover_press_a_rear" type="box" size="0.012 0.080 0.004" pos="0.085 0 0" material="tool_yellow"/>
+    </body>
+    <body name="changeover_press_b" pos="-0.545 0.550 -4.810" gravcomp="1" childclass="changeover_component">
+      <freejoint name="changeover_press_b_free"/><inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
+      <geom name="changeover_press_b_front" type="box" size="0.012 0.080 0.004" pos="-0.085 0 0" material="tool_yellow"/>
+      <geom name="changeover_press_b_rear" type="box" size="0.012 0.080 0.004" pos="0.085 0 0" material="tool_yellow"/>
+    </body>
+    <body name="assembly_fixture" pos="0.75 0 0.209" gravcomp="1">
+      <joint name="conveyor_slide_joint" type="slide" axis="1 0 0" range="0 0.840" damping="120"/>
       <inertial pos="0 0 0" mass="8.0" diaginertia="0.025 0.025 0.025"/>
       <site name="fixture_origin" size="0.006" rgba="0.2 0.8 1 0.7"/>
     </body>
-    <body name="assembly_tray" pos="0 0.45 0.209" gravcomp="1">
+    <body name="assembly_tray" pos="-0.48 0 0.209" gravcomp="1">
       <freejoint name="assembly_tray_free"/>
       <body name="fixture_tray">
         <geom name="fixture_tray_geom" type="box" size="0.230 0.160 0.009" mass="3.0"
@@ -553,9 +914,11 @@
         <body name="fixture_front_comb_frame" pos="-0.120 0 0">
           <geom name="front_comb_left_support" type="box" size="0.010 0.050 0.008" pos="-0.093 -0.050 0.017" material="fixture_mat"/>
           <geom name="front_comb_right_support" type="box" size="0.010 0.050 0.008" pos="-0.093 0.050 0.017" material="fixture_mat"/>
-          <geom name="front_comb_frame_beam" type="box" size="0.010 0.050 0.036" pos="-0.093 -0.050 0.053"
+          <geom name="front_comb_post_left" type="box" size="0.012 0.008 0.025" pos="-0.093 -0.086 0.034"
                 material="fixture_mat" contype="0" conaffinity="0"/>
-          <geom name="front_comb_frame_beam_right" type="box" size="0.010 0.050 0.036" pos="-0.093 0.050 0.053"
+          <geom name="front_comb_post_right" type="box" size="0.012 0.008 0.025" pos="-0.093 0.086 0.034"
+                material="fixture_mat" contype="0" conaffinity="0"/>
+          <geom name="front_comb_top_rail" type="box" size="0.012 0.095 0.004" pos="-0.093 0 0.055"
                 material="fixture_mat" contype="0" conaffinity="0"/>
           <body name="fixture_front_comb_insert">
             <body name="front_comb_insert_15mm">
@@ -628,9 +991,11 @@
         <body name="fixture_rear_comb_frame" pos="0.120 0 0">
           <geom name="rear_comb_left_support" type="box" size="0.010 0.050 0.008" pos="0.093 -0.050 0.017" material="fixture_mat"/>
           <geom name="rear_comb_right_support" type="box" size="0.010 0.050 0.008" pos="0.093 0.050 0.017" material="fixture_mat"/>
-          <geom name="rear_comb_frame_beam" type="box" size="0.010 0.050 0.036" pos="0.093 -0.050 0.053"
+          <geom name="rear_comb_post_left" type="box" size="0.012 0.008 0.025" pos="0.093 -0.086 0.034"
                 material="fixture_mat" contype="0" conaffinity="0"/>
-          <geom name="rear_comb_frame_beam_right" type="box" size="0.010 0.050 0.036" pos="0.093 0.050 0.053"
+          <geom name="rear_comb_post_right" type="box" size="0.012 0.008 0.025" pos="0.093 0.086 0.034"
+                material="fixture_mat" contype="0" conaffinity="0"/>
+          <geom name="rear_comb_top_rail" type="box" size="0.012 0.095 0.004" pos="0.093 0 0.055"
                 material="fixture_mat" contype="0" conaffinity="0"/>
           <body name="fixture_rear_comb_insert">
             <body name="rear_comb_insert_15mm">
@@ -724,14 +1089,34 @@
     <!-- Detachable batch carriers.  Runtime visibility is enabled only for
          batch mode; each carrier has its own rigid fixture outline and two
          short transverse press bars. -->
-    <body name="batch_tray_01" pos="0 0.45 0.209" gravcomp="1">
+    <body name="batch_tray_01" pos="0.75 0 0.209" gravcomp="1">
       <freejoint name="batch_tray_01_free"/>
       <geom name="batch_tray_01_geom" type="box" size="0.230 0.160 0.009" mass="3.0"
             rgba="0.30 0.36 0.42 0" contype="0" conaffinity="0"/>
-      <geom name="batch_tray_01_front_comb" type="box" size="0.012 0.080 0.040"
-            pos="-0.120 0 0.050" rgba="0.12 0.45 0.67 0" contype="0" conaffinity="0"/>
-      <geom name="batch_tray_01_rear_comb" type="box" size="0.012 0.080 0.040"
-            pos="0.120 0 0.050" rgba="0.12 0.45 0.67 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_template_plate" type="box" size="0.190 0.120 0.006"
+            pos="0 0 0.018" rgba="0.16 0.34 0.46 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_front_comb_base" type="box" size="0.012 0.136 0.004"
+            pos="-0.170 0 0.055" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_rear_comb_base" type="box" size="0.012 0.136 0.004"
+            pos="0.170 0 0.055" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_front_comb_post_left" type="box" size="0.012 0.008 0.022"
+            pos="-0.170 -0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_front_comb_post_right" type="box" size="0.012 0.008 0.022"
+            pos="-0.170 0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_rear_comb_post_left" type="box" size="0.012 0.008 0.022"
+            pos="0.170 -0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_01_rear_comb_post_right" type="box" size="0.012 0.008 0.022"
+            pos="0.170 0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <replicate count="12" offset="0 0.010 0">
+        <geom name="batch_tray_01_front_comb_guide_left" type="box" size="0.045 0.001 0.014"
+              pos="-0.113 -0.063 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_01_front_comb_guide_right" type="box" size="0.045 0.001 0.014"
+              pos="-0.113 -0.057 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_01_rear_comb_guide_left" type="box" size="0.045 0.001 0.014"
+              pos="0.113 -0.063 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_01_rear_comb_guide_right" type="box" size="0.045 0.001 0.014"
+              pos="0.113 -0.057 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+      </replicate>
       <geom name="batch_tray_01_front_press" type="box" size="0.012 0.080 0.003"
             pos="-0.085 0 0.088" rgba="0.92 0.52 0.10 0" contype="0" conaffinity="0"/>
       <geom name="batch_tray_01_rear_press" type="box" size="0.012 0.080 0.003"
@@ -775,14 +1160,34 @@
       <geom name="batch_tray_01_braze_24" type="capsule" fromto="-0.15 0.102 0.037 0.15 0.102 0.037" size="0.002" rgba="0.96 0.58 0.08 0" contype="0" conaffinity="0"/>
       <site name="batch_tray_01_pose" size="0.005" rgba="0.2 0.8 1 0"/>
     </body>
-    <body name="batch_tray_02" pos="0.60 0.45 0.209" gravcomp="1">
+    <body name="batch_tray_02" pos="0.75 -0.60 0.209" gravcomp="1">
       <freejoint name="batch_tray_02_free"/>
       <geom name="batch_tray_02_geom" type="box" size="0.230 0.160 0.009" mass="3.0"
             rgba="0.30 0.36 0.42 0" contype="0" conaffinity="0"/>
-      <geom name="batch_tray_02_front_comb" type="box" size="0.012 0.080 0.040"
-            pos="-0.120 0 0.050" rgba="0.12 0.45 0.67 0" contype="0" conaffinity="0"/>
-      <geom name="batch_tray_02_rear_comb" type="box" size="0.012 0.080 0.040"
-            pos="0.120 0 0.050" rgba="0.12 0.45 0.67 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_template_plate" type="box" size="0.190 0.120 0.006"
+            pos="0 0 0.018" rgba="0.16 0.34 0.46 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_front_comb_base" type="box" size="0.012 0.136 0.004"
+            pos="-0.170 0 0.055" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_rear_comb_base" type="box" size="0.012 0.136 0.004"
+            pos="0.170 0 0.055" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_front_comb_post_left" type="box" size="0.012 0.008 0.022"
+            pos="-0.170 -0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_front_comb_post_right" type="box" size="0.012 0.008 0.022"
+            pos="-0.170 0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_rear_comb_post_left" type="box" size="0.012 0.008 0.022"
+            pos="0.170 -0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_02_rear_comb_post_right" type="box" size="0.012 0.008 0.022"
+            pos="0.170 0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <replicate count="12" offset="0 0.010 0">
+        <geom name="batch_tray_02_front_comb_guide_left" type="box" size="0.045 0.001 0.014"
+              pos="-0.113 -0.063 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_02_front_comb_guide_right" type="box" size="0.045 0.001 0.014"
+              pos="-0.113 -0.057 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_02_rear_comb_guide_left" type="box" size="0.045 0.001 0.014"
+              pos="0.113 -0.063 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_02_rear_comb_guide_right" type="box" size="0.045 0.001 0.014"
+              pos="0.113 -0.057 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+      </replicate>
       <geom name="batch_tray_02_front_press" type="box" size="0.012 0.080 0.003"
             pos="-0.085 0 0.088" rgba="0.92 0.52 0.10 0" contype="0" conaffinity="0"/>
       <geom name="batch_tray_02_rear_press" type="box" size="0.012 0.080 0.003"
@@ -826,14 +1231,34 @@
       <geom name="batch_tray_02_braze_24" type="capsule" fromto="-0.15 0.102 0.037 0.15 0.102 0.037" size="0.002" rgba="0.96 0.58 0.08 0" contype="0" conaffinity="0"/>
       <site name="batch_tray_02_pose" size="0.005" rgba="0.2 0.8 1 0"/>
     </body>
-    <body name="batch_tray_03" pos="0.82 0.45 0.209" gravcomp="1">
+    <body name="batch_tray_03" pos="0.75 -0.82 0.209" gravcomp="1">
       <freejoint name="batch_tray_03_free"/>
       <geom name="batch_tray_03_geom" type="box" size="0.230 0.160 0.009" mass="3.0"
             rgba="0.30 0.36 0.42 0" contype="0" conaffinity="0"/>
-      <geom name="batch_tray_03_front_comb" type="box" size="0.012 0.080 0.040"
-            pos="-0.120 0 0.050" rgba="0.12 0.45 0.67 0" contype="0" conaffinity="0"/>
-      <geom name="batch_tray_03_rear_comb" type="box" size="0.012 0.080 0.040"
-            pos="0.120 0 0.050" rgba="0.12 0.45 0.67 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_template_plate" type="box" size="0.190 0.120 0.006"
+            pos="0 0 0.018" rgba="0.16 0.34 0.46 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_front_comb_base" type="box" size="0.012 0.136 0.004"
+            pos="-0.170 0 0.055" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_rear_comb_base" type="box" size="0.012 0.136 0.004"
+            pos="0.170 0 0.055" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_front_comb_post_left" type="box" size="0.012 0.008 0.022"
+            pos="-0.170 -0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_front_comb_post_right" type="box" size="0.012 0.008 0.022"
+            pos="-0.170 0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_rear_comb_post_left" type="box" size="0.012 0.008 0.022"
+            pos="0.170 -0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <geom name="batch_tray_03_rear_comb_post_right" type="box" size="0.012 0.008 0.022"
+            pos="0.170 0.128 0.034" rgba="0.10 0.29 0.41 0" contype="0" conaffinity="0"/>
+      <replicate count="12" offset="0 0.010 0">
+        <geom name="batch_tray_03_front_comb_guide_left" type="box" size="0.045 0.001 0.014"
+              pos="-0.113 -0.063 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_03_front_comb_guide_right" type="box" size="0.045 0.001 0.014"
+              pos="-0.113 -0.057 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_03_rear_comb_guide_left" type="box" size="0.045 0.001 0.014"
+              pos="0.113 -0.063 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+        <geom name="batch_tray_03_rear_comb_guide_right" type="box" size="0.045 0.001 0.014"
+              pos="0.113 -0.057 0.073" rgba="0.18 0.48 0.62 0" contype="0" conaffinity="0"/>
+      </replicate>
       <geom name="batch_tray_03_front_press" type="box" size="0.012 0.080 0.003"
             pos="-0.085 0 0.088" rgba="0.92 0.52 0.10 0" contype="0" conaffinity="0"/>
       <geom name="batch_tray_03_rear_press" type="box" size="0.012 0.080 0.003"
@@ -879,12 +1304,31 @@
     </body>
 
     <!-- Pure rectangular heat-sink base.  No rails, mounting holes or decorative protrusions. -->
-    <body name="base_plate" pos="0 0.45 0.237" gravcomp="1">
+    <body name="base_plate" pos="0 0.37 0.237" gravcomp="1">
       <freejoint name="base_plate_free"/>
       <body name="heatsink_base_plate">
         <geom class="product" name="heatsink_base_plate_geom" size="0.18 0.11 0.004" mass="0.95" material="aluminium"/>
         <site name="product_frame" pos="0 0 0.004" size="0.007" rgba="1 0.25 0.15 0.8"/>
       </body>
+      <!-- Eight two-segment overlays make a true, centred material gap (or
+           an ideal reference line for a deviated bead) visible without
+           rebuilding the model. -->
+      <geom class="marker" name="fault_braze_segment_01a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_01b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_02a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_02b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_03a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_03b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_04a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_04b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_05a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_05b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_06a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_06b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_07a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_07b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_08a" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
+      <geom class="marker" name="fault_braze_segment_08b" type="capsule" size="0.002 0.010" rgba="0.98 0.50 0.04 0"/>
     </body>
 
     <!-- Twelve preallocated fins; inactive bodies are hidden and isolated by scene.py. -->
@@ -927,11 +1371,11 @@
     <body name="slot_12_left_brazing_path" pos="3.55 0.03 0.15" gravcomp="1"><freejoint name="slot_12_left_brazing_path_free"/><geom class="marker" name="slot_12_left_brazing_path_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
     <body name="slot_12_right_brazing_path" pos="3.55 0.06 0.15" gravcomp="1"><freejoint name="slot_12_right_brazing_path_free"/><geom class="marker" name="slot_12_right_brazing_path_geom" type="capsule" fromto="-0.15 0 0 0.15 0 0" size="0.002" mass="0.003" material="braze_mat"/></body>
 
-    <!-- Arm2 has one permanent dual-nozzle brazing dispenser.  Its free root
-         lets the tool remain an extension of the attached FR3 asset, while
-         the always-on weld below fixes it directly to link7. -->
-    <body name="arm2_dual_brazing_dispenser_tool" pos="0 -0.092 0.926"
-          quat="0 0.7071067812 0.7071067812 0" gravcomp="1">
+    <!-- Arm2 has one permanently mounted dual-nozzle brazing dispenser.
+         Only Arm1 performs visible tool changes. -->
+    <body name="arm2_dual_brazing_dispenser_tool"
+          pos="-0.12265162 0.46480936 0.59026956"
+          quat="0 0.675736973 -0.737142825 0" gravcomp="1">
       <freejoint name="arm2_dual_brazing_dispenser_tool_free"/>
       <inertial pos="0 0 0.090" mass="0.32" diaginertia="0.00120 0.00115 0.00016"/>
       <site name="arm2_dispenser_mount" pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
@@ -1008,11 +1452,15 @@
     </body>
     <!-- Demonstration furnace, centred directly in front of Table2.  Its
          0.60 m clear width accepts the complete 0.54 m handled tray. -->
-    <body name="furnace" pos="0 1.10 0">
+    <body name="furnace" pos="1.53 0 0" euler="0 0 -1.57079632679">
       <geom class="cell" name="furnace_base" size="0.37 0.23 0.035" pos="0 0 0.035" material="furnace_mat"/>
       <geom class="cell" name="furnace_left_wall" size="0.035 0.23 0.31" pos="-0.335 0 0.38" material="furnace_mat"/>
       <geom class="cell" name="furnace_right_wall" size="0.035 0.23 0.31" pos="0.335 0 0.38" material="furnace_mat"/>
-      <geom class="cell" name="furnace_back" size="0.30 0.035 0.31" pos="0 0.195 0.38" material="furnace_mat"/>
+      <!-- A pallet reaches 0.54 m including both side handles.  After the
+           shallow-U line turns the furnace mouth toward -X, that handled
+           length lies along chamber depth; move the rear wall far enough to
+           retain real clearance instead of actuator-stalling on the wall. -->
+      <geom class="cell" name="furnace_back" size="0.30 0.035 0.31" pos="0 0.400 0.38" material="furnace_mat"/>
       <geom class="cell" name="furnace_roof" size="0.37 0.23 0.035" pos="0 0 0.725" material="furnace_mat"/>
       <geom class="marker" name="furnace_hot_zone" type="box" size="0.295 0.165 0.235" pos="0 0.03 0.38" material="hot_mat"/>
       <!-- Double-wall industrial shell, insulated mouth and service details.
@@ -1122,7 +1570,7 @@
               pos="0.270 0.125 0.052" rgba="0.95 0.035 0.025 1"/>
         <geom class="visual" name="batch_rack_0_level_marker" type="box" size="0.025 0.006 0.018"
               pos="-0.270 -0.120 0.020" material="safety_orange"/>
-        <site name="batch_rack_shelf_site_0" size="0.006" rgba="1 0.4 0.1 0.8"/>
+        <site name="batch_rack_shelf_site_0" pos="0 0.060 0" size="0.006" rgba="1 0.4 0.1 0.8"/>
       </body>
       <body name="batch_rack_shelf_1" pos="0 0 0.360">
         <geom name="batch_rack_1_left_rail" type="box" size="0.025 0.19 0.008" pos="-0.205 0 0" rgba="0.32 0.38 0.44 1" contype="0" conaffinity="0"/>
@@ -1143,7 +1591,7 @@
               pos="0.270 0.125 0.052" rgba="0.95 0.035 0.025 1"/>
         <geom class="visual" name="batch_rack_1_level_marker" type="box" size="0.025 0.006 0.018"
               pos="-0.270 -0.120 0.020" material="safety_yellow"/>
-        <site name="batch_rack_shelf_site_1" size="0.006" rgba="1 0.4 0.1 0.8"/>
+        <site name="batch_rack_shelf_site_1" pos="0 0.060 0" size="0.006" rgba="1 0.4 0.1 0.8"/>
       </body>
       <body name="batch_rack_shelf_2" pos="0 0 0.511">
         <geom name="batch_rack_2_left_rail" type="box" size="0.025 0.19 0.008" pos="-0.205 0 0" rgba="0.32 0.38 0.44 1" contype="0" conaffinity="0"/>
@@ -1164,9 +1612,9 @@
               pos="0.270 0.125 0.052" rgba="0.95 0.035 0.025 1"/>
         <geom class="visual" name="batch_rack_2_level_marker" type="box" size="0.025 0.006 0.018"
               pos="-0.270 -0.120 0.020" material="indicator_green"/>
-        <site name="batch_rack_shelf_site_2" size="0.006" rgba="1 0.4 0.1 0.8"/>
+        <site name="batch_rack_shelf_site_2" pos="0 0.060 0" size="0.006" rgba="1 0.4 0.1 0.8"/>
       </body>
-      <site name="furnace_tray_pose" pos="0 -0.02 0.209" size="0.006" rgba="1 0.3 0.1 0.8"/>
+      <site name="furnace_tray_pose" pos="0 0.060 0.209" size="0.006" rgba="1 0.3 0.1 0.8"/>
       <camera name="furnace_camera" pos="0 -0.42 0.38" xyaxes="1 0 0 0 0.45 0.89" fovy="55"/>
       <body name="furnace_door" pos="0 -0.255 0.38" gravcomp="1">
         <joint name="furnace_door_joint" type="slide" axis="0 0 1" range="0 0.64" damping="25"/>
@@ -1198,7 +1646,7 @@
     </body>
 
     <!-- Table3 / post-braze inspection stand. -->
-    <body name="table3" pos="0.60 -0.25 0">
+    <body name="table3" pos="1.65 -0.55 0">
       <geom class="cell" name="table3_top" size="0.25 0.20 0.06" pos="0 0 0.06" material="worktop_mat"/>
       <geom class="visual" name="table3_front_apron" type="box" size="0.235 0.012 0.035"
             pos="0 -0.190 0.070" material="frame_steel"/>
@@ -1222,19 +1670,60 @@
 
     <!-- Tray/product/fixture lifecycle. -->
     <weld name="raw_base_rack_weld" body1="raw_material_rack" body2="base_plate" active="false" solref="0.004 1"/>
-    <weld name="tray_fixture_weld" body1="assembly_fixture" body2="assembly_tray" active="true" solref="0.001 1"/>
+    <weld name="tray_fixture_weld" body1="assembly_fixture" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="station_s1_assembly_tray_weld" body1="station_s1_anchor" body2="assembly_tray" active="true" solref="0.001 1"/>
+    <weld name="station_s2a_assembly_tray_weld" body1="station_s2a_anchor" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="station_s2b_assembly_tray_weld" body1="station_s2b_anchor" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="station_s3_assembly_tray_weld" body1="station_s3_anchor" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="station_rack_infeed_assembly_tray_weld" body1="station_rack_infeed_anchor" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="transfer_s1_s2a_assembly_tray_weld" body1="transfer_s1_s2a_carriage" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2a_s2b_assembly_tray_weld" body1="transfer_s2a_s2b_carriage" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2b_s3_assembly_tray_weld" body1="transfer_s2b_s3_carriage" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="transfer_s3_rack_assembly_tray_weld" body1="transfer_s3_rack_carriage" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <!-- Three independent WIP carriers for the dynamic shallow-U pipeline.
+         At most one station/transfer weld per tray may be active. -->
+    <weld name="station_s1_tray_01_weld" body1="station_s1_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="station_s2a_tray_01_weld" body1="station_s2a_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="station_s2b_tray_01_weld" body1="station_s2b_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="station_s3_tray_01_weld" body1="station_s3_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="station_rack_infeed_tray_01_weld" body1="station_rack_infeed_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="transfer_s1_s2a_tray_01_weld" body1="transfer_s1_s2a_carriage" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2a_s2b_tray_01_weld" body1="transfer_s2a_s2b_carriage" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2b_s3_tray_01_weld" body1="transfer_s2b_s3_carriage" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="transfer_s3_rack_tray_01_weld" body1="transfer_s3_rack_carriage" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="station_s1_tray_02_weld" body1="station_s1_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="station_s2a_tray_02_weld" body1="station_s2a_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="station_s2b_tray_02_weld" body1="station_s2b_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="station_s3_tray_02_weld" body1="station_s3_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="station_rack_infeed_tray_02_weld" body1="station_rack_infeed_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="transfer_s1_s2a_tray_02_weld" body1="transfer_s1_s2a_carriage" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2a_s2b_tray_02_weld" body1="transfer_s2a_s2b_carriage" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2b_s3_tray_02_weld" body1="transfer_s2b_s3_carriage" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="transfer_s3_rack_tray_02_weld" body1="transfer_s3_rack_carriage" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="station_s1_tray_03_weld" body1="station_s1_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="station_s2a_tray_03_weld" body1="station_s2a_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="station_s2b_tray_03_weld" body1="station_s2b_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="station_s3_tray_03_weld" body1="station_s3_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="station_rack_infeed_tray_03_weld" body1="station_rack_infeed_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="transfer_s1_s2a_tray_03_weld" body1="transfer_s1_s2a_carriage" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2a_s2b_tray_03_weld" body1="transfer_s2a_s2b_carriage" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="transfer_s2b_s3_tray_03_weld" body1="transfer_s2b_s3_carriage" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="transfer_s3_rack_tray_03_weld" body1="transfer_s3_rack_carriage" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_a_assembly_tray_weld" body1="table2_nest_a_anchor" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_b_assembly_tray_weld" body1="table2_nest_b_anchor" body2="assembly_tray" active="false" solref="0.001 1"/>
+    <weld name="table2_handoff_assembly_tray_weld" body1="table2_outfeed_handoff" body2="assembly_tray" active="false" solref="0.001 1"/>
     <weld name="base_tray_weld" body1="assembly_tray" body2="base_plate" active="true" solref="0.001 1"/>
-    <weld name="arm1_grasp_base" body1="arm1_suction_tool" body2="base_plate" active="false" solref="0.004 1"/>
+    <weld name="arm1_grasp_base" body1="arm1_suction_tool" body2="base_plate" active="false" solref="0.001 1"/>
     <weld name="furnace_tray_weld" body1="furnace" body2="assembly_tray" active="false" solref="0.004 1"/>
     <!-- Three detachable batch carriers. During transfer a tray belongs to
-         the nested lift/pusher carrier; at rest exactly one station, rack or
+         the hidden direct-belt carriage; at rest exactly one station, rack or
          output weld owns it. -->
     <weld name="batch_station_tray_01_weld" body1="batch_tray_01_station_anchor" body2="batch_tray_01" active="true" solref="0.001 1"/>
     <weld name="batch_indexer_tray_02_weld" body1="batch_tray_02_indexer_anchor" body2="batch_tray_02" active="true" solref="0.001 1"/>
     <weld name="batch_indexer_tray_03_weld" body1="batch_tray_03_indexer_anchor" body2="batch_tray_03" active="true" solref="0.001 1"/>
-    <weld name="batch_carrier_tray_01_weld" body1="batch_pusher_carriage" body2="batch_tray_01" active="false" solref="0.001 1"/>
-    <weld name="batch_carrier_tray_02_weld" body1="batch_pusher_carriage" body2="batch_tray_02" active="false" solref="0.001 1"/>
-    <weld name="batch_carrier_tray_03_weld" body1="batch_pusher_carriage" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="batch_carrier_tray_01_weld" body1="batch_output_carriage" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="batch_carrier_tray_02_weld" body1="batch_output_carriage" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="batch_carrier_tray_03_weld" body1="batch_output_carriage" body2="batch_tray_03" active="false" solref="0.001 1"/>
     <weld name="batch_rack_tray_01_weld" body1="batch_rack_shelf_0" body2="batch_tray_01" active="false" solref="0.001 1"/>
     <weld name="batch_rack_tray_02_weld" body1="batch_rack_shelf_1" body2="batch_tray_02" active="false" solref="0.001 1"/>
     <weld name="batch_rack_tray_03_weld" body1="batch_rack_shelf_2" body2="batch_tray_03" active="false" solref="0.001 1"/>
@@ -1250,6 +1739,70 @@
     <weld name="batch_output_tray_01_weld" body1="batch_output_slot_01" body2="batch_tray_01" active="false" solref="0.001 1"/>
     <weld name="batch_output_tray_02_weld" body1="batch_output_slot_02" body2="batch_tray_02" active="false" solref="0.001 1"/>
     <weld name="batch_output_tray_03_weld" body1="batch_output_slot_03" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <!-- Flexible turntable tray ownership. Only one anchor/rack/logistics weld
+         may own a batch tray at a time; SceneRegistry enforces this atomically. -->
+    <weld name="turntable_nest_a_tray_01_weld" body1="table2_nest_a_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_b_tray_01_weld" body1="table2_nest_b_anchor" body2="batch_tray_01" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_a_tray_02_weld" body1="table2_nest_a_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_b_tray_02_weld" body1="table2_nest_b_anchor" body2="batch_tray_02" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_a_tray_03_weld" body1="table2_nest_a_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+    <weld name="turntable_nest_b_tray_03_weld" body1="table2_nest_b_anchor" body2="batch_tray_03" active="false" solref="0.001 1"/>
+
+    <!-- Visible changeover module ownership: rack -> gantry -> nest. -->
+    <weld name="changeover_module_15_a_rack_weld" body1="changeover_module_library" body2="changeover_module_15_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_15_b_rack_weld" body1="changeover_module_library" body2="changeover_module_15_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_20_a_rack_weld" body1="changeover_module_library" body2="changeover_module_20_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_20_b_rack_weld" body1="changeover_module_library" body2="changeover_module_20_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_30_a_rack_weld" body1="changeover_module_library" body2="changeover_module_30_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_30_b_rack_weld" body1="changeover_module_library" body2="changeover_module_30_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_40_a_rack_weld" body1="changeover_module_library" body2="changeover_module_40_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_40_b_rack_weld" body1="changeover_module_library" body2="changeover_module_40_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_module_15_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_15_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_15_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_15_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_20_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_20_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_20_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_20_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_30_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_30_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_30_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_30_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_40_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_40_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_40_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_module_40_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_15_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_module_15_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_15_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_module_15_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_20_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_module_20_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_20_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_module_20_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_30_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_module_30_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_30_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_module_30_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_40_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_module_40_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_module_40_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_module_40_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_15_a_rack_weld" body1="changeover_module_library" body2="changeover_mold_15_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_15_b_rack_weld" body1="changeover_module_library" body2="changeover_mold_15_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_20_a_rack_weld" body1="changeover_module_library" body2="changeover_mold_20_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_20_b_rack_weld" body1="changeover_module_library" body2="changeover_mold_20_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_30_a_rack_weld" body1="changeover_module_library" body2="changeover_mold_30_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_30_b_rack_weld" body1="changeover_module_library" body2="changeover_mold_30_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_40_a_rack_weld" body1="changeover_module_library" body2="changeover_mold_40_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_40_b_rack_weld" body1="changeover_module_library" body2="changeover_mold_40_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_mold_15_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_15_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_15_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_15_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_20_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_20_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_20_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_20_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_30_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_30_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_30_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_30_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_40_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_40_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_40_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_mold_40_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_15_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_mold_15_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_15_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_mold_15_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_20_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_mold_20_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_20_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_mold_20_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_30_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_mold_30_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_30_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_mold_30_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_40_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_mold_40_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_mold_40_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_mold_40_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_press_a_rack_weld" body1="changeover_module_library" body2="changeover_press_a" active="true" solref="0.001 1"/>
+    <weld name="changeover_press_b_rack_weld" body1="changeover_module_library" body2="changeover_press_b" active="true" solref="0.001 1"/>
+    <weld name="changeover_press_a_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_press_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_press_b_gantry_weld" body1="changeover_gantry_dual_hook" body2="changeover_press_b" active="false" solref="0.001 1"/>
+    <weld name="changeover_press_a_nest_a_weld" body1="table2_nest_a_anchor" body2="changeover_press_a" active="false" solref="0.001 1"/>
+    <weld name="changeover_press_b_nest_b_weld" body1="table2_nest_b_anchor" body2="changeover_press_b" active="false" solref="0.001 1"/>
     <!-- Freeze the compliant press head only after its real contact/force
          ramp has completed; this removes visible post-clamp solver ringing. -->
     <weld name="fixture_press_hold_weld" body1="fixture_press_drive"
@@ -1337,7 +1890,7 @@
     <weld name="slot_12_left_brazing_path_base_weld" body1="base_plate" body2="slot_12_left_brazing_path" active="false" solref="0.004 1"/>
     <weld name="slot_12_right_brazing_path_base_weld" body1="base_plate" body2="slot_12_right_brazing_path" active="false" solref="0.004 1"/>
 
-    <!-- Arm2's dispenser is permanent: no transfer gripper, rack or tool-change welds. -->
+    <!-- Arm2's dual nozzle is permanently attached to link7. -->
     <weld name="arm2_dispenser_tool_weld" body1="arm2_fr3_link7"
           body2="arm2_dual_brazing_dispenser_tool" active="true" solref="0.001 1"/>
   </equality>
@@ -1351,29 +1904,61 @@
     <position name="fixture_press_actuator" joint="fixture_press_slide" kp="12000" kv="500"
               ctrlrange="-0.024 0" forcerange="-100 100"/>
     <position name="conveyor_slide_actuator" joint="conveyor_slide_joint" kp="2400" kv="220"
-              ctrlrange="0 0.630" forcerange="-1200 1200"/>
-    <position name="batch_outfeed_actuator" joint="batch_outfeed_joint" kp="2800" kv="240" ctrlrange="0 0.250" forcerange="-1400 1400"/>
-    <position name="batch_lift_actuator" joint="batch_lift_joint" kp="3000" kv="260" ctrlrange="0 0.302" forcerange="-1600 1600"/>
-    <position name="batch_pusher_actuator" joint="batch_pusher_joint" kp="2800" kv="240" ctrlrange="0 0.380" forcerange="-1400 1400"/>
+              ctrlrange="0 0.840" forcerange="-1200 1200"/>
+    <position name="transfer_s1_s2a_actuator" joint="transfer_s1_s2a_joint" kp="3200" kv="260"
+              ctrlrange="0 0.438634244" forcerange="-1400 1400"/>
+    <position name="transfer_s2a_s2b_actuator" joint="transfer_s2a_s2b_joint" kp="3200" kv="260"
+              ctrlrange="0 0.60" forcerange="-1400 1400"/>
+    <position name="transfer_s2b_s3_actuator" joint="transfer_s2b_s3_joint" kp="3200" kv="260"
+              ctrlrange="0 0.438634244" forcerange="-1400 1400"/>
+    <position name="transfer_s3_rack_actuator" joint="transfer_s3_rack_joint" kp="3200" kv="260"
+              ctrlrange="0 0.42" forcerange="-1400 1400"/>
+    <position name="table2_handoff_actuator" joint="table2_handoff_joint" kp="3200" kv="260"
+              ctrlrange="0 0.241876" forcerange="-1400 1400"/>
+    <position name="batch_outfeed_actuator" joint="batch_outfeed_joint" kp="2800" kv="240" ctrlrange="0 0.840" forcerange="-1400 1400"/>
     <position name="batch_rack_lock_actuator_0" joint="batch_rack_lock_joint_0" kp="900" kv="55" ctrlrange="0 0.025" forcerange="-120 120"/>
     <position name="batch_rack_lock_actuator_1" joint="batch_rack_lock_joint_1" kp="900" kv="55" ctrlrange="0 0.025" forcerange="-120 120"/>
     <position name="batch_rack_lock_actuator_2" joint="batch_rack_lock_joint_2" kp="900" kv="55" ctrlrange="0 0.025" forcerange="-120 120"/>
-    <position name="batch_output_actuator" joint="batch_output_joint" kp="2600" kv="220" ctrlrange="0 1.040" forcerange="-1400 1400"/>
+    <position name="batch_output_actuator" joint="batch_output_joint" kp="2600" kv="220" ctrlrange="0 1.120" forcerange="-1400 1400"/>
+    <position name="finished_output_gate_actuator" joint="finished_output_gate_joint" kp="1800" kv="150"
+              ctrlrange="0 0.500" forcerange="-600 600"/>
     <position name="batch_tray_02_index_actuator" joint="batch_tray_02_index_joint" kp="2600" kv="220" ctrlrange="0 0.600" forcerange="-1400 1400"/>
     <position name="batch_tray_03_index_actuator" joint="batch_tray_03_index_joint" kp="2600" kv="220" ctrlrange="0 0.820" forcerange="-1400 1400"/>
+    <position name="table2_turntable_actuator" joint="table2_turntable_joint" kp="1800" kv="180"
+              ctrlrange="-12.5664 12.5664" forcerange="-1800 1800"/>
+    <position name="table2_nest_a_lock_actuator" joint="table2_nest_a_lock_joint" kp="1200" kv="70"
+              ctrlrange="0 0.025" forcerange="-250 250"/>
+    <position name="table2_nest_b_lock_actuator" joint="table2_nest_b_lock_joint" kp="1200" kv="70"
+              ctrlrange="0 0.025" forcerange="-250 250"/>
+    <position name="changeover_gantry_x_actuator" joint="changeover_gantry_x_joint" kp="2200" kv="180"
+              ctrlrange="-0.16 0.710" forcerange="-1000 1000"/>
+    <position name="changeover_gantry_y_actuator" joint="changeover_gantry_y_joint" kp="1800" kv="150"
+              ctrlrange="-0.36 0.36" forcerange="-700 700"/>
+    <position name="changeover_gantry_z_actuator" joint="changeover_gantry_z_joint" kp="8000" kv="320"
+              ctrlrange="-0.15 0.360" forcerange="-2000 2000"/>
   </actuator>
 
   <sensor>
     <touch name="fixture_press_touch_sensor" site="fixture_press_touch_site"/>
     <jointpos name="fixture_press_jointpos_sensor" joint="fixture_press_slide"/>
     <actuatorfrc name="fixture_press_force_sensor" actuator="fixture_press_actuator"/>
-    <jointpos name="batch_lift_position_sensor" joint="batch_lift_joint"/>
-    <jointpos name="batch_pusher_position_sensor" joint="batch_pusher_joint"/>
     <jointpos name="batch_rack_lock_position_sensor_0" joint="batch_rack_lock_joint_0"/>
     <jointpos name="batch_rack_lock_position_sensor_1" joint="batch_rack_lock_joint_1"/>
     <jointpos name="batch_rack_lock_position_sensor_2" joint="batch_rack_lock_joint_2"/>
     <jointpos name="batch_output_position_sensor" joint="batch_output_joint"/>
+    <jointpos name="finished_output_gate_position_sensor" joint="finished_output_gate_joint"/>
     <jointpos name="batch_outfeed_position_sensor" joint="batch_outfeed_joint"/>
+    <jointpos name="transfer_s1_s2a_position_sensor" joint="transfer_s1_s2a_joint"/>
+    <jointpos name="transfer_s2a_s2b_position_sensor" joint="transfer_s2a_s2b_joint"/>
+    <jointpos name="transfer_s2b_s3_position_sensor" joint="transfer_s2b_s3_joint"/>
+    <jointpos name="transfer_s3_rack_position_sensor" joint="transfer_s3_rack_joint"/>
+    <jointpos name="table2_turntable_position_sensor" joint="table2_turntable_joint"/>
+    <jointvel name="table2_turntable_velocity_sensor" joint="table2_turntable_joint"/>
+    <jointpos name="table2_nest_a_lock_sensor" joint="table2_nest_a_lock_joint"/>
+    <jointpos name="table2_nest_b_lock_sensor" joint="table2_nest_b_lock_joint"/>
+    <jointpos name="changeover_gantry_x_sensor" joint="changeover_gantry_x_joint"/>
+    <jointpos name="changeover_gantry_y_sensor" joint="changeover_gantry_y_joint"/>
+    <jointpos name="changeover_gantry_z_sensor" joint="changeover_gantry_z_joint"/>
   </sensor>
 
   <contact>

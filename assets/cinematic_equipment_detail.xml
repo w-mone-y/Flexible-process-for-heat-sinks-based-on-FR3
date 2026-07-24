@@ -1,0 +1,330 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco>
+  <asset>
+    <texture name="cinematic_cast_tex" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.075 0.085 0.095" rgb2="0.11 0.12 0.13"/>
+    <texture name="cinematic_sheet_tex" type="2d" builtin="flat" width="256" height="256"
+             rgb1="0.58 0.61 0.64"/>
+    <material name="cinematic_cast_iron" texture="cinematic_cast_tex" texuniform="true" texrepeat="4 4"
+              rgba="0.13 0.14 0.15 1" metallic="0.48" roughness="0.58"/>
+    <material name="cinematic_sheet_metal" texture="cinematic_sheet_tex" texuniform="true"
+              rgba="0.72 0.74 0.76 1" metallic="0.82" roughness="0.24"/>
+    <material name="cinematic_zinc" rgba="0.56 0.59 0.62 1" metallic="0.92" roughness="0.18"/>
+    <material name="cinematic_bearing" rgba="0.095 0.11 0.125 1" metallic="0.70" roughness="0.34"/>
+    <material name="cinematic_seal" rgba="0.025 0.030 0.035 1" roughness="0.94"/>
+    <material name="cinematic_brass" rgba="0.68 0.43 0.12 1" metallic="0.82" roughness="0.24"/>
+    <material name="cinematic_cable" rgba="0.018 0.022 0.028 1" roughness="0.88"/>
+    <material name="cinematic_polycarbonate" rgba="0.08 0.19 0.24 0.32" specular="0.92"
+              shininess="0.95" roughness="0.10"/>
+    <material name="cinematic_warning" rgba="0.97 0.66 0.025 1" roughness="0.52"/>
+    <material name="cinematic_grease" rgba="0.055 0.065 0.072 1" metallic="0.30" roughness="0.28"/>
+  </asset>
+
+  <worldbody>
+    <light name="cinematic_equipment_key" pos="-0.85 -0.35 1.85" dir="0.30 0.35 -1"
+           diffuse="0.55 0.59 0.64" specular="0.32 0.35 0.40" castshadow="true" cutoff="78"/>
+    <light name="cinematic_furnace_fill" pos="0.75 1.55 1.30" dir="-0.35 -0.55 -0.72"
+           diffuse="0.40 0.27 0.19" specular="0.28 0.16 0.10" castshadow="false" cutoff="68"/>
+
+    <!-- Dense roller conveyor: individual shafts, bearing blocks, axle caps,
+         chain drive, extrusion slots and motor cooling fins. -->
+    <body name="cinematic_main_conveyor_detail" pos="0 -0.08 -10">
+      <geom class="visual" name="cinematic_conv_roller_01" type="cylinder" size="0.013 0.222" pos="0 0.330 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_02" type="cylinder" size="0.013 0.222" pos="0 0.390 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_03" type="cylinder" size="0.013 0.222" pos="0 0.510 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_04" type="cylinder" size="0.013 0.222" pos="0 0.570 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_05" type="cylinder" size="0.013 0.222" pos="0 0.630 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_06" type="cylinder" size="0.013 0.222" pos="0 0.690 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_07" type="cylinder" size="0.013 0.222" pos="0 0.750 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_08" type="cylinder" size="0.013 0.222" pos="0 0.810 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_09" type="cylinder" size="0.013 0.222" pos="0 0.930 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_10" type="cylinder" size="0.013 0.222" pos="0 0.990 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_11" type="cylinder" size="0.013 0.222" pos="0 1.050 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_12" type="cylinder" size="0.013 0.222" pos="0 1.110 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_conv_roller_13" type="cylinder" size="0.013 0.222" pos="0 1.170 0.196" quat="0.70710678 0 0.70710678 0" material="cinematic_sheet_metal"/>
+
+      <!-- Bearing housings on both rails. -->
+      <geom class="visual" name="cinematic_conv_bearing_l01" type="box" size="0.014 0.019 0.018" pos="-0.242 0.330 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r01" type="box" size="0.014 0.019 0.018" pos="0.242 0.330 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l02" type="box" size="0.014 0.019 0.018" pos="-0.242 0.390 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r02" type="box" size="0.014 0.019 0.018" pos="0.242 0.390 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l03" type="box" size="0.014 0.019 0.018" pos="-0.242 0.510 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r03" type="box" size="0.014 0.019 0.018" pos="0.242 0.510 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l04" type="box" size="0.014 0.019 0.018" pos="-0.242 0.630 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r04" type="box" size="0.014 0.019 0.018" pos="0.242 0.630 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l05" type="box" size="0.014 0.019 0.018" pos="-0.242 0.750 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r05" type="box" size="0.014 0.019 0.018" pos="0.242 0.750 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l06" type="box" size="0.014 0.019 0.018" pos="-0.242 0.930 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r06" type="box" size="0.014 0.019 0.018" pos="0.242 0.930 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l07" type="box" size="0.014 0.019 0.018" pos="-0.242 1.050 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r07" type="box" size="0.014 0.019 0.018" pos="0.242 1.050 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_l08" type="box" size="0.014 0.019 0.018" pos="-0.242 1.170 0.190" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_conv_bearing_r08" type="box" size="0.014 0.019 0.018" pos="0.242 1.170 0.190" material="cinematic_bearing"/>
+
+      <!-- Extrusion slots and chain-drive hardware. -->
+      <geom class="visual" name="cinematic_conv_left_slot" type="box" size="0.003 0.448 0.005" pos="-0.274 0.765 0.177" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_right_slot" type="box" size="0.003 0.448 0.005" pos="0.274 0.765 0.177" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_drive_sprocket" type="cylinder" size="0.036 0.010" pos="0.286 1.105 0.150" quat="0.70710678 0 0.70710678 0" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_conv_idler_sprocket" type="cylinder" size="0.028 0.010" pos="0.286 0.370 0.150" quat="0.70710678 0 0.70710678 0" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_conv_chain_upper" type="capsule" size="0.006" fromto="0.286 0.370 0.176 0.286 1.105 0.176" material="cinematic_grease"/>
+      <geom class="visual" name="cinematic_conv_chain_lower" type="capsule" size="0.006" fromto="0.286 0.370 0.124 0.286 1.105 0.124" material="cinematic_grease"/>
+      <geom class="visual" name="cinematic_conv_chain_guard" type="box" size="0.013 0.392 0.065" pos="0.302 0.738 0.150" material="cinematic_polycarbonate"/>
+      <geom class="visual" name="cinematic_conv_guard_frame_top" type="box" size="0.018 0.392 0.008" pos="0.305 0.738 0.218" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_guard_frame_bottom" type="box" size="0.018 0.392 0.008" pos="0.305 0.738 0.082" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_motor_fin_1" type="cylinder" size="0.058 0.004" pos="0.318 1.080 0.135" quat="0.70710678 0 0.70710678 0" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_motor_fin_2" type="cylinder" size="0.058 0.004" pos="0.338 1.080 0.135" quat="0.70710678 0 0.70710678 0" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_motor_fin_3" type="cylinder" size="0.058 0.004" pos="0.358 1.080 0.135" quat="0.70710678 0 0.70710678 0" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_motor_fin_4" type="cylinder" size="0.058 0.004" pos="0.378 1.080 0.135" quat="0.70710678 0 0.70710678 0" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_conv_motor_cable" type="capsule" size="0.007" fromto="0.390 1.115 0.105 0.390 1.185 0.035" material="cinematic_cable"/>
+    </body>
+
+    <!-- Furnace mechanical skin: seams, fasteners, refractory brick joints,
+         heater standoffs, lift-door guides and exhaust flange hardware. -->
+    <body name="cinematic_furnace_detail" pos="0 1.02 0">
+      <geom class="visual" name="cinematic_furnace_left_seam_1" type="box" size="0.006 0.215 0.005" pos="-0.382 0 0.180" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_left_seam_2" type="box" size="0.006 0.215 0.005" pos="-0.382 0 0.385" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_left_seam_3" type="box" size="0.006 0.215 0.005" pos="-0.382 0 0.590" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_right_seam_1" type="box" size="0.006 0.215 0.005" pos="0.382 0 0.180" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_right_seam_2" type="box" size="0.006 0.215 0.005" pos="0.382 0 0.385" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_right_seam_3" type="box" size="0.006 0.215 0.005" pos="0.382 0 0.590" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_roof_seam" type="box" size="0.360 0.006 0.005" pos="0 -0.220 0.775" material="cinematic_zinc"/>
+
+      <!-- Front shell fasteners. -->
+      <geom class="visual" name="cinematic_furnace_bolt_l1" type="sphere" size="0.006" pos="-0.350 -0.232 0.145" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_l2" type="sphere" size="0.006" pos="-0.350 -0.232 0.275" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_l3" type="sphere" size="0.006" pos="-0.350 -0.232 0.405" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_l4" type="sphere" size="0.006" pos="-0.350 -0.232 0.535" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_l5" type="sphere" size="0.006" pos="-0.350 -0.232 0.665" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_r1" type="sphere" size="0.006" pos="0.350 -0.232 0.145" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_r2" type="sphere" size="0.006" pos="0.350 -0.232 0.275" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_r3" type="sphere" size="0.006" pos="0.350 -0.232 0.405" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_r4" type="sphere" size="0.006" pos="0.350 -0.232 0.535" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_bolt_r5" type="sphere" size="0.006" pos="0.350 -0.232 0.665" material="cinematic_zinc"/>
+
+      <!-- Refractory block joints at the mouth. -->
+      <geom class="visual" name="cinematic_furnace_brick_l1" type="box" size="0.020 0.047 0.004" pos="-0.298 -0.194 0.220" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_l2" type="box" size="0.020 0.047 0.004" pos="-0.298 -0.194 0.350" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_l3" type="box" size="0.020 0.047 0.004" pos="-0.298 -0.194 0.480" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_l4" type="box" size="0.020 0.047 0.004" pos="-0.298 -0.194 0.610" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_r1" type="box" size="0.020 0.047 0.004" pos="0.298 -0.194 0.220" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_r2" type="box" size="0.020 0.047 0.004" pos="0.298 -0.194 0.350" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_r3" type="box" size="0.020 0.047 0.004" pos="0.298 -0.194 0.480" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_brick_r4" type="box" size="0.020 0.047 0.004" pos="0.298 -0.194 0.610" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_header_joint_1" type="box" size="0.004 0.047 0.020" pos="-0.190 -0.194 0.655" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_header_joint_2" type="box" size="0.004 0.047 0.020" pos="-0.065 -0.194 0.655" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_header_joint_3" type="box" size="0.004 0.047 0.020" pos="0.065 -0.194 0.655" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_header_joint_4" type="box" size="0.004 0.047 0.020" pos="0.190 -0.194 0.655" material="cinematic_cast_iron"/>
+
+      <!-- Heater ceramic standoffs and thermocouple. -->
+      <geom class="visual" name="cinematic_furnace_heater_support_l1" type="cylinder" size="0.014 0.010" pos="-0.273 -0.158 0.245" quat="0.70710678 0.70710678 0 0" material="ceramic"/>
+      <geom class="visual" name="cinematic_furnace_heater_support_l2" type="cylinder" size="0.014 0.010" pos="-0.273 -0.158 0.380" quat="0.70710678 0.70710678 0 0" material="ceramic"/>
+      <geom class="visual" name="cinematic_furnace_heater_support_l3" type="cylinder" size="0.014 0.010" pos="-0.273 -0.158 0.515" quat="0.70710678 0.70710678 0 0" material="ceramic"/>
+      <geom class="visual" name="cinematic_furnace_heater_support_r1" type="cylinder" size="0.014 0.010" pos="0.273 -0.158 0.245" quat="0.70710678 0.70710678 0 0" material="ceramic"/>
+      <geom class="visual" name="cinematic_furnace_heater_support_r2" type="cylinder" size="0.014 0.010" pos="0.273 -0.158 0.380" quat="0.70710678 0.70710678 0 0" material="ceramic"/>
+      <geom class="visual" name="cinematic_furnace_heater_support_r3" type="cylinder" size="0.014 0.010" pos="0.273 -0.158 0.515" quat="0.70710678 0.70710678 0 0" material="ceramic"/>
+      <geom class="visual" name="cinematic_furnace_thermocouple" type="capsule" size="0.004" fromto="0.08 0.190 0.665 0.08 -0.060 0.540" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_furnace_thermocouple_head" type="cylinder" size="0.020 0.025" pos="0.08 0.205 0.675" quat="0.70710678 0.70710678 0 0" material="cinematic_cast_iron"/>
+
+      <!-- Exhaust flange bolts and lift-door guide hardware. -->
+      <geom class="visual" name="cinematic_furnace_stack_clamp_1" type="box" size="0.004 0.075 0.012" pos="-0.215 0.055 0.900" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_stack_clamp_2" type="box" size="0.075 0.004 0.012" pos="-0.215 0.055 0.900" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_stack_bolt_1" type="sphere" size="0.006" pos="-0.155 0.055 0.790" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_stack_bolt_2" type="sphere" size="0.006" pos="-0.275 0.055 0.790" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_stack_bolt_3" type="sphere" size="0.006" pos="-0.215 -0.005 0.790" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_stack_bolt_4" type="sphere" size="0.006" pos="-0.215 0.115 0.790" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_furnace_door_guide_l" type="box" size="0.022 0.025 0.360" pos="-0.325 -0.270 0.430" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_door_guide_r" type="box" size="0.022 0.025 0.360" pos="0.325 -0.270 0.430" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_furnace_guide_insert_l" type="box" size="0.006 0.028 0.330" pos="-0.325 -0.297 0.430" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_furnace_guide_insert_r" type="box" size="0.006 0.028 0.330" pos="0.325 -0.297 0.430" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_furnace_limit_switch" type="box" size="0.018 0.016 0.032" pos="0.358 -0.292 0.720" material="sensor_blue"/>
+      <geom class="visual" name="cinematic_furnace_limit_roller" type="cylinder" size="0.010 0.008" pos="0.350 -0.316 0.690" quat="0.70710678 0.70710678 0 0" material="cinematic_zinc"/>
+    </body>
+
+    <!-- Finished-product conveyor: close-pitch live rollers with individual
+         bearing cartridges, side-chain enclosure, support feet and sensors. -->
+    <body name="cinematic_output_conveyor_detail" pos="0.55 0.37 0.165">
+      <geom class="visual" name="cinematic_out_roller_01" type="cylinder" size="0.012 0.145" pos="-0.48 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_02" type="cylinder" size="0.012 0.145" pos="-0.40 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_03" type="cylinder" size="0.012 0.145" pos="-0.32 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_04" type="cylinder" size="0.012 0.145" pos="-0.24 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_05" type="cylinder" size="0.012 0.145" pos="-0.16 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_06" type="cylinder" size="0.012 0.145" pos="-0.08 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_07" type="cylinder" size="0.012 0.145" pos="0 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_08" type="cylinder" size="0.012 0.145" pos="0.08 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_09" type="cylinder" size="0.012 0.145" pos="0.16 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_10" type="cylinder" size="0.012 0.145" pos="0.24 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_11" type="cylinder" size="0.012 0.145" pos="0.32 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_12" type="cylinder" size="0.012 0.145" pos="0.40 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_roller_13" type="cylinder" size="0.012 0.145" pos="0.48 0 0.018" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_out_bearing_f1" type="box" size="0.018 0.014 0.018" pos="-0.48 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r1" type="box" size="0.018 0.014 0.018" pos="-0.48 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_f2" type="box" size="0.018 0.014 0.018" pos="-0.32 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r2" type="box" size="0.018 0.014 0.018" pos="-0.32 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_f3" type="box" size="0.018 0.014 0.018" pos="-0.16 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r3" type="box" size="0.018 0.014 0.018" pos="-0.16 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_f4" type="box" size="0.018 0.014 0.018" pos="0 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r4" type="box" size="0.018 0.014 0.018" pos="0 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_f5" type="box" size="0.018 0.014 0.018" pos="0.16 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r5" type="box" size="0.018 0.014 0.018" pos="0.16 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_f6" type="box" size="0.018 0.014 0.018" pos="0.32 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r6" type="box" size="0.018 0.014 0.018" pos="0.32 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_f7" type="box" size="0.018 0.014 0.018" pos="0.48 -0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_bearing_r7" type="box" size="0.018 0.014 0.018" pos="0.48 0.160 0.014" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_out_chain_guard" type="box" size="0.50 0.018 0.055" pos="0 0.195 -0.025" material="cinematic_polycarbonate"/>
+      <geom class="visual" name="cinematic_out_chain_top" type="capsule" size="0.005" fromto="-0.47 0.195 0.010 0.47 0.195 0.010" material="cinematic_grease"/>
+      <geom class="visual" name="cinematic_out_chain_bottom" type="capsule" size="0.005" fromto="-0.47 0.195 -0.060 0.47 0.195 -0.060" material="cinematic_grease"/>
+      <geom class="visual" name="cinematic_out_sensor_body" type="box" size="0.016 0.020 0.026" pos="0.40 -0.195 0.080" material="sensor_blue"/>
+      <geom class="visual" name="cinematic_out_sensor_lens" type="sphere" size="0.006" pos="0.40 -0.218 0.080" material="indicator_red"/>
+      <geom class="visual" name="cinematic_out_motor_fin_1" type="cylinder" size="0.050 0.004" pos="0.455 0.215 -0.010" quat="0.70710678 0.70710678 0 0" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_out_motor_fin_2" type="cylinder" size="0.050 0.004" pos="0.475 0.215 -0.010" quat="0.70710678 0.70710678 0 0" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_out_motor_fin_3" type="cylinder" size="0.050 0.004" pos="0.495 0.215 -0.010" quat="0.70710678 0.70710678 0 0" material="cinematic_cast_iron"/>
+    </body>
+
+    <!-- Finished-output enclosure: inner receiving rollers, guide liners,
+         rubber stops, photoelectric gate and sheet-metal fasteners. -->
+    <body name="cinematic_output_box_detail" pos="1.125 0.37 0.165">
+      <geom class="visual" name="cinematic_box_inner_roller_1" type="cylinder" size="0.013 0.155" pos="-0.24 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_inner_roller_2" type="cylinder" size="0.013 0.155" pos="-0.16 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_inner_roller_3" type="cylinder" size="0.013 0.155" pos="-0.08 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_inner_roller_4" type="cylinder" size="0.013 0.155" pos="0 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_inner_roller_5" type="cylinder" size="0.013 0.155" pos="0.08 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_inner_roller_6" type="cylinder" size="0.013 0.155" pos="0.16 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_inner_roller_7" type="cylinder" size="0.013 0.155" pos="0.24 0 0.028" quat="0.70710678 0.70710678 0 0" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_box_front_liner" type="box" size="0.280 0.010 0.035" pos="0 -0.170 0.050" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_box_rear_liner" type="box" size="0.280 0.010 0.035" pos="0 0.170 0.050" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_box_stop_bar" type="box" size="0.018 0.160 0.055" pos="0.275 0 0.070" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_box_photoeye_tx" type="box" size="0.014 0.020 0.024" pos="-0.245 -0.182 0.095" material="sensor_blue"/>
+      <geom class="visual" name="cinematic_box_photoeye_rx" type="box" size="0.014 0.020 0.024" pos="-0.245 0.182 0.095" material="sensor_blue"/>
+      <geom class="visual" name="cinematic_box_photoeye_beam" type="capsule" size="0.002" fromto="-0.245 -0.170 0.095 -0.245 0.170 0.095" rgba="0.95 0.05 0.03 0.42"/>
+      <geom class="visual" name="cinematic_box_panel_seam_top" type="box" size="0.290 0.004 0.004" pos="0 -0.217 0.340" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_panel_seam_bottom" type="box" size="0.290 0.004 0.004" pos="0 -0.217 0.145" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_panel_seam_left" type="box" size="0.004 0.004 0.105" pos="-0.270 -0.217 0.242" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_panel_seam_right" type="box" size="0.004 0.004 0.105" pos="0.270 -0.217 0.242" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_rivet_1" type="sphere" size="0.005" pos="-0.275 -0.222 0.120" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_rivet_2" type="sphere" size="0.005" pos="-0.275 -0.222 0.360" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_rivet_3" type="sphere" size="0.005" pos="0.275 -0.222 0.120" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_rivet_4" type="sphere" size="0.005" pos="0.275 -0.222 0.360" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_box_foot_1" type="cylinder" size="0.040 0.018" pos="-0.245 -0.145 -0.050" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_box_foot_2" type="cylinder" size="0.040 0.018" pos="-0.245 0.145 -0.050" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_box_foot_3" type="cylinder" size="0.040 0.018" pos="0.245 -0.145 -0.050" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_box_foot_4" type="cylinder" size="0.040 0.018" pos="0.245 0.145 -0.050" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_gate_static_guide_front" type="box" size="0.022 0.024 0.300" pos="-0.315 -0.220 0.300" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_gate_static_guide_rear" type="box" size="0.022 0.024 0.300" pos="-0.315 0.220 0.300" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_gate_brass_guide_front" type="box" size="0.010 0.010 0.275" pos="-0.338 -0.205 0.300" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_gate_brass_guide_rear" type="box" size="0.010 0.010 0.275" pos="-0.338 0.205 0.300" material="cinematic_brass"/>
+    </body>
+
+    <!-- Lift-transfer fixed hardware: linear rail blocks, ball screw, cable
+         carrier and hard-stop sensors around the existing moving platform. -->
+    <body name="cinematic_transfer_detail" pos="0 0.45 -10">
+      <geom class="visual" name="cinematic_lift_ballscrew" type="capsule" size="0.014" fromto="0 0.265 -0.015 0 0.265 0.440" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_lift_ballscrew_nut" type="cylinder" size="0.030 0.035" pos="0 0.265 0.105" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_lift_top_bearing" type="cylinder" size="0.032 0.018" pos="0 0.265 0.445" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_lift_bottom_bearing" type="cylinder" size="0.032 0.018" pos="0 0.265 -0.020" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_lift_chain_link_1" type="box" size="0.018 0.025 0.010" pos="0.335 0.215 0.020" material="cinematic_cable"/>
+      <geom class="visual" name="cinematic_lift_chain_link_2" type="box" size="0.018 0.025 0.010" pos="0.335 0.215 0.050" material="cinematic_cable"/>
+      <geom class="visual" name="cinematic_lift_chain_link_3" type="box" size="0.018 0.025 0.010" pos="0.335 0.215 0.080" material="cinematic_cable"/>
+      <geom class="visual" name="cinematic_lift_chain_link_4" type="box" size="0.018 0.025 0.010" pos="0.335 0.215 0.110" material="cinematic_cable"/>
+      <geom class="visual" name="cinematic_lift_chain_link_5" type="box" size="0.018 0.025 0.010" pos="0.335 0.215 0.140" material="cinematic_cable"/>
+      <geom class="visual" name="cinematic_lift_chain_link_6" type="box" size="0.018 0.025 0.010" pos="0.335 0.215 0.170" material="cinematic_cable"/>
+      <geom class="visual" name="cinematic_lift_top_sensor" type="box" size="0.016 0.018 0.028" pos="-0.315 0.220 0.425" material="sensor_blue"/>
+      <geom class="visual" name="cinematic_lift_bottom_sensor" type="box" size="0.016 0.018 0.028" pos="-0.315 0.220 0.025" material="sensor_blue"/>
+    </body>
+
+    <!-- Detail bodies follow the real moving mechanisms through always-on
+         welds. They carry no collision geometry and negligible inertia. -->
+    <body name="cinematic_furnace_door_detail" pos="1.275 0 0.38"
+          quat="0.70710678 0 0 -0.70710678" gravcomp="1">
+      <freejoint name="cinematic_furnace_door_detail_free"/>
+      <inertial pos="0 0 0" mass="0.000001" diaginertia="0.00000001 0.00000001 0.00000001"/>
+      <geom class="visual" name="cinematic_door_inner_gasket_top" type="box" size="0.245 0.006 0.012" pos="0 0.022 0.255" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_door_inner_gasket_bottom" type="box" size="0.245 0.006 0.012" pos="0 0.022 -0.255" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_door_inner_gasket_left" type="box" size="0.012 0.006 0.245" pos="-0.245 0.022 0" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_door_inner_gasket_right" type="box" size="0.012 0.006 0.245" pos="0.245 0.022 0" material="cinematic_seal"/>
+      <geom class="visual" name="cinematic_door_rib_top" type="box" size="0.258 0.008 0.010" pos="0 -0.035 0.260" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_rib_bottom" type="box" size="0.258 0.008 0.010" pos="0 -0.035 -0.260" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_rib_left" type="box" size="0.010 0.008 0.258" pos="-0.258 -0.035 0" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_rib_right" type="box" size="0.010 0.008 0.258" pos="0.258 -0.035 0" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_window_inner" type="box" size="0.160 0.008 0.085" pos="0 0.025 0" material="cinematic_polycarbonate"/>
+      <geom class="visual" name="cinematic_door_lift_shoe_l" type="box" size="0.022 0.030 0.055" pos="-0.305 0 0.170" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_door_lift_shoe_r" type="box" size="0.022 0.030 0.055" pos="0.305 0 0.170" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_door_bolt_1" type="sphere" size="0.006" pos="-0.255 -0.046 0.255" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_bolt_2" type="sphere" size="0.006" pos="0.255 -0.046 0.255" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_bolt_3" type="sphere" size="0.006" pos="-0.255 -0.046 -0.255" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_bolt_4" type="sphere" size="0.006" pos="0.255 -0.046 -0.255" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_door_chain_bracket" type="box" size="0.050 0.025 0.025" pos="0 0 0.315" material="cinematic_cast_iron"/>
+      <geom class="visual" name="cinematic_door_chain_pin" type="cylinder" size="0.012 0.065" pos="0 0 0.340" quat="0.70710678 0.70710678 0 0" material="cinematic_zinc"/>
+    </body>
+
+    <body name="cinematic_output_gate_detail" pos="0.75 -1.060 0.165"
+          quat="0.70710678 0 0 -0.70710678" gravcomp="1">
+      <freejoint name="cinematic_output_gate_detail_free"/>
+      <inertial pos="0 0 0.20" mass="0.000001" diaginertia="0.00000001 0.00000001 0.00000001"/>
+      <geom class="visual" name="cinematic_gate_rib_top" type="box" size="0.025 0.175 0.012" pos="-0.025 0 0.405" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_rib_bottom" type="box" size="0.025 0.175 0.012" pos="-0.025 0 0.035" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_rib_front" type="box" size="0.025 0.012 0.185" pos="-0.025 -0.175 0.220" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_rib_rear" type="box" size="0.025 0.012 0.185" pos="-0.025 0.175 0.220" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_guide_shoe_front" type="box" size="0.028 0.025 0.040" pos="0 -0.210 0.070" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_gate_guide_shoe_rear" type="box" size="0.028 0.025 0.040" pos="0 0.210 0.070" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_gate_bolt_1" type="sphere" size="0.005" pos="-0.046 -0.165 0.390" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_bolt_2" type="sphere" size="0.005" pos="-0.046 0.165 0.390" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_bolt_3" type="sphere" size="0.005" pos="-0.046 -0.165 0.050" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_bolt_4" type="sphere" size="0.005" pos="-0.046 0.165 0.050" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_gate_safety_edge" type="box" size="0.032 0.185 0.012" pos="0 0 0.008" material="cinematic_seal"/>
+    </body>
+
+    <body name="cinematic_lift_carriage_detail" pos="0.75 0 -10"
+          quat="0.70710678 0 0 -0.70710678" gravcomp="1">
+      <freejoint name="cinematic_lift_carriage_detail_free"/>
+      <inertial pos="0 0 0" mass="0.000001" diaginertia="0.00000001 0.00000001 0.00000001"/>
+      <geom class="visual" name="cinematic_lift_block_l1" type="box" size="0.025 0.035 0.035" pos="-0.260 0.220 0.030" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_lift_block_r1" type="box" size="0.025 0.035 0.035" pos="0.260 0.220 0.030" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_lift_block_l2" type="box" size="0.025 0.035 0.035" pos="-0.260 0.220 0.115" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_lift_block_r2" type="box" size="0.025 0.035 0.035" pos="0.260 0.220 0.115" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_lift_encoder" type="cylinder" size="0.025 0.018" pos="0.300 0.100 0.020" material="sensor_blue"/>
+      <geom class="visual" name="cinematic_lift_encoder_cable" type="capsule" size="0.005" fromto="0.300 0.100 0.020 0.335 0.215 0.080" material="cinematic_cable"/>
+    </body>
+
+    <body name="cinematic_pusher_detail" pos="0.75 0 -10"
+          quat="0.70710678 0 0 -0.70710678" gravcomp="1">
+      <freejoint name="cinematic_pusher_detail_free"/>
+      <inertial pos="0 0 0" mass="0.000001" diaginertia="0.00000001 0.00000001 0.00000001"/>
+      <geom class="visual" name="cinematic_pusher_roller_l" type="cylinder" size="0.012 0.020" pos="-0.180 0.155 0.012" quat="0.70710678 0 0.70710678 0" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_pusher_roller_r" type="cylinder" size="0.012 0.020" pos="0.180 0.155 0.012" quat="0.70710678 0 0.70710678 0" material="cinematic_bearing"/>
+      <geom class="visual" name="cinematic_pusher_fork_bolt_l1" type="sphere" size="0.005" pos="-0.180 -0.090 -0.002" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_pusher_fork_bolt_l2" type="sphere" size="0.005" pos="-0.180 0.090 -0.002" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_pusher_fork_bolt_r1" type="sphere" size="0.005" pos="0.180 -0.090 -0.002" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_pusher_fork_bolt_r2" type="sphere" size="0.005" pos="0.180 0.090 -0.002" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_pusher_scale" type="box" size="0.008 0.150 0.004" pos="-0.215 0 -0.038" material="cinematic_sheet_metal"/>
+      <geom class="visual" name="cinematic_pusher_cable" type="capsule" size="0.006" fromto="0.215 -0.150 -0.035 0.215 0.150 -0.035" material="cinematic_cable"/>
+    </body>
+
+    <body name="cinematic_dispenser_detail" pos="0 -0.092 0.926" quat="0 0.7071067812 0.7071067812 0" gravcomp="1">
+      <freejoint name="cinematic_dispenser_detail_free"/>
+      <inertial pos="0 0 0.10" mass="0.000001" diaginertia="0.00000001 0.00000001 0.00000001"/>
+      <geom class="visual" name="cinematic_dispenser_cap_left" type="cylinder" size="0.008 0.004" pos="-0.017 0 0.105" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_dispenser_cap_right" type="cylinder" size="0.008 0.004" pos="0.017 0 0.105" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_dispenser_clamp_left" type="box" size="0.010 0.009 0.004" pos="-0.017 -0.008 0.070" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_dispenser_clamp_right" type="box" size="0.010 0.009 0.004" pos="0.017 -0.008 0.070" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_dispenser_needle_valve_left" type="cylinder" size="0.005 0.012" pos="-0.030 0 0.122" quat="0.70710678 0.70710678 0 0" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_dispenser_needle_valve_right" type="cylinder" size="0.005 0.012" pos="0.030 0 0.122" quat="0.70710678 0.70710678 0 0" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_dispenser_hose_clamp_left" type="cylinder" size="0.005 0.003" pos="-0.026 -0.016 0.132" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_dispenser_hose_clamp_right" type="cylinder" size="0.005 0.003" pos="0.026 0.016 0.132" material="cinematic_zinc"/>
+      <geom class="visual" name="cinematic_dispenser_nozzle_nut_left" type="cylinder" size="0.006 0.005" pos="0 -0.014 0.205" material="cinematic_brass"/>
+      <geom class="visual" name="cinematic_dispenser_nozzle_nut_right" type="cylinder" size="0.006 0.005" pos="0 0.014 0.205" material="cinematic_brass"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <weld name="cinematic_furnace_door_detail_weld" body1="furnace_door" body2="cinematic_furnace_door_detail" active="true" solref="0.001 1"/>
+    <weld name="cinematic_output_gate_detail_weld" body1="finished_output_gate" body2="cinematic_output_gate_detail" active="true" solref="0.001 1"/>
+    <weld name="cinematic_dispenser_detail_weld" body1="arm2_dual_brazing_dispenser_tool" body2="cinematic_dispenser_detail" active="true" solref="0.001 1"/>
+  </equality>
+
+  <worldbody>
+    <camera name="cinematic_overview" pos="0 -2.15 1.40" xyaxes="1 0 0 0 0.37 0.929" fovy="48"/>
+    <camera name="cinematic_process_closeup" pos="0 -1.10 1.95" xyaxes="1 0 0 0 0.728848 0.684675" fovy="39"/>
+    <camera name="cinematic_furnace_closeup" pos="-1.35 0.05 1.25" xyaxes="0.595228 -0.803557 0 0.355922 0.263646 0.896555" fovy="41"/>
+    <camera name="cinematic_output_closeup" pos="2.20 -1.20 1.10" xyaxes="0.806732 0.590918 0 -0.212495 0.290102 0.933106" fovy="38"/>
+  </worldbody>
+</mujoco>

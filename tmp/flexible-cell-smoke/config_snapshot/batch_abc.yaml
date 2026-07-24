@@ -1,0 +1,11 @@
+schema_version: 1
+orders:
+  - order_file: order_001.yaml
+    quantity: 2
+    priority: 5
+  - order_file: order_003.yaml
+    quantity: 1
+    priority: 10
+  - order_file: order_002.yaml
+    quantity: 3
+    priority: 3

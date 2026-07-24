@@ -1,0 +1,4 @@
+completed_at,due_time,inserted_at,order_id,preset,priority,product_id,progress,quantity,released_at,status,urgent
+555.1000000000429,,0.0,ORDER_001,A,5,PRODUCT_A,0.0,2,0.0,COMPLETED,False
+293.00000000003234,,0.0,ORDER_003,C,10,PRODUCT_C,0.0,1,0.0,COMPLETED,False
+1051.4999999995914,,0.0,ORDER_002,B,3,PRODUCT_B,0.0,3,555.1000000000429,COMPLETED,False

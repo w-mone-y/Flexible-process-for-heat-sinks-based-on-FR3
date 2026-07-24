@@ -46,8 +46,27 @@ def test_state_and_camera_contract(api_server) -> None:
         urlopen(url + "/camera.ppm", timeout=2.0)  # noqa: S310
     assert error.value.code == 503
     shared.update_camera(b"P6\n1 1\n255\n\x00\x00\x00", width=1, height=1)
+    with urlopen(url + "/camera/status", timeout=2.0) as response:  # noqa: S310
+        camera_status = json.loads(response.read())
+    assert camera_status["camera_width"] == 1
+    assert "tasks" not in camera_status
     with urlopen(url + "/camera.ppm", timeout=2.0) as response:  # noqa: S310
         assert response.read().startswith(b"P6")
+
+
+def test_prepared_state_update_remains_json_safe_and_snapshot_isolated() -> None:
+    shared = SharedState()
+    shared.update_prepared(
+        {
+            "tasks": [{"task_id": "t1", "status": "READY"}],
+            "scheduler": {"ready_count": 1, "running_count": 0},
+        }
+    )
+
+    snapshot = shared.snapshot()
+    assert json.loads(json.dumps(snapshot))["tasks"][0]["task_id"] == "t1"
+    snapshot["tasks"][0]["status"] = "BROKEN"
+    assert shared.snapshot()["tasks"][0]["status"] == "READY"
 
 
 def test_order_fault_stop_reset_commands(api_server) -> None:

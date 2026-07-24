@@ -11,6 +11,7 @@ import numpy as np
 from .config import derive_product_layout, make_order_spec
 from .domain import BrazingPathState, FinState, FixtureState, OrderSpec, ProductState
 from .fixture import FixtureController
+from .layout import SHALLOW_U_LAYOUT
 from .motion import ArmController, MotionConfig, Pose, default_scene_path, matrix_to_quat, pose_from_site
 from .preflight import PreflightReport, preflight_check
 from .tools import Arm1ToolManager, Arm2ToolManager
@@ -21,7 +22,52 @@ PATH_NAMES = tuple(
     f"slot_{index:02d}_{side}_brazing_path" for index in range(1, 13) for side in ("left", "right")
 )
 BATCH_TRAY_NAMES = tuple(f"batch_tray_{index:02d}" for index in range(1, 4))
+BATCH_COMB_POST_HALF_X = 0.012
+BATCH_COMB_POST_HALF_Y = 0.008
+BATCH_COMB_GUIDE_HALF_X = 0.045
+BATCH_COMB_LONGITUDINAL_CLEARANCE = 0.008
+BATCH_COMB_LATERAL_CLEARANCE = 0.010
+CHANGEOVER_MODULE_NAMES = tuple(
+    f"changeover_module_{pitch}_{copy}" for pitch in (15, 20, 30, 40) for copy in ("a", "b")
+)
+CHANGEOVER_MOLD_NAMES = tuple(
+    f"changeover_mold_{pitch}_{copy}" for pitch in (15, 20, 30, 40) for copy in ("a", "b")
+)
+CHANGEOVER_PRESS_NAMES = ("changeover_press_a", "changeover_press_b")
+CHANGEOVER_COMPONENT_NAMES = (
+    *CHANGEOVER_MODULE_NAMES,
+    *CHANGEOVER_MOLD_NAMES,
+    *CHANGEOVER_PRESS_NAMES,
+)
+ASYNC_STATION_ANCHORS = {
+    "s1": "station_s1_anchor",
+    "s2a": "station_s2a_anchor",
+    "s2b": "station_s2b_anchor",
+    "s3": "station_s3_anchor",
+    "rack_infeed": "station_rack_infeed_anchor",
+}
+ASYNC_TRANSFER_SPECS = {
+    "s1_s2a": ("transfer_s1_s2a_joint", "transfer_s1_s2a_actuator", 0.438634244),
+    "s2a_s2b": ("transfer_s2a_s2b_joint", "transfer_s2a_s2b_actuator", 0.60),
+    "s2b_s3": ("transfer_s2b_s3_joint", "transfer_s2b_s3_actuator", 0.438634244),
+    "s3_rack": ("transfer_s3_rack_joint", "transfer_s3_rack_actuator", 0.27),
+}
 HOME_QPOS = np.asarray([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=float)
+# The -2/-1 rad shoulder offsets belonged to the retired central turntable.
+# Each shallow-U robot base is now yawed directly at its own station, so the
+# canonical symmetric posture is the safest waiting/IK seed.
+ARM2_WAIT_QPOS = HOME_QPOS.copy()
+ARM3_WAIT_QPOS = HOME_QPOS.copy()
+
+
+def _arm_home_qpos(arm_name: str) -> np.ndarray:
+    """Return the certified idle posture for one physical workstation."""
+
+    if arm_name == "arm2":
+        return ARM2_WAIT_QPOS
+    if arm_name == "arm3":
+        return ARM3_WAIT_QPOS
+    return HOME_QPOS
 
 
 class SceneContractError(RuntimeError):
@@ -71,10 +117,25 @@ class SceneRegistry:
         self._model_initial_conaffinity = np.asarray(model.geom_conaffinity, dtype=int).copy()
         self.active_fin_count = 5
         self.active_path_count = 10
-        self.assembly_base_pose = Pose(np.asarray([0.0, 0.45, 0.240]), np.asarray([1.0, 0.0, 0.0, 0.0]))
+        self.assembly_base_pose = Pose(np.asarray([0.0, 0.37, 0.240]), np.asarray([1.0, 0.0, 0.0, 0.0]))
         self.fin_local_targets: dict[str, Pose] = {}
+        self.path_local_targets: dict[str, Pose] = {}
         self._batch_payload_active: dict[str, bool] = {}
+        self._batch_path_geometry: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, float, float]] = {}
+        self._batch_path_progress: dict[tuple[int, int], float] = {}
+        self._batch_press_target_z: dict[int, float] = {}
+        self._batch_comb_geometry: dict[int, tuple[float, tuple[float, ...], float, float]] = {}
+        self._batch_comb_installed: dict[int, bool] = {}
+        self._fault_path_slots: dict[str, int] = {}
+        self._fault_segment_names = tuple(
+            (f"fault_braze_segment_{index:02d}a", f"fault_braze_segment_{index:02d}b")
+            for index in range(1, 9)
+        )
         self.handles = self._resolve_contract()
+        self._furnace_door_qpos = int(self.model.jnt_qposadr[self.handles.furnace_door_joint])
+        self._furnace_door_limits = np.asarray(
+            self.model.jnt_range[self.handles.furnace_door_joint], dtype=float
+        ).copy()
         self.arm1_finger_actuators = (
             self._id(self.mujoco.mjtObj.mjOBJ_ACTUATOR, "arm1_left_finger_actuator"),
             self._id(self.mujoco.mjtObj.mjOBJ_ACTUATOR, "arm1_right_finger_actuator"),
@@ -85,7 +146,14 @@ class SceneRegistry:
         )
         self.arm1_suction_pad = self._id(self.mujoco.mjtObj.mjOBJ_GEOM, "arm1_suction_pad")
         self._suction_pad_rgba = np.asarray(model.geom_rgba[self.arm1_suction_pad], dtype=float).copy()
-        for name in ("assembly_tray", "base_plate", *FIN_NAMES, *PATH_NAMES, *BATCH_TRAY_NAMES):
+        for name in (
+            "assembly_tray",
+            "base_plate",
+            *FIN_NAMES,
+            *PATH_NAMES,
+            *BATCH_TRAY_NAMES,
+            *CHANGEOVER_COMPONENT_NAMES,
+        ):
             self._register_free_body(name)
         self._initial_model_qpos0 = np.asarray(model.qpos0, dtype=float).copy()
 
@@ -105,6 +173,18 @@ class SceneRegistry:
             "tray_fixture_weld",
             "base_tray_weld",
             "raw_base_rack_weld",
+            "turntable_nest_a_assembly_tray_weld",
+            "turntable_nest_b_assembly_tray_weld",
+            "table2_handoff_assembly_tray_weld",
+            "station_s1_assembly_tray_weld",
+            "station_s2a_assembly_tray_weld",
+            "station_s2b_assembly_tray_weld",
+            "station_s3_assembly_tray_weld",
+            "station_rack_infeed_assembly_tray_weld",
+            "transfer_s1_s2a_assembly_tray_weld",
+            "transfer_s2a_s2b_assembly_tray_weld",
+            "transfer_s2b_s3_assembly_tray_weld",
+            "transfer_s3_rack_assembly_tray_weld",
             "arm1_grasp_base",
             "furnace_tray_weld",
             "fixture_press_hold_weld",
@@ -289,6 +369,90 @@ class SceneRegistry:
         geom_pos[0] += direction * (full_half_length - current_half_length)
         self.model.geom_pos[geom_id] = geom_pos
 
+    def _fault_path_slot(self, path_id: str) -> tuple[str, str]:
+        normalized = path_id.removesuffix("_brazing_path")
+        if normalized not in self._fault_path_slots:
+            occupied = set(self._fault_path_slots.values())
+            try:
+                self._fault_path_slots[normalized] = next(
+                    index for index in range(len(self._fault_segment_names)) if index not in occupied
+                )
+            except StopIteration as exc:
+                raise RuntimeError("at most eight simultaneous visible brazing faults are supported") from exc
+        return self._fault_segment_names[self._fault_path_slots[normalized]]
+
+    def _show_fault_segment(
+        self,
+        geom_name: str,
+        start: Sequence[float],
+        end: Sequence[float],
+        *,
+        radius: float,
+        rgba: Sequence[float],
+    ) -> None:
+        self._set_capsule_between(geom_name, start, end)
+        geom_id = self.geom_id(geom_name)
+        self.model.geom_size[geom_id, 0] = max(0.0005, float(radius))
+        self.model.geom_rgba[geom_id] = np.asarray(rgba, dtype=float)
+
+    def set_path_gap_visual(self, path: BrazingPathState, gap_m: float) -> None:
+        """Replace one full bead by two real segments separated by a blank gap."""
+
+        start = np.asarray(path.local_start, dtype=float)
+        end = np.asarray(path.local_end, dtype=float)
+        axis = end - start
+        length = float(np.linalg.norm(axis))
+        if length <= 1.0e-9:
+            return
+        direction = axis / length
+        gap = float(np.clip(gap_m, 0.005, 0.80 * length))
+        midpoint = 0.5 * (start + end)
+        left_end = midpoint - 0.5 * gap * direction
+        right_start = midpoint + 0.5 * gap * direction
+        original = self.geom_id(path.name + "_geom")
+        self.model.geom_rgba[original, 3] = 0.0
+        left_name, right_name = self._fault_path_slot(path.path_id)
+        colour = (0.98, 0.50, 0.04, 0.96)
+        radius = path.target_width_m / 2.0
+        self._show_fault_segment(left_name, start, left_end, radius=radius, rgba=colour)
+        self._show_fault_segment(right_name, right_start, end, radius=radius, rgba=colour)
+
+    def set_path_deviation_visual(self, path: BrazingPathState, lateral_error_m: float) -> None:
+        """Show the actual shifted bead and a translucent red nominal reference."""
+
+        self.set_path_visible(path.path_id, True, coverage=1.0)
+        original = self.geom_id(path.name + "_geom")
+        self.model.geom_pos[original, 1] = float(lateral_error_m)
+        reference_name, unused_name = self._fault_path_slot(path.path_id)
+        self._show_fault_segment(
+            reference_name,
+            path.local_start,
+            path.local_end,
+            radius=max(0.0006, path.target_width_m * 0.22),
+            rgba=(1.0, 0.03, 0.02, 0.72),
+        )
+        self.model.geom_rgba[self.geom_id(unused_name), 3] = 0.0
+
+    def clear_path_fault_visual(self, path: BrazingPathState) -> None:
+        """Restore the ordinary single bead after physical rework completes."""
+
+        normalized = path.path_id.removesuffix("_brazing_path")
+        slot = self._fault_path_slots.pop(normalized, None)
+        if slot is not None:
+            for name in self._fault_segment_names[slot]:
+                self.model.geom_rgba[self.geom_id(name), 3] = 0.0
+        self.set_path_visible(
+            path.path_id,
+            bool(path.active and path.applied),
+            coverage=path.coverage_ratio if path.applied else 0.0,
+        )
+
+    def reset_path_fault_visuals(self) -> None:
+        self._fault_path_slots.clear()
+        for names in self._fault_segment_names:
+            for name in names:
+                self.model.geom_rgba[self.geom_id(name), 3] = 0.0
+
     def configure_comb_module(self, spec: OrderSpec) -> tuple[str, str]:
         """Activate exactly one matching front/rear comb insert pair.
 
@@ -458,7 +622,6 @@ class SceneRegistry:
         half_height = 0.004 - 0.0015 * amount
         self.model.geom_size[self.arm1_suction_pad, 1] = half_height
         self.model.geom_pos[self.arm1_suction_pad, 2] = 0.090 - half_height
-        self.mujoco.mj_forward(self.model, self.data)
 
     def arm1_suction_fraction(self) -> float:
         """Return the visual suction engagement in the range ``[0, 1]``."""
@@ -471,6 +634,7 @@ class SceneRegistry:
     ) -> tuple[list[FinState], list[BrazingPathState]]:
         """Resize and configure the scene's fixed 12-fin/24-path allocation."""
 
+        self.reset_path_fault_visuals()
         if isinstance(order, ProductState):
             spec = order.spec
             fins = order.fins
@@ -484,43 +648,44 @@ class SceneRegistry:
             raise ValueError("order exceeds the scene allocation of 12 fins / 24 paths")
         self.active_fin_count = spec.fin_count
         self.active_path_count = spec.path_count
-        # +X is left-right along the Arm1-to-Arm3 direction. Keep the base on
-        # Table1's left half and derive a centred row of X-aligned fins on the
-        # right. The raw blanks retain generous gripper clearance regardless
-        # of the much smaller assembly pitch selected by the comb insert.
+        # +X is left-right along the Arm1-to-Arm3 direction.  Raw positions
+        # come from the same shallow-U contract as the MJCF.  Six fins fit on
+        # each indexed tier; the second tier preserves pickup clearance
+        # without spreading long blanks into the finished-output conveyor.
         table_top_geom = self.geom_id("raw_material_rack_top")
         table_top_z = float(self.model.geom_pos[table_top_geom, 2] + self.model.geom_size[table_top_geom, 2])
         self.model.site_pos[self.handles.raw_sites["base_plate"]] = np.asarray(
-            [-0.23, 0.0, table_top_z + 0.5 * spec.base_thickness]
+            [
+                *SHALLOW_U_LAYOUT.base_magazine_xy,
+                table_top_z + 0.5 * spec.base_thickness,
+            ]
         )
-        # Two standing-fin banks keep at least 65 mm of gripper clearance and
-        # allow the full twelve-body pool to remain physically present.
-        fin_spacing = 0.075
         for index, name in enumerate(FIN_NAMES):
             if index < spec.fin_count:
-                column = index // 6
-                row = index % 6
-                rows_in_column = min(6, spec.fin_count - column * 6)
-                y_position = (row - 0.5 * (rows_in_column - 1)) * fin_spacing
-                if column:
-                    # Stagger the second bank so the long X-aligned blanks do
-                    # not overlap their first-bank neighbours where their X
-                    # ranges cross near the bank boundary.
-                    y_position += 0.25 * fin_spacing
-                x_position = 0.12 + 0.23 * column
+                position = SHALLOW_U_LAYOUT.raw_fin_position(
+                    index,
+                    spec.fin_count,
+                    table_top_z=table_top_z,
+                    fin_height_m=spec.fin_height,
+                )
             else:
-                y_position = 0.30 + 0.03 * (index - spec.fin_count)
-                x_position = 0.52
-            self.model.site_pos[self.handles.raw_sites[name]] = np.asarray(
-                [x_position, y_position, table_top_z + 0.5 * spec.fin_height]
-            )
+                # Inactive pool bodies remain isolated and invisible; their
+                # sites are kept deterministic for diagnostics only.
+                position = (0.32, 0.30 + 0.03 * (index - spec.fin_count), 0.13)
+            self.model.site_pos[self.handles.raw_sites[name]] = np.asarray(position)
         base_geom = self.geom_id("heatsink_base_plate_geom")
         self.model.geom_size[base_geom, :3] = np.asarray(spec.base_size, dtype=float) / 2.0
         self._initial_geom_size[base_geom] = np.asarray(self.model.geom_size[base_geom], dtype=float).copy()
+        # A completed batch temporarily hides the reusable Table2 workcell.
+        # Product reconfiguration used to reactivate only the fin/path pools,
+        # leaving the base alpha and collision masks at zero for the next
+        # order.  Make the base an explicit member of every product setup.
+        self._set_geom_active("heatsink_base_plate_geom", True, collide=True)
         self.mujoco.mj_forward(self.model, self.data)
         self.assembly_base_pose = self._site_pose(self.site_id("base_plate_target_site"))
         product_pose = self.assembly_base_pose
         self.fin_local_targets.clear()
+        self.path_local_targets.clear()
         self.configure_comb_module(spec)
         self.configure_dispenser(spec)
 
@@ -577,7 +742,9 @@ class SceneRegistry:
             midpoint = 0.5 * (
                 np.asarray(path.local_start, dtype=float) + np.asarray(path.local_end, dtype=float)
             )
-            world_pose = product_pose.transformed(Pose(midpoint, np.asarray([1.0, 0.0, 0.0, 0.0])))
+            local_pose = Pose(midpoint, np.asarray([1.0, 0.0, 0.0, 0.0]))
+            self.path_local_targets[name] = local_pose
+            world_pose = product_pose.transformed(local_pose)
             self.set_weld(f"{name}_base_weld", False)
             self.set_free_body_pose(name, world_pose)
             geom_name = name + "_geom"
@@ -629,7 +796,7 @@ class SceneRegistry:
         self.model.geom_size[geom_id, 1] = 0.5 * length
 
     def configure_dispenser(self, spec: OrderSpec) -> None:
-        """Adjust the permanent Arm2 dual nozzle to this order's bead spacing."""
+        """Adjust Arm2's quick-change dual nozzle to this order's bead spacing."""
 
         half_spacing = spec.nozzle_spacing / 2.0
         nozzle_run = 0.030
@@ -677,6 +844,9 @@ class SceneRegistry:
         """
 
         fins = product.fins if product is not None else None
+        # Be defensive when this method follows a batch handoff: the base must
+        # be visible and collidable before Arm1 approaches the raw rack.
+        self._set_geom_active("heatsink_base_plate_geom", True, collide=True)
         self.set_weld("base_tray_weld", False)
         self.set_weld("arm1_grasp_base", False)
         self.set_free_body_pose("base_plate", self._site_pose(self.handles.raw_sites["base_plate"]))
@@ -707,6 +877,78 @@ class SceneRegistry:
             self.set_path_visible(name, False)
         self.mujoco.mj_forward(self.model, self.data)
 
+    def configure_async_raw_kit(self, product: ProductState) -> None:
+        """Load one order's base and fin blanks into the shared pickup window.
+
+        The asynchronous line renders finished WIP on the three independent
+        batch carriers, but Arm1 still needs real free bodies to pick up.  This
+        method configures only that raw-material pool; it deliberately does
+        not touch the fixture, dispenser spacing, active batch trays or any
+        other order currently running on Arm2/Arm3.
+        """
+
+        spec = product.spec
+        table_top_geom = self.geom_id("raw_material_rack_top")
+        table_top_z = float(self.model.geom_pos[table_top_geom, 2] + self.model.geom_size[table_top_geom, 2])
+        self.model.site_pos[self.handles.raw_sites["base_plate"]] = np.asarray(
+            [
+                *SHALLOW_U_LAYOUT.base_magazine_xy,
+                table_top_z + 0.5 * spec.base_thickness,
+            ],
+            dtype=float,
+        )
+        base_geom = self.geom_id("heatsink_base_plate_geom")
+        self.model.geom_size[base_geom, :3] = np.asarray(spec.base_size, dtype=float) / 2.0
+        # These shared blanks are kinematic visual inventory in the async
+        # pipeline. Their rigid grasp welds provide transport; disabling raw
+        # contact prevents a supported blank from being mistaken for an
+        # unexpected collision with its own magazine/table.
+        self._set_geom_active("heatsink_base_plate_geom", True, collide=False)
+
+        for index, name in enumerate(FIN_NAMES):
+            geom_name = f"{name}_geom"
+            geom_id = self.geom_id(geom_name)
+            active = index < spec.fin_count
+            self.model.geom_matid[geom_id] = -1
+            self.model.geom_size[geom_id, :3] = np.asarray(spec.fin_size, dtype=float) / 2.0
+            self._set_geom_active(geom_name, active, collide=False)
+            position = (
+                SHALLOW_U_LAYOUT.raw_fin_position(
+                    index,
+                    spec.fin_count,
+                    table_top_z=table_top_z,
+                    fin_height_m=spec.fin_height,
+                )
+                if active
+                else (0.32, 0.30 + 0.03 * (index - spec.fin_count), 0.13)
+            )
+            self.model.site_pos[self.handles.raw_sites[name]] = np.asarray(position, dtype=float)
+
+        self.mujoco.mj_forward(self.model, self.data)
+        self.prepare_raw_materials(product)
+        self._set_geom_active("heatsink_base_plate_geom", True, collide=False)
+        for index, name in enumerate(FIN_NAMES):
+            active = index < spec.fin_count
+            self._set_geom_active(f"{name}_geom", active, collide=False)
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def set_async_raw_item_visible(self, item_name: str, visible: bool) -> None:
+        """Show or retire one real blank without changing another WIP tray."""
+
+        item = str(item_name)
+        if item == "base_plate":
+            geom_name = "heatsink_base_plate_geom"
+            if not visible:
+                self.grasp_base(False)
+        elif item in FIN_NAMES:
+            geom_name = f"{item}_geom"
+            if not visible:
+                self.grasp_fin(item, False)
+        else:
+            raise ValueError(f"unknown asynchronous raw item: {item_name}")
+        self._set_geom_active(geom_name, bool(visible), collide=False)
+        self.mujoco.mj_forward(self.model, self.data)
+
     def _site_pose(self, site_id: int) -> Pose:
         site = self.data.site(site_id)
         return Pose(
@@ -725,7 +967,7 @@ class SceneRegistry:
         self.set_weld("raw_base_rack_weld", False)
         self.set_weld("arm1_grasp_base", False)
         if snap:
-            self.set_free_body_pose("base_plate", self.assembly_base_pose)
+            self.set_free_body_pose("base_plate", self.refresh_assembly_target_pose())
         self.mujoco.mj_forward(self.model, self.data)
         self.set_weld(
             "base_tray_weld",
@@ -734,10 +976,22 @@ class SceneRegistry:
             forward=True,
         )
         for index, name in enumerate(PATH_NAMES):
+            active = index < self.active_path_count
+            # Brazing beads are independent free bodies so they can be grown
+            # during dispensing.  Re-seat every body in the *current* product
+            # frame before enabling its base weld.  Otherwise a pallet moved
+            # from S1 to S2A preserves the path's previous world-frame offset
+            # and the yellow bead appears at the station the pallet left.
+            if active and name in self.path_local_targets:
+                self.set_free_body_pose(
+                    name,
+                    self.product_pose().transformed(self.path_local_targets[name]),
+                )
+                self.mujoco.mj_forward(self.model, self.data)
             self.set_weld(
                 f"{name}_base_weld",
-                index < self.active_path_count,
-                recompute=("base_plate", name) if index < self.active_path_count else None,
+                active,
+                recompute=("base_plate", name) if active else None,
             )
         self.mujoco.mj_forward(self.model, self.data)
 
@@ -887,21 +1141,27 @@ class SceneRegistry:
 
     def set_furnace_door(self, fraction: float, *, teleport: bool = False) -> None:
         amount = float(np.clip(fraction, 0.0, 1.0))
-        limits = np.asarray(self.model.jnt_range[self.handles.furnace_door_joint], dtype=float)
+        limits = self._furnace_door_limits
         target = float(limits[0] + (limits[1] - limits[0]) * amount)
         self.data.ctrl[self.handles.furnace_door_actuator] = target
         if teleport:
-            address = int(self.model.jnt_qposadr[self.handles.furnace_door_joint])
-            self.data.qpos[address] = target
-            self.mujoco.mj_forward(self.model, self.data)
+            current = float(self.data.qpos[self._furnace_door_qpos])
+            if abs(current - target) <= 1.0e-12:
+                return
+            self.data.qpos[self._furnace_door_qpos] = target
+            # The simulation loop calls mj_step immediately after this write.
+            # Full dynamics/contact recomputation here doubled the per-step
+            # MuJoCo cost, including while the door was stationary. A light
+            # kinematics refresh is enough for same-frame visual/interlock
+            # reads; mj_step performs the authoritative dynamics update.
+            self.mujoco.mj_kinematics(self.model, self.data)
 
     @property
     def furnace_door_fraction(self) -> float:
         """Return the measured opening instead of the actuator command."""
 
-        joint = self.handles.furnace_door_joint
-        address = int(self.model.jnt_qposadr[joint])
-        lower, upper = np.asarray(self.model.jnt_range[joint], dtype=float)
+        address = self._furnace_door_qpos
+        lower, upper = self._furnace_door_limits
         travel = float(upper - lower)
         if travel <= 0.0:
             return 0.0
@@ -970,6 +1230,77 @@ class SceneRegistry:
             self.mujoco.mj_forward(self.model, self.data)
         return target
 
+    @property
+    def finished_output_gate_fraction(self) -> float:
+        """Measured lift-gate opening, where 0 is closed and 1 is open."""
+
+        joint_id, qpos_address, _dof_address = self._named_joint_state("finished_output_gate_joint")
+        lower, upper = np.asarray(self.model.jnt_range[joint_id], dtype=float)
+        travel = float(upper - lower)
+        if travel <= 0.0:
+            return 0.0
+        return float(np.clip((self.data.qpos[qpos_address] - lower) / travel, 0.0, 1.0))
+
+    def retire_batch_tray(self, unit_index: int) -> None:
+        """Hide one delivered tray only after it is sealed inside the outlet.
+
+        The free body is parked in the isolation area after visibility and
+        collision are disabled.  A full scene reset restores its qpos, while
+        ``reset_batch_cell`` restores its exclusive cache ownership.
+        """
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3}:
+            raise ValueError("batch unit index must be 0, 1 or 2")
+        tray = f"batch_tray_{unit:02d}"
+        self.set_batch_tray_visible(unit_index, carrier=False, payload=False)
+        self.set_batch_weld(f"batch_carrier_tray_{unit:02d}_weld", False)
+        self.set_batch_weld(f"batch_output_tray_{unit:02d}_weld", False)
+        pose = Pose(
+            np.asarray([3.0 + 0.35 * unit_index, 3.0, -1.5]),
+            np.asarray([1.0, 0.0, 0.0, 0.0]),
+        )
+        self.set_free_body_pose(tray, pose, forward=True)
+
+    def handoff_batch_payload(self, unit_index: int) -> None:
+        """Visually unload only the product from the complete slotted tray.
+
+        The finished-goods box represents a downstream handoff.  Product,
+        fins and brazing geoms disappear only after the complete assembly has
+        stopped inside the open box. The suspended comb has already been
+        withdrawn at the inspection point; the carrier plate, central
+        template and press bars remain welded to the transfer mechanism, so
+        the empty fixture visibly withdraws before the safety gate closes.
+        """
+
+        self.set_batch_tray_visible(unit_index, carrier=True, payload=False)
+
+    @staticmethod
+    def _batch_tray_fixture_names(unit: int) -> frozenset[str]:
+        """Return the rigid reusable tooling that must travel with a product."""
+
+        prefix = f"batch_tray_{int(unit):02d}"
+        return frozenset(
+            {
+                f"{prefix}_geom",
+                f"{prefix}_template_plate",
+                f"{prefix}_front_comb_base",
+                f"{prefix}_rear_comb_base",
+                f"{prefix}_front_comb_post_left",
+                f"{prefix}_front_comb_post_right",
+                f"{prefix}_rear_comb_post_left",
+                f"{prefix}_rear_comb_post_right",
+                f"{prefix}_front_press",
+                f"{prefix}_rear_press",
+                *(
+                    f"{prefix}_{end}_comb_guide_{side}{index:02d}"
+                    for end in ("front", "rear")
+                    for side in ("left", "right")
+                    for index in range(12)
+                ),
+            }
+        )
+
     def set_batch_tray_visible(
         self,
         unit_index: int,
@@ -977,18 +1308,36 @@ class SceneRegistry:
         carrier: bool,
         payload: bool,
     ) -> None:
-        """Show one preallocated carrier and optionally its completed product."""
+        """Control reusable tray tooling and product payload independently.
+
+        ``carrier`` covers the tray plate, central template, low comb bases and
+        both press bars. ``payload`` covers only the heat-sink base, fins and
+        brazing beads. Reset paths still pass both flags as false, while the
+        finished-goods handoff intentionally uses ``True, False`` so an empty
+        reusable tray can return from the outlet.
+        """
 
         unit = int(unit_index) + 1
         if unit not in {1, 2, 3}:
             raise ValueError("batch unit index must be 0, 1 or 2")
         prefix = f"batch_tray_{unit:02d}_"
+        fixture_names = self._batch_tray_fixture_names(unit)
         for geom_id in range(self.model.ngeom):
             name = self.mujoco.mj_id2name(self.model, self.mujoco.mjtObj.mjOBJ_GEOM, geom_id) or ""
             if not name.startswith(prefix):
                 continue
-            is_carrier = name == f"batch_tray_{unit:02d}_geom"
-            visible = carrier if is_carrier else payload and self._batch_payload_active.get(name, True)
+            is_fixture = name in fixture_names
+            if is_fixture:
+                is_comb = "_comb_" in name
+                visible = bool(carrier) and (
+                    not is_comb
+                    or (
+                        self._batch_comb_installed.get(int(unit_index), False)
+                        and self._batch_payload_active.get(name, True)
+                    )
+                )
+            else:
+                visible = bool(payload) and self._batch_payload_active.get(name, True)
             rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
             rgba[3] = 1.0 if visible else 0.0
             self.model.geom_rgba[geom_id] = rgba
@@ -1006,22 +1355,84 @@ class SceneRegistry:
             raise ValueError("batch unit index must be 0, 1 or 2")
         spec = product.spec
         prefix = f"batch_tray_{unit:02d}"
+        template_id = self.geom_id(f"{prefix}_template_plate")
+        template_half_size = np.asarray(
+            [
+                min(0.205, spec.base_length / 2.0 + 0.010),
+                min(0.135, spec.base_width / 2.0 + 0.010),
+                0.006,
+            ],
+            dtype=float,
+        )
+        self.model.geom_size[template_id, :3] = template_half_size
         base_id = self.geom_id(f"{prefix}_base")
         self.model.geom_size[base_id, :3] = np.asarray(spec.base_size, dtype=float) / 2.0
         self.model.geom_pos[base_id] = np.asarray([0.0, 0.0, 0.032])
         self._batch_payload_active[f"{prefix}_base"] = True
-        comb_x = spec.fin_length / 2.0 - 0.030
+        # The load-bearing portal belongs completely outside the fin envelope.
+        # Only its cantilever guide fingers reach inward over the base.  Keeping
+        # these two coordinates separate prevents the support columns from
+        # cutting through long fins after an A/B/C runtime reconfiguration.
+        support_x_abs = spec.fin_length / 2.0 + BATCH_COMB_LONGITUDINAL_CLEARANCE + BATCH_COMB_POST_HALF_X
         press_x = spec.fin_length / 2.0 - 0.065
-        for label, x in (("front_comb", -comb_x), ("rear_comb", comb_x)):
-            geom_id = self.geom_id(f"{prefix}_{label}")
-            self.model.geom_pos[geom_id, 0] = x
-            self._batch_payload_active[f"{prefix}_{label}"] = True
+        module_colour = {
+            "comb_insert_15mm": np.asarray([0.54, 0.32, 0.78], dtype=float),
+            "comb_insert_20mm": np.asarray([0.18, 0.48, 0.78], dtype=float),
+            "comb_insert_30mm": np.asarray([0.92, 0.62, 0.12], dtype=float),
+            "comb_insert_40mm": np.asarray([0.42, 0.72, 0.58], dtype=float),
+        }.get(spec.comb_module_name, np.asarray([0.18, 0.48, 0.62], dtype=float))
+        fin_centres = tuple(float(fin.target_position[1]) for fin in product.active_fins)
+        slot_offset = max(0.003, spec.fin_thickness / 2.0 + 0.002)
+        support_y = spec.base_width / 2.0 + BATCH_COMB_LATERAL_CLEARANCE + BATCH_COMB_POST_HALF_Y
+        for label, x in (("front_comb", -support_x_abs), ("rear_comb", support_x_abs)):
+            base_geom_id = self.geom_id(f"{prefix}_{label}_base")
+            self.model.geom_pos[base_geom_id, 0] = x
+            self.model.geom_size[base_geom_id, 1] = support_y + BATCH_COMB_POST_HALF_Y
+            self.model.geom_size[base_geom_id, 0] = BATCH_COMB_POST_HALF_X
+            self.model.geom_size[base_geom_id, 2] = 0.004
+            self.model.geom_pos[base_geom_id, 2] = 0.055
+            self.model.geom_rgba[base_geom_id, :3] = module_colour
+        self._batch_comb_geometry[int(unit_index)] = (
+            float(support_x_abs),
+            fin_centres,
+            float(slot_offset),
+            float(support_y),
+        )
+        self._batch_comb_installed[int(unit_index)] = False
+        for end, end_sign in (
+            ("front", -1.0),
+            ("rear", 1.0),
+        ):
+            support_x = end_sign * support_x_abs
+            for side, y_sign in (("left", -1.0), ("right", 1.0)):
+                post_name = f"{prefix}_{end}_comb_post_{side}"
+                post_id = self.geom_id(post_name)
+                self._batch_payload_active[post_name] = True
+                self.model.geom_pos[post_id] = np.asarray(
+                    [support_x, y_sign * support_y, 0.034],
+                    dtype=float,
+                )
+                self.model.geom_rgba[post_id, :3] = module_colour
+            guide_x = support_x - end_sign * (BATCH_COMB_POST_HALF_X + BATCH_COMB_GUIDE_HALF_X)
+            for side, y_sign in (("left", -1.0), ("right", 1.0)):
+                for index in range(12):
+                    name = f"{prefix}_{end}_comb_guide_{side}{index:02d}"
+                    geom_id = self.geom_id(name)
+                    active = index < len(fin_centres)
+                    self._batch_payload_active[name] = active
+                    self.model.geom_pos[geom_id, 0] = guide_x
+                    self.model.geom_rgba[geom_id, :3] = module_colour
+                    if active:
+                        self.model.geom_pos[geom_id, 1] = fin_centres[index] + y_sign * slot_offset
+        base_top = 0.032 + spec.base_thickness / 2.0
+        press_target_z = base_top + spec.fin_height + 0.003
+        self._batch_press_target_z[int(unit_index)] = float(press_target_z)
         for label, x in (("front_press", -press_x), ("rear_press", press_x)):
             geom_id = self.geom_id(f"{prefix}_{label}")
             self.model.geom_pos[geom_id, 0] = x
+            self.model.geom_pos[geom_id, 2] = press_target_z + 0.060
             self._batch_payload_active[f"{prefix}_{label}"] = True
 
-        base_top = 0.032 + spec.base_thickness / 2.0
         for index in range(12):
             name = f"{prefix}_fin_{index + 1:02d}"
             geom_id = self.geom_id(name)
@@ -1034,6 +1445,8 @@ class SceneRegistry:
                     [0.0, fin.target_position[1], base_top + spec.fin_height / 2.0]
                 )
 
+        canonical_x_start = -spec.base_length / 2.0 + spec.path_margin
+        canonical_x_end = spec.base_length / 2.0 - spec.path_margin
         for index in range(24):
             name = f"{prefix}_braze_{index + 1:02d}"
             geom_id = self.geom_id(name)
@@ -1041,12 +1454,354 @@ class SceneRegistry:
             self._batch_payload_active[name] = active
             if active:
                 path = product.active_paths[index]
-                midpoint = 0.5 * (np.asarray(path.local_start) + np.asarray(path.local_end))
+                local_start = np.asarray(path.local_start, dtype=float).copy()
+                local_end = np.asarray(path.local_end, dtype=float).copy()
+                # Every bead shares the same product-coordinate longitudinal
+                # limits.  This deliberately removes any accumulated endpoint
+                # residue from alternating left-to-right/right-to-left passes.
+                local_start[0] = canonical_x_start
+                local_end[0] = canonical_x_end
+                midpoint = 0.5 * (local_start + local_end)
                 self.model.geom_pos[geom_id] = np.asarray([midpoint[0], midpoint[1], base_top + 0.001])
                 self.model.geom_quat[geom_id] = np.asarray([0.7071067812, 0.0, 0.7071067812, 0.0])
                 self.model.geom_size[geom_id, 0] = path.target_width_m / 2.0
                 self.model.geom_size[geom_id, 1] = abs(path.local_end[0] - path.local_start[0]) / 2.0
+                self._batch_path_geometry[(unit_index, index)] = (
+                    local_start,
+                    local_end,
+                    float(path.target_width_m),
+                    float(base_top + 0.001),
+                )
+                self._batch_path_progress[(unit_index, index)] = 0.0
+            else:
+                self._batch_path_geometry.pop((unit_index, index), None)
+                self._batch_path_progress.pop((unit_index, index), None)
         self.mujoco.mj_forward(self.model, self.data)
+
+    def set_batch_comb_install_progress(
+        self,
+        unit_index: int,
+        fraction: float,
+    ) -> None:
+        """Slide both slotted comb modules into the tray from its X sides.
+
+        Each slot is formed by the same left/right guide-finger pair used by
+        the original fixture. Its centre is derived from the order's fin
+        target. The modules become visible before motion starts, move
+        continuously, and stop at the frame used later by Arm1 fin placement.
+        """
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3} or int(unit_index) not in self._batch_comb_geometry:
+            raise ValueError(f"batch comb is not configured for unit {unit_index}")
+        prefix = f"batch_tray_{unit:02d}"
+        support_x_abs, fin_centres, slot_offset, support_y = self._batch_comb_geometry[int(unit_index)]
+        amount = float(np.clip(fraction, 0.0, 1.0))
+        eased = amount * amount * (3.0 - 2.0 * amount)
+        outside_offset = 0.085 * (1.0 - eased)
+        self._batch_comb_installed[int(unit_index)] = amount > 1.0e-6
+        for end, end_sign in (
+            ("front", -1.0),
+            ("rear", 1.0),
+        ):
+            support_x = end_sign * (support_x_abs + outside_offset)
+            base_id = self.geom_id(f"{prefix}_{end}_comb_base")
+            self.model.geom_pos[base_id, 0] = support_x
+            base_rgba = np.asarray(self.model.geom_rgba[base_id], dtype=float).copy()
+            base_rgba[3] = 1.0 if amount > 1.0e-6 else 0.0
+            self.model.geom_rgba[base_id] = base_rgba
+            for side, y_sign in (("left", -1.0), ("right", 1.0)):
+                post_name = f"{prefix}_{end}_comb_post_{side}"
+                post_id = self.geom_id(post_name)
+                self.model.geom_pos[post_id] = np.asarray(
+                    [support_x, y_sign * support_y, 0.034],
+                    dtype=float,
+                )
+                post_rgba = np.asarray(self.model.geom_rgba[post_id], dtype=float).copy()
+                post_rgba[3] = 1.0 if amount > 1.0e-6 else 0.0
+                self.model.geom_rgba[post_id] = post_rgba
+            guide_x = support_x - end_sign * (BATCH_COMB_POST_HALF_X + BATCH_COMB_GUIDE_HALF_X)
+            for side, y_sign in (("left", -1.0), ("right", 1.0)):
+                for index in range(12):
+                    name = f"{prefix}_{end}_comb_guide_{side}{index:02d}"
+                    geom_id = self.geom_id(name)
+                    active = index < len(fin_centres)
+                    self.model.geom_pos[geom_id, 0] = guide_x
+                    if active:
+                        self.model.geom_pos[geom_id, 1] = fin_centres[index] + y_sign * slot_offset
+                    rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+                    rgba[3] = 1.0 if active and amount > 1.0e-6 else 0.0
+                    self.model.geom_rgba[geom_id] = rgba
+
+    def batch_tray_pose(self, unit_index: int) -> Pose:
+        """Return the live carrier frame used by order-local motion targets."""
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3}:
+            raise ValueError("batch unit index must be 0, 1 or 2")
+        return self.free_body_pose(f"batch_tray_{unit:02d}")
+
+    def batch_to_world(self, unit_index: int, local: Sequence[float] | Pose) -> np.ndarray | Pose:
+        """Transform a point or pose from one pallet frame into world space."""
+
+        tray = self.batch_tray_pose(unit_index)
+        if isinstance(local, Pose):
+            return tray.transformed(local)
+        vector = np.asarray(local, dtype=float)
+        if vector.shape != (3,):
+            raise ValueError("batch coordinate must be xyz")
+        return tray.position + tray.rotation @ vector
+
+    def set_batch_brazing_path_progress(
+        self,
+        unit_index: int,
+        path_index: int,
+        fraction: float,
+        *,
+        reverse: bool = False,
+        allow_decrease: bool = False,
+    ) -> None:
+        """Grow one bead from the same end currently followed by Arm2.
+
+        The batch carriers use one capsule per path for rendering efficiency.
+        Updating its local midpoint and half-length makes the deposited segment
+        grow continuously without adding hundreds of collision-free geoms.
+        """
+
+        unit = int(unit_index) + 1
+        key = (int(unit_index), int(path_index))
+        if unit not in {1, 2, 3} or key not in self._batch_path_geometry:
+            raise ValueError(f"unknown batch brazing path {key}")
+        local_start, local_end, width_m, height_m = self._batch_path_geometry[key]
+        requested = float(np.clip(fraction, 0.0, 1.0))
+        previous = self._batch_path_progress.get(key, 0.0)
+        amount = requested if allow_decrease else max(previous, requested)
+        self._batch_path_progress[key] = amount
+        travel_start = local_end if reverse else local_start
+        travel_end = local_start if reverse else local_end
+        current = travel_start + amount * (travel_end - travel_start)
+        midpoint = 0.5 * (travel_start + current)
+        length = float(np.linalg.norm(current - travel_start))
+        geom_name = f"batch_tray_{unit:02d}_braze_{int(path_index) + 1:02d}"
+        geom_id = self.geom_id(geom_name)
+        self.model.geom_pos[geom_id] = np.asarray([midpoint[0], midpoint[1], height_m])
+        self.model.geom_quat[geom_id] = np.asarray([0.7071067812, 0.0, 0.7071067812, 0.0])
+        self.model.geom_size[geom_id, 0] = width_m / 2.0
+        self.model.geom_size[geom_id, 1] = max(1.0e-5, 0.5 * length)
+        rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+        rgba[3] = 1.0 if amount > 1.0e-6 else 0.0
+        self.model.geom_rgba[geom_id] = rgba
+
+    def set_batch_base_visible(self, unit_index: int, visible: bool = True) -> None:
+        """Commit only the base visual for one WIP tray."""
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3}:
+            raise ValueError("batch unit index must be 0, 1 or 2")
+        geom_id = self.geom_id(f"batch_tray_{unit:02d}_base")
+        rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+        rgba[3] = 1.0 if visible else 0.0
+        self.model.geom_rgba[geom_id] = rgba
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def set_batch_fin_visible(
+        self,
+        unit_index: int,
+        fin_index: int,
+        visible: bool = True,
+    ) -> None:
+        """Commit one fin without rewriting any previously installed fin."""
+
+        unit = int(unit_index) + 1
+        index = int(fin_index)
+        if unit not in {1, 2, 3} or not 0 <= index < 12:
+            raise ValueError("batch fin index is outside the 3x12 object pool")
+        name = f"batch_tray_{unit:02d}_fin_{index + 1:02d}"
+        active = self._batch_payload_active.get(name, False)
+        geom_id = self.geom_id(name)
+        rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+        rgba[3] = 1.0 if visible and active else 0.0
+        self.model.geom_rgba[geom_id] = rgba
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def set_batch_press_visible(self, unit_index: int, visible: bool = True) -> None:
+        """Commit the two short press beams without touching product visuals."""
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3}:
+            raise ValueError("batch unit index must be 0, 1 or 2")
+        for suffix in ("front_press", "rear_press"):
+            geom_id = self.geom_id(f"batch_tray_{unit:02d}_{suffix}")
+            rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+            rgba[3] = 1.0 if visible else 0.0
+            self.model.geom_rgba[geom_id] = rgba
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def set_batch_press_progress(self, unit_index: int, fraction: float) -> None:
+        """Lower both short press beams with a smooth, visible stroke."""
+
+        unit = int(unit_index) + 1
+        index = int(unit_index)
+        if unit not in {1, 2, 3} or index not in self._batch_press_target_z:
+            raise ValueError(f"batch press is not configured for unit {unit_index}")
+        amount = float(np.clip(fraction, 0.0, 1.0))
+        eased = amount * amount * (3.0 - 2.0 * amount)
+        target_z = self._batch_press_target_z[index]
+        current_z = target_z + 0.060 * (1.0 - eased)
+        for suffix in ("front_press", "rear_press"):
+            geom_id = self.geom_id(f"batch_tray_{unit:02d}_{suffix}")
+            self.model.geom_pos[geom_id, 2] = current_z
+            rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+            rgba[3] = 1.0
+            self.model.geom_rgba[geom_id] = rgba
+
+    def set_batch_press_locked(self, unit_index: int, locked: bool = True) -> None:
+        """Expose the fixture-lock result without redrawing the product."""
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3}:
+            raise ValueError("batch unit index must be 0, 1 or 2")
+        colour = np.asarray([0.12, 0.72, 0.28] if locked else [0.92, 0.52, 0.10])
+        for suffix in ("front_press", "rear_press"):
+            geom_id = self.geom_id(f"batch_tray_{unit:02d}_{suffix}")
+            self.model.geom_rgba[geom_id, :3] = colour
+
+    def set_batch_tray_stage(
+        self,
+        unit_index: int,
+        *,
+        base_visible: bool = False,
+        material_count: int = 0,
+        fin_count: int = 0,
+        comb_visible: bool = False,
+        press_visible: bool = False,
+    ) -> None:
+        """Render one WIP carrier at its real current manufacturing stage."""
+
+        unit = int(unit_index) + 1
+        if unit not in {1, 2, 3}:
+            raise ValueError("batch unit index must be 0, 1 or 2")
+        prefix = f"batch_tray_{unit:02d}"
+        self.set_batch_tray_visible(unit_index, carrier=True, payload=True)
+
+        def show(name: str, visible: bool) -> None:
+            geom_id = self.geom_id(name)
+            rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+            rgba[3] = 1.0 if visible else 0.0
+            self.model.geom_rgba[geom_id] = rgba
+
+        show(f"{prefix}_base", bool(base_visible))
+        for index in range(12):
+            name = f"{prefix}_fin_{index + 1:02d}"
+            show(name, index < int(fin_count) and self._batch_payload_active.get(name, False))
+        for index in range(24):
+            name = f"{prefix}_braze_{index + 1:02d}"
+            show(name, index < int(material_count) and self._batch_payload_active.get(name, False))
+        for suffix in ("front_comb_base", "rear_comb_base"):
+            show(f"{prefix}_{suffix}", bool(comb_visible))
+        for end in ("front", "rear"):
+            for side in ("left", "right"):
+                show(f"{prefix}_{end}_comb_post_{side}", bool(comb_visible))
+            for side in ("left", "right"):
+                for index in range(12):
+                    name = f"{prefix}_{end}_comb_guide_{side}{index:02d}"
+                    show(
+                        name,
+                        bool(comb_visible) and self._batch_payload_active.get(name, False),
+                    )
+        for suffix in ("front_press", "rear_press"):
+            show(f"{prefix}_{suffix}", bool(press_visible))
+        self.mujoco.mj_forward(self.model, self.data)
+
+    @staticmethod
+    def _async_wip_unit(tray_id: str) -> int:
+        value = str(tray_id).strip().lower()
+        if value.startswith("batch_tray_"):
+            value = f"tray_{value[-2:]}"
+        if value not in {"tray_01", "tray_02", "tray_03"}:
+            raise ValueError(f"unknown async WIP tray: {tray_id}")
+        return int(value[-2:])
+
+    @staticmethod
+    def _async_wip_ownership_welds(unit: int) -> tuple[str, ...]:
+        return (
+            *(f"station_{station}_tray_{unit:02d}_weld" for station in ASYNC_STATION_ANCHORS),
+            *(f"transfer_{transfer}_tray_{unit:02d}_weld" for transfer in ASYNC_TRANSFER_SPECS),
+            f"batch_station_tray_{unit:02d}_weld" if unit == 1 else f"batch_indexer_tray_{unit:02d}_weld",
+            f"batch_carrier_tray_{unit:02d}_weld",
+            f"batch_output_tray_{unit:02d}_weld",
+            *(f"batch_rack_tray_{unit:02d}_shelf_{shelf}_weld" for shelf in range(3)),
+        )
+
+    def dock_batch_tray_to_async_station(
+        self,
+        tray_id: str,
+        station: str,
+        *,
+        snap: bool = False,
+    ) -> str:
+        """Atomically assign one physical WIP tray to one shallow-U station."""
+
+        unit = self._async_wip_unit(tray_id)
+        key = str(station).strip().lower()
+        if key not in ASYNC_STATION_ANCHORS:
+            raise ValueError(f"unknown asynchronous station: {station}")
+        tray = f"batch_tray_{unit:02d}"
+        anchor = ASYNC_STATION_ANCHORS[key]
+        for weld in self._async_wip_ownership_welds(unit):
+            self.set_batch_weld(weld, False)
+        if snap:
+            self.set_free_body_pose(
+                tray,
+                _pose_from_body(self.data, self.body_id(anchor)),
+                forward=True,
+            )
+        self.set_batch_weld(
+            f"station_{key}_tray_{unit:02d}_weld",
+            True,
+            recompute=(anchor, tray),
+        )
+        return key
+
+    def begin_batch_tray_async_transfer(self, tray_id: str, transfer_id: str) -> str:
+        """Move station ownership onto an empty, homed transfer carriage."""
+
+        unit = self._async_wip_unit(tray_id)
+        key = str(transfer_id).strip().lower().removeprefix("transfer_")
+        if key not in ASYNC_TRANSFER_SPECS:
+            raise ValueError(f"unknown asynchronous transfer: {transfer_id}")
+        if abs(self.async_transfer_position(key)) > 0.002:
+            raise RuntimeError(f"{key}输送滑台尚未回到源端")
+        tray = f"batch_tray_{unit:02d}"
+        carriage = f"transfer_{key}_carriage"
+        for weld in self._async_wip_ownership_welds(unit):
+            self.set_batch_weld(weld, False)
+        self.set_batch_weld(
+            f"transfer_{key}_tray_{unit:02d}_weld",
+            True,
+            recompute=(carriage, tray),
+        )
+        return key
+
+    def finish_batch_tray_async_transfer(
+        self,
+        tray_id: str,
+        transfer_id: str,
+        destination: str,
+    ) -> None:
+        """Hand a stopped tray to its destination before the empty slide returns."""
+
+        unit = self._async_wip_unit(tray_id)
+        key = str(transfer_id).strip().lower().removeprefix("transfer_")
+        target = str(destination).strip().lower()
+        tray = f"batch_tray_{unit:02d}"
+        anchor = ASYNC_STATION_ANCHORS[target]
+        self.set_batch_weld(f"transfer_{key}_tray_{unit:02d}_weld", False)
+        self.set_batch_weld(
+            f"station_{target}_tray_{unit:02d}_weld",
+            True,
+            recompute=(anchor, tray),
+        )
 
     def set_workcell_visible(self, visible: bool) -> None:
         """Toggle the reusable Table2 product/fixture representation.
@@ -1088,6 +1843,389 @@ class SceneRegistry:
     def set_batch_weld(self, name: str, active: bool, *, recompute: tuple[str, str] | None = None) -> None:
         self.set_weld(name, active, recompute=recompute, forward=True)
 
+    def async_transfer_position(self, transfer_id: str) -> float:
+        key = str(transfer_id).strip().lower().removeprefix("transfer_")
+        joint, _, _ = ASYNC_TRANSFER_SPECS[key]
+        return self.batch_joint_position(joint)
+
+    def async_transfer_velocity(self, transfer_id: str) -> float:
+        key = str(transfer_id).strip().lower().removeprefix("transfer_")
+        joint, _, _ = ASYNC_TRANSFER_SPECS[key]
+        return self.batch_joint_velocity(joint)
+
+    def async_transfer_limit(self, transfer_id: str) -> float:
+        key = str(transfer_id).strip().lower().removeprefix("transfer_")
+        return float(ASYNC_TRANSFER_SPECS[key][2])
+
+    def set_async_transfer_target(
+        self,
+        transfer_id: str,
+        position_m: float,
+        *,
+        teleport: bool = False,
+    ) -> float:
+        key = str(transfer_id).strip().lower().removeprefix("transfer_")
+        joint, actuator, _ = ASYNC_TRANSFER_SPECS[key]
+        return self.set_batch_joint_target(joint, actuator, position_m, teleport=teleport)
+
+    def reset_async_transfers(self, *, teleport: bool = True) -> None:
+        for transfer_id in ASYNC_TRANSFER_SPECS:
+            self.set_async_transfer_target(transfer_id, 0.0, teleport=teleport)
+
+    def dock_assembly_tray_to_station(self, station: str, *, snap: bool = True) -> str:
+        """Give exactly one asynchronous station ownership of the live tray."""
+
+        key = str(station).strip().lower()
+        if key not in ASYNC_STATION_ANCHORS:
+            raise ValueError(f"unknown asynchronous station: {station}")
+        anchor = ASYNC_STATION_ANCHORS[key]
+        ownership_welds = [
+            "tray_fixture_weld",
+            "furnace_tray_weld",
+            *[f"station_{name}_assembly_tray_weld" for name in ASYNC_STATION_ANCHORS],
+            *[f"transfer_{name}_assembly_tray_weld" for name in ASYNC_TRANSFER_SPECS],
+            "turntable_nest_a_assembly_tray_weld",
+            "turntable_nest_b_assembly_tray_weld",
+            "table2_handoff_assembly_tray_weld",
+        ]
+        for weld in ownership_welds:
+            self.set_weld(weld, False)
+        if snap:
+            self.set_free_body_pose(
+                "assembly_tray",
+                _pose_from_body(self.data, self.body_id(anchor)),
+                forward=True,
+            )
+        self.set_weld(
+            f"station_{key}_assembly_tray_weld",
+            True,
+            recompute=(anchor, "assembly_tray"),
+            forward=True,
+        )
+        self.refresh_assembly_target_pose()
+        return key
+
+    def handoff_rack_infeed_to_conveyor(self) -> None:
+        """Atomically transfer the live tray from rack dock to furnace slide."""
+
+        rack_weld = "station_rack_infeed_assembly_tray_weld"
+        conveyor_weld = "tray_fixture_weld"
+        if bool(self.data.eq_active[self.equality_id(conveyor_weld)]):
+            return
+        if not bool(self.data.eq_active[self.equality_id(rack_weld)]):
+            raise RuntimeError("托盘尚未到达炉前料架入口，不能交接给炉体输送滑台")
+        self.set_weld(rack_weld, False)
+        self.set_weld(
+            conveyor_weld,
+            True,
+            recompute=("assembly_fixture", "assembly_tray"),
+            forward=True,
+        )
+        self.refresh_assembly_target_pose()
+
+    def async_line_snapshot(self) -> dict[str, Any]:
+        station_owner = None
+        for station in ASYNC_STATION_ANCHORS:
+            if bool(self.data.eq_active[self.equality_id(f"station_{station}_assembly_tray_weld")]):
+                station_owner = station.upper()
+                break
+        tray_owners: dict[str, str] = {}
+        for unit in range(1, 4):
+            tray_id = f"tray_{unit:02d}"
+            owner = "BUFFER"
+            for station in ASYNC_STATION_ANCHORS:
+                weld = self.equality_id(f"station_{station}_tray_{unit:02d}_weld")
+                if bool(self.data.eq_active[weld]):
+                    owner = station.upper()
+                    break
+            if owner == "BUFFER":
+                for transfer in ASYNC_TRANSFER_SPECS:
+                    weld = self.equality_id(f"transfer_{transfer}_tray_{unit:02d}_weld")
+                    if bool(self.data.eq_active[weld]):
+                        owner = f"TRANSFER_{transfer.upper()}"
+                        break
+            tray_owners[tray_id] = owner
+        return {
+            "layout": "SHALLOW_U",
+            "station_owner": station_owner,
+            "station_positions_m": {
+                key.upper(): np.asarray(
+                    self.data.body(anchor).xpos,
+                    dtype=float,
+                ).tolist()
+                for key, anchor in ASYNC_STATION_ANCHORS.items()
+            },
+            "material_magazines_m": {
+                "BASE": [*SHALLOW_U_LAYOUT.base_magazine_xy, 0.10],
+                "FIN": [*SHALLOW_U_LAYOUT.fin_magazine_xy, 0.10],
+            },
+            "output_lane": {
+                "center_x_m": SHALLOW_U_LAYOUT.output_lane_x,
+                "pallet_half_width_m": SHALLOW_U_LAYOUT.output_pallet_half_width_m,
+            },
+            "physical_tray_owners": tray_owners,
+            "transfer_positions_m": {
+                key.upper(): self.async_transfer_position(key) for key in ASYNC_TRANSFER_SPECS
+            },
+            "transfer_velocities_m_s": {
+                key.upper(): self.async_transfer_velocity(key) for key in ASYNC_TRANSFER_SPECS
+            },
+        }
+
+    @property
+    def turntable_angle_rad(self) -> float:
+        return self.batch_joint_position("table2_turntable_joint")
+
+    @property
+    def turntable_velocity_rad_s(self) -> float:
+        return self.batch_joint_velocity("table2_turntable_joint")
+
+    def set_turntable_target(self, angle_rad: float, *, teleport: bool = False) -> float:
+        return self.set_batch_joint_target(
+            "table2_turntable_joint",
+            "table2_turntable_actuator",
+            angle_rad,
+            teleport=teleport,
+        )
+
+    def set_turntable_nest_lock(
+        self,
+        nest_id: str,
+        engaged: bool,
+        *,
+        teleport: bool = False,
+    ) -> None:
+        nest = str(nest_id).strip().lower().removeprefix("nest_")
+        if nest not in {"a", "b"}:
+            raise ValueError("turntable nest must be A or B")
+        self.set_batch_joint_target(
+            f"table2_nest_{nest}_lock_joint",
+            f"table2_nest_{nest}_lock_actuator",
+            0.025 if engaged else 0.0,
+            teleport=teleport,
+        )
+
+    @property
+    def handoff_position_m(self) -> float:
+        return self.batch_joint_position("table2_handoff_joint")
+
+    @property
+    def handoff_velocity_m_s(self) -> float:
+        return self.batch_joint_velocity("table2_handoff_joint")
+
+    def set_handoff_target(self, position_m: float, *, teleport: bool = False) -> float:
+        return self.set_batch_joint_target(
+            "table2_handoff_joint",
+            "table2_handoff_actuator",
+            position_m,
+            teleport=teleport,
+        )
+
+    def refresh_assembly_target_pose(self) -> Pose:
+        """Refresh the cached product frame after any physical pallet move."""
+
+        self.mujoco.mj_kinematics(self.model, self.data)
+        self.assembly_base_pose = self.site_pose("base_plate_target_site")
+        return self.assembly_base_pose
+
+    def dock_assembly_tray_to_turntable(self, station: str = "assembly") -> str:
+        """Bind the reusable physical workpiece tray to the live turntable.
+
+        ``station`` names a world-side workstation, not a permanent nest.  A
+        180-degree index swaps which physical nest is on the left, so the
+        owner is selected from the measured anchor X coordinates every time a
+        fresh product unit enters the workcell.
+        """
+
+        normalized = str(station).strip().lower()
+        if normalized not in {"assembly", "process"}:
+            raise ValueError("turntable station must be assembly or process")
+        anchors = {
+            "a": self.site_pose("table2_nest_a_site"),
+            "b": self.site_pose("table2_nest_b_site"),
+        }
+        ordered = sorted(anchors, key=lambda key: float(anchors[key].position[0]))
+        nest = ordered[0] if normalized == "assembly" else ordered[-1]
+        anchor = f"table2_nest_{nest}_anchor"
+        for weld in (
+            "tray_fixture_weld",
+            "turntable_nest_a_assembly_tray_weld",
+            "turntable_nest_b_assembly_tray_weld",
+            "table2_handoff_assembly_tray_weld",
+            "furnace_tray_weld",
+        ):
+            self.set_weld(weld, False)
+        anchor_pose = _pose_from_body(self.data, self.body_id(anchor))
+        self.set_free_body_pose("assembly_tray", anchor_pose, forward=True)
+        self.set_weld(
+            f"turntable_nest_{nest}_assembly_tray_weld",
+            True,
+            recompute=(anchor, "assembly_tray"),
+            forward=True,
+        )
+        self.set_turntable_nest_lock("a", True)
+        self.set_turntable_nest_lock("b", True)
+        self.refresh_assembly_target_pose()
+        return nest
+
+    def assembly_tray_turntable_nest(self) -> str | None:
+        for nest in ("a", "b"):
+            weld = self.equality_id(f"turntable_nest_{nest}_assembly_tray_weld")
+            if bool(self.data.eq_active[weld]):
+                return nest
+        return None
+
+    def set_changeover_gantry_target(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        *,
+        teleport: bool = False,
+    ) -> tuple[float, float, float]:
+        return (
+            self.set_batch_joint_target(
+                "changeover_gantry_x_joint",
+                "changeover_gantry_x_actuator",
+                x,
+                teleport=teleport,
+            ),
+            self.set_batch_joint_target(
+                "changeover_gantry_y_joint",
+                "changeover_gantry_y_actuator",
+                y,
+                teleport=teleport,
+            ),
+            self.set_batch_joint_target(
+                "changeover_gantry_z_joint",
+                "changeover_gantry_z_actuator",
+                z,
+                teleport=teleport,
+            ),
+        )
+
+    def changeover_gantry_position(self) -> tuple[float, float, float]:
+        return tuple(
+            self.batch_joint_position(name)
+            for name in (
+                "changeover_gantry_x_joint",
+                "changeover_gantry_y_joint",
+                "changeover_gantry_z_joint",
+            )
+        )
+
+    def assign_tray_to_turntable(self, tray_id: str, nest_id: str | None) -> None:
+        tray = str(tray_id).lower()
+        if tray not in BATCH_TRAY_NAMES:
+            raise ValueError(f"unknown flexible tray: {tray_id}")
+        unit = int(tray[-2:])
+        ownership_welds = [
+            f"turntable_nest_a_tray_{unit:02d}_weld",
+            f"turntable_nest_b_tray_{unit:02d}_weld",
+            f"batch_station_tray_{unit:02d}_weld" if unit == 1 else f"batch_indexer_tray_{unit:02d}_weld",
+            f"batch_carrier_tray_{unit:02d}_weld",
+            f"batch_output_tray_{unit:02d}_weld",
+        ]
+        ownership_welds.extend(f"batch_rack_tray_{unit:02d}_shelf_{shelf}_weld" for shelf in range(3))
+        for weld in ownership_welds:
+            self.set_batch_weld(weld, False)
+        if nest_id is None:
+            return
+        nest = str(nest_id).strip().lower().removeprefix("nest_")
+        if nest not in {"a", "b"}:
+            raise ValueError("turntable nest must be A or B")
+        anchor = f"table2_nest_{nest}_anchor"
+        pose = _pose_from_body(self.data, self.body_id(anchor))
+        self.set_free_body_pose(tray, pose, forward=True)
+        self.set_batch_weld(
+            f"turntable_nest_{nest}_tray_{unit:02d}_weld",
+            True,
+            recompute=(anchor, tray),
+        )
+        self.set_turntable_nest_lock(nest, True)
+
+    def assign_changeover_module(self, module_id: str, owner: str) -> None:
+        module = str(module_id).lower()
+        if module not in CHANGEOVER_COMPONENT_NAMES:
+            raise ValueError(f"unknown changeover module: {module_id}")
+        module_body = self.body_id(module)
+        for geom_id in range(self.model.ngeom):
+            body_id = int(self.model.geom_bodyid[geom_id])
+            while body_id > 0 and body_id != module_body:
+                body_id = int(self.model.body_parentid[body_id])
+            if body_id == module_body:
+                # Ownership welds and pose/velocity interlocks provide the
+                # module safety contract. Disabling contacts prevents a rack
+                # part from solver-jamming during the deliberate extraction.
+                self.model.geom_contype[geom_id] = 0
+                self.model.geom_conaffinity[geom_id] = 0
+        copy = module.rsplit("_", 1)[-1]
+        rack_weld = f"{module}_rack_weld"
+        gantry_weld = f"{module}_gantry_weld"
+        nest_weld = f"{module}_nest_{copy}_weld"
+        for weld in (rack_weld, gantry_weld, nest_weld):
+            self.set_batch_weld(weld, False)
+        normalized = str(owner).strip().lower()
+        if normalized == "rack":
+            anchor = "changeover_module_library"
+            weld = rack_weld
+        elif normalized == "gantry":
+            anchor = "changeover_gantry_dual_hook"
+            weld = gantry_weld
+        elif normalized in {"nest_a", "nest_b"}:
+            expected = f"nest_{copy}"
+            if normalized != expected:
+                raise ValueError(f"{module} is allocated to {expected}")
+            anchor = f"table2_{normalized}_anchor"
+            weld = nest_weld
+        else:
+            raise ValueError("module owner must be rack, gantry, nest_a or nest_b")
+        self.set_batch_weld(weld, True, recompute=(anchor, module))
+
+    def reset_async_line(self) -> None:
+        """Reset only the active shallow-U carriers and station ownership."""
+
+        self.reset_async_transfers(teleport=True)
+        self.dock_assembly_tray_to_station("s1", snap=True)
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def reset_flexible_cell(self) -> None:
+        """Compatibility alias for integrations predating the async line."""
+
+        self.reset_async_line()
+
+    def flexible_cell_snapshot(self) -> dict[str, Any]:
+        module_owners: dict[str, str] = {}
+        for module in CHANGEOVER_COMPONENT_NAMES:
+            copy = module.rsplit("_", 1)[-1]
+            owner = "free"
+            for label, weld in (
+                ("module_rack", f"{module}_rack_weld"),
+                ("changeover_gantry", f"{module}_gantry_weld"),
+                (f"turntable_nest_{copy}", f"{module}_nest_{copy}_weld"),
+            ):
+                if bool(self.data.eq_active[self.equality_id(weld)]):
+                    owner = label
+                    break
+            module_owners[module] = owner
+        tray_owners: dict[str, str] = {}
+        for unit in range(1, 4):
+            tray = f"tray_{unit:02d}"
+            owner = "logistics_or_cache"
+            for nest in ("a", "b"):
+                if bool(self.data.eq_active[self.equality_id(f"turntable_nest_{nest}_tray_{unit:02d}_weld")]):
+                    owner = f"turntable_nest_{nest}"
+            tray_owners[tray] = owner
+        return {
+            "turntable_angle_deg": float(np.degrees(self.turntable_angle_rad) % 360.0),
+            "turntable_velocity_deg_s": float(np.degrees(self.turntable_velocity_rad_s)),
+            "nest_a_lock_m": self.batch_joint_position("table2_nest_a_lock_joint"),
+            "nest_b_lock_m": self.batch_joint_position("table2_nest_b_lock_joint"),
+            "gantry_position_m": list(self.changeover_gantry_position()),
+            "module_owners": module_owners,
+            "tray_owners": tray_owners,
+        }
+
     def set_batch_rack_lock(
         self,
         shelf_index: int,
@@ -1119,19 +2257,26 @@ class SceneRegistry:
             self.mujoco.mj_forward(self.model, self.data)
 
     def reset_batch_cell(self, *, show_empty_cache: bool = False) -> None:
-        """Home every transfer axis and restore exclusive tray ownership."""
+        """Home every axis while keeping preallocated empty trays invisible.
+
+        ``show_empty_cache`` remains accepted for API compatibility, but empty
+        carrier boards are deliberately never rendered.
+        """
 
         axes = (
             ("batch_outfeed_joint", "batch_outfeed_actuator"),
-            ("batch_lift_joint", "batch_lift_actuator"),
             ("batch_output_joint", "batch_output_actuator"),
-            ("batch_pusher_joint", "batch_pusher_actuator"),
             ("batch_tray_02_index_joint", "batch_tray_02_index_actuator"),
             ("batch_tray_03_index_joint", "batch_tray_03_index_actuator"),
+            ("finished_output_gate_joint", "finished_output_gate_actuator"),
         )
         for joint_name, actuator_name in axes:
             self.set_batch_joint_target(joint_name, actuator_name, 0.0, teleport=True)
         for unit in range(1, 4):
+            for station in ASYNC_STATION_ANCHORS:
+                self.set_batch_weld(f"station_{station}_tray_{unit:02d}_weld", False)
+            for transfer in ASYNC_TRANSFER_SPECS:
+                self.set_batch_weld(f"transfer_{transfer}_tray_{unit:02d}_weld", False)
             for owner in ("carrier", "rack", "output"):
                 self.set_batch_weld(f"batch_{owner}_tray_{unit:02d}_weld", False)
             for shelf in range(3):
@@ -1140,19 +2285,28 @@ class SceneRegistry:
                     False,
                 )
             self.set_batch_rack_lock(unit - 1, False, teleport=True)
-        self.set_batch_weld("batch_station_tray_01_weld", True)
-        self.set_batch_weld("batch_indexer_tray_02_weld", True)
-        self.set_batch_weld("batch_indexer_tray_03_weld", True)
+        owners = (
+            ("batch_station_tray_01_weld", "batch_tray_01_station_anchor", "batch_tray_01"),
+            ("batch_indexer_tray_02_weld", "batch_tray_02_indexer_anchor", "batch_tray_02"),
+            ("batch_indexer_tray_03_weld", "batch_tray_03_indexer_anchor", "batch_tray_03"),
+        )
+        # Delivery parks free trays outside the visible cell. Re-seat every
+        # body before restoring its cache weld so reset is also correct when a
+        # new queued order starts without rebuilding the viewer.
+        for weld, anchor, tray in owners:
+            anchor_pose = _pose_from_body(self.data, self.body_id(anchor))
+            self.set_free_body_pose(tray, anchor_pose, forward=True)
+            self.set_batch_weld(weld, True, recompute=(anchor, tray))
         for index in range(3):
             self.set_batch_tray_visible(
                 index,
-                carrier=bool(show_empty_cache and index > 0),
+                carrier=False,
                 payload=False,
             )
         self.mujoco.mj_forward(self.model, self.data)
 
     def reset_dynamic_welds(self) -> None:
-        """Restore configured workpiece welds and Arm2's permanent tool."""
+        """Restore configured workpiece welds and quick-change rack ownership."""
 
         for name in self.handles.welds:
             # Batch carriers already locked in the furnace rack are owned by
@@ -1161,7 +2315,7 @@ class SceneRegistry:
             if name.startswith("batch_"):
                 continue
             active = name in {
-                "tray_fixture_weld",
+                "station_s1_assembly_tray_weld",
                 "base_tray_weld",
                 "arm1_rack_parallel_gripper",
                 "arm1_rack_suction_tool",
@@ -1196,6 +2350,18 @@ class SceneRegistry:
             "raw_sites": tuple(self.handles.raw_sites),
             "active_fins": self.active_fin_count,
             "active_paths": self.active_path_count,
+            "flexible_cell": {
+                "layout": "SHALLOW_U_ASYNC",
+                "stations": tuple(ASYNC_STATION_ANCHORS.values()),
+                "transfers": tuple(ASYNC_TRANSFER_SPECS),
+                "station_positions_m": {
+                    "s1": SHALLOW_U_LAYOUT.station_s1_xy,
+                    "s2a": SHALLOW_U_LAYOUT.station_s2a_xy,
+                    "s2b": SHALLOW_U_LAYOUT.station_s2b_xy,
+                    "s3": SHALLOW_U_LAYOUT.station_s3_xy,
+                    "rack_infeed": SHALLOW_U_LAYOUT.rack_infeed_xy,
+                },
+            },
         }
 
 
@@ -1224,14 +2390,26 @@ class BrazingScene:
         self.registry.enable_robot_gravity_compensation()
         self.registry.set_arm1_gripper_closed(0.0)
         self.registry.set_arm1_suction_fraction(0.0)
+        # The camera is a true centred flange extension.  Deriving this offset
+        # from an arbitrary XML world pose previously preserved an 88 mm
+        # lateral error and made the camera appear beside the wrist.
         self._mounted_offsets = {
-            "arm3_camera_rig": self._relative_pose("arm3_fr3_link7", "arm3_camera_rig"),
+            "arm3_camera_rig": Pose(
+                np.asarray([0.0, 0.0, 0.107], dtype=float),
+                np.asarray([1.0, 0.0, 0.0, 0.0], dtype=float),
+            ),
         }
         self.arms = {name: ArmController(self.model, self.data, name, motion_config) for name in ARM_NAMES}
-        for controller in self.arms.values():
-            controller.reset(HOME_QPOS)
+        for name, controller in self.arms.items():
+            controller.reset(_arm_home_qpos(name))
             controller.enabled = False
         self._snap_extensions()
+        self.registry.set_weld(
+            "arm3_camera_mount",
+            True,
+            recompute=("arm3_fr3_link7", "arm3_camera_rig"),
+            forward=True,
+        )
         self.arm1_tools = Arm1ToolManager(self.model, self.data, self.arms["arm1"])
         self.tools = Arm2ToolManager(self.model, self.data, self.arms["arm2"])
         self.product: ProductState | None = order if isinstance(order, ProductState) else None
@@ -1264,19 +2442,30 @@ class BrazingScene:
         right = _pose_from_body(self.data, int(self.model.body(child).id))
         return left.inverse().transformed(right)
 
-    def _snap_extensions(self) -> None:
+    def _snap_extensions(self, *, forward: bool = True) -> None:
         for child, relative in self._mounted_offsets.items():
             parent = "arm3_fr3_link7"
             parent_pose = _pose_from_body(self.data, int(self.model.body(parent).id))
             self.registry.set_free_body_pose(child, parent_pose.transformed(relative))
-        self.mujoco.mj_forward(self.model, self.data)
+        if forward:
+            self.mujoco.mj_forward(self.model, self.data)
 
-    def sync_mounted_extensions(self) -> None:
+    def sync_mounted_extensions(self, arm_name: str | None = None) -> None:
         """Synchronize welded free-body tools after a kinematic joint update."""
 
-        self._snap_extensions()
-        self.arm1_tools.sync_mounted()
-        self.tools.sync_mounted()
+        # Kinematic playback writes robot qpos directly, so refresh body/site
+        # transforms first. ``mj_forward`` also computes dynamics, contacts and
+        # constraints and used to run two or three times here on every 2 ms
+        # physics step. Two lightweight kinematics passes are sufficient: one
+        # for the new flange poses and one after snapping the free-body tools.
+        self.mujoco.mj_kinematics(self.model, self.data)
+        if arm_name in {None, "arm3"}:
+            self._snap_extensions(forward=False)
+        if arm_name in {None, "arm1"}:
+            self.arm1_tools.sync_mounted(forward=False)
+        if arm_name in {None, "arm2"}:
+            self.tools.sync_mounted(forward=False)
+        self.mujoco.mj_kinematics(self.model, self.data)
 
     @property
     def time(self) -> float:
@@ -1291,11 +2480,20 @@ class BrazingScene:
         self.mujoco.mj_resetData(self.model, self.data)
         self.data.time = simulation_time
         self.mujoco.mj_forward(self.model, self.data)
+        # ``mj_resetData`` resets data/qpos but model-level RGBA and collision
+        # masks survive. Restore those before configuring the next product.
+        self.registry.set_workcell_visible(True)
         self.registry.enable_robot_gravity_compensation()
-        for controller in self.arms.values():
-            controller.reset(HOME_QPOS)
+        for name, controller in self.arms.items():
+            controller.reset(_arm_home_qpos(name))
             controller.enabled = False
         self._snap_extensions()
+        self.registry.set_weld(
+            "arm3_camera_mount",
+            True,
+            recompute=("arm3_fr3_link7", "arm3_camera_rig"),
+            forward=True,
+        )
         self.arm1_tools.reset_to_rack()
         self.tools.reset_mounted()
         self.product = order if isinstance(order, ProductState) else None
@@ -1310,6 +2508,7 @@ class BrazingScene:
         self.fixture_controller.configure_product(selected_spec)
         self.fixture_controller.reset(self.fixture_controller.state, hard=True)
         self.registry.set_conveyor_target(0.0, teleport=True)
+        self.registry.reset_async_line()
         self.registry.reset_dynamic_welds()
         self.registry.set_fixture_lock_visual(False)
         self.registry.set_arm1_gripper_closed(0.0)
@@ -1334,10 +2533,16 @@ class BrazingScene:
         carriers.
         """
 
-        for controller in self.arms.values():
-            controller.reset(HOME_QPOS)
+        for name, controller in self.arms.items():
+            controller.reset(_arm_home_qpos(name))
             controller.enabled = False
         self._snap_extensions()
+        self.registry.set_weld(
+            "arm3_camera_mount",
+            True,
+            recompute=("arm3_fr3_link7", "arm3_camera_rig"),
+            forward=True,
+        )
         self.arm1_tools.reset_to_rack()
         self.tools.reset_mounted()
         self.registry.set_conveyor_target(0.0, teleport=True)

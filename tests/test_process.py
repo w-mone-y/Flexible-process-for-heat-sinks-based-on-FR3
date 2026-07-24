@@ -48,7 +48,7 @@ def test_material_pass_installs_comb_before_fin_assembly() -> None:
     assert history.index(first_fin) == history.index(configure_comb) + 1
 
 
-def test_material_rework_reuses_permanent_dispenser_until_reinspection_passes() -> None:
+def test_material_rework_reuses_mounted_dispenser_until_reinspection_passes() -> None:
     coordinator = ProcessCoordinator(fast=True)
     coordinator.inject_fault("brazing_gap", "slot_02_left")
     coordinator.start_order("A", now=0.0, order_id="return-after-rework")
@@ -68,11 +68,63 @@ def test_material_rework_reuses_permanent_dispenser_until_reinspection_passes() 
     assert history.index(first_fin) == history.index(configure_comb) + 1
 
 
+def test_material_fault_exists_before_arm3_inspection_starts() -> None:
+    coordinator = ProcessCoordinator(fast=True)
+    fault = coordinator.inject_fault("brazing_gap", "slot_02_left")
+    product = coordinator.start_order("A", now=0.0, order_id="fault-before-material-scan")
+    now = 0.0
+    while now < 20.0 and not fault.applied:
+        coordinator.tick(now)
+        now += 0.02
+
+    path = next(path for path in product.active_paths if path.path_id == "slot_02_left")
+    assert fault.applied
+    assert product.stage is OrderStage.MATERIAL_APPLICATION
+    assert path.longest_gap_m > 0.0
+    assert not any(task.task_type is TaskType.MATERIAL_INSPECT for task in coordinator.task_history)
+
+    while now < 20.0 and not (
+        coordinator.active_task is not None and coordinator.active_task.task_type is TaskType.MATERIAL_INSPECT
+    ):
+        coordinator.tick(now)
+        now += 0.02
+    assert coordinator.active_task is not None
+    assert path.longest_gap_m > 0.0
+
+
+def test_fin_fault_exists_before_arm3_geometry_inspection_starts() -> None:
+    coordinator = ProcessCoordinator(fast=True)
+    fault = coordinator.inject_fault("fin_insert", "fin_02")
+    product = coordinator.start_order("A", now=0.0, order_id="fault-before-fin-scan")
+    now = 0.0
+    while now < 25.0 and not fault.applied:
+        coordinator.tick(now)
+        now += 0.02
+
+    fin = next(fin for fin in product.active_fins if fin.fin_id == "fin_02")
+    assert fault.applied
+    assert product.stage is OrderStage.FIN_ASSEMBLY
+    assert fin.position_error_m > 0.0
+    assert fin.verticality_error_deg > 0.0
+    assert not any(task.task_type is TaskType.PRE_INSPECT for task in coordinator.task_history)
+
+    while now < 25.0 and not (
+        coordinator.active_task is not None and coordinator.active_task.task_type is TaskType.PRE_INSPECT
+    ):
+        coordinator.tick(now)
+        now += 0.02
+    assert coordinator.active_task is not None
+    assert fin.position_error_m > 0.0
+
+
 @pytest.mark.parametrize(
     ("fault_type", "target", "expected_rework"),
     [
         ("fin_pose", "fin_02", "fin"),
+        ("fin_pick", "fin_02", "fin"),
+        ("fin_insert", "fin_02", "fin"),
         ("brazing_gap", "slot_02_left", "material"),
+        ("brazing_deviation", "slot_02_left", "material"),
     ],
 )
 def test_recoverable_faults_are_reworked(fault_type: str, target: str, expected_rework: str) -> None:

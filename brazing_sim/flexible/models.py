@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from ..domain import BrazingRecipe, BrazingSide, OrderSpec, Vec3
+
+
+class RouteStrategy(str, Enum):
+    STANDARD = "STANDARD"
+    HIGH_RELIABILITY = "HIGH_RELIABILITY"
+    FIRST_ARTICLE = "FIRST_ARTICLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +39,7 @@ class ProductConfig:
     nozzle_tip_height_m: float
     material_speed_m_s: float
     recipe: str
+    material_system: str = "demo_brazing_material"
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +146,10 @@ class ProcessPlan:
     max_fins: int = 12
     max_paths: int = 24
     path_segment_capacity: int = 20
+    route_strategy: RouteStrategy | str = RouteStrategy.STANDARD
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "route_strategy", RouteStrategy(self.route_strategy))
 
     @property
     def selected_rack_layer(self) -> int:
@@ -163,6 +175,27 @@ class ProcessPlan:
             "material_speed_m_s": self.product.material_speed_m_s,
             "rack_layers": [item.layer_index for item in self.rack_assignments],
             "path_length_m": self.brazing_paths[0].length_m if self.brazing_paths else 0.0,
+            "base_size_m": list(self.product.base_size_m),
+            "fin_size_m": list(self.product.fin_size_m),
+            "fin_pitch_m": self.product.fin_pitch_m,
+            "path_margin_m": self.product.path_margin_m,
+            "bead_offset_m": self.product.bead_offset_m,
+            "nozzle_tip_height_m": self.product.nozzle_tip_height_m,
+            "recipe": self.recipe.name,
+            "material_system": self.product.material_system,
+            "route_strategy": self.route_strategy.value,
+            "fin_targets": [
+                {"fin_id": item.fin_id, "position": list(item.position)} for item in self.fin_targets
+            ],
+            "brazing_paths": [
+                {
+                    "path_id": item.path_id,
+                    "start": list(item.start),
+                    "end": list(item.end),
+                    "width_m": item.width_m,
+                }
+                for item in self.brazing_paths
+            ],
         }
 
 
@@ -177,4 +210,5 @@ __all__ = [
     "RackAssignment",
     "RackConfig",
     "RackLayerConfig",
+    "RouteStrategy",
 ]

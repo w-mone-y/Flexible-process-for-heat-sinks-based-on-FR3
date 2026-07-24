@@ -1,0 +1,20 @@
+schema_version: 1
+scheduler:
+  mode: DYNAMIC_PRIORITY
+  allow_parallel_tasks: true
+  max_assignments_per_tick: 3
+  weights:
+    estimated_finish_time: 1.0
+    tool_change_cost: 0.8
+    predicted_wait_time: 0.7
+    zone_conflict_cost: 2.0
+    resource_idle_penalty: 0.4
+    execution_risk: 1.5
+    product_changeover_cost: 0.6
+    due_time_penalty: 1.2
+    task_priority_bonus: 0.5
+batching:
+  mode: SAME_RECIPE_ONLY
+  max_wait_time: 30.0
+  allow_partial_batch: true
+  maximum_units: 3

@@ -71,14 +71,16 @@ class BrazingXmlContractTests(unittest.TestCase):
     def test_table1_is_open_and_raw_fins_have_safe_spacing(self) -> None:
         import mujoco
 
-        top = self.model.geom("raw_material_rack_top")
-        half_x = float(self.model.geom_size[top.id, 0])
-        half_y = float(self.model.geom_size[top.id, 1])
-        self.assertAlmostEqual(half_x, 2.0 * half_y, places=6)
-        self.assertGreater(half_x, half_y)
-        table_position = self.model.body("raw_material_rack").pos
-        self.assertAlmostEqual(float(table_position[0]), -1.079, places=6)
-        self.assertAlmostEqual(float(table_position[1]), 0.508, places=6)
+        # The obsolete monolithic Table1 is replaced by two independent
+        # shallow-U magazines with a clear Arm1 tool-change aisle between.
+        base_magazine = self.model.body("base_plate_magazine").pos
+        fin_magazine = self.model.body("fin_magazine").pos
+        self.assertLess(float(base_magazine[0]), 0.0)
+        self.assertGreater(float(fin_magazine[0]), 0.0)
+        # The fin rack is shifted 40 mm toward Arm1 to shorten S3 travel while
+        # keeping a wide, unobstructed central tool-change aisle.
+        self.assertLessEqual(abs(float(base_magazine[1] - fin_magazine[1])), 0.04 + 1e-9)
+        self.assertGreater(float(fin_magazine[0] - base_magazine[0]), 0.85)
         self.assertEqual(
             mujoco.mj_name2id(
                 self.model,
@@ -133,6 +135,98 @@ class BrazingXmlContractTests(unittest.TestCase):
         self.model.actuator("furnace_door_actuator")
         self.model.camera("arm3_wrist_camera")
 
+    def test_s3_has_no_obsolete_vertical_press_columns(self) -> None:
+        import mujoco
+
+        for name in ("s3_press_column_front", "s3_press_column_rear"):
+            self.assertEqual(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name),
+                -1,
+            )
+
+    def test_arm3_camera_is_coaxial_with_the_wrist(self) -> None:
+        import numpy as np
+
+        from brazing_sim.scene import BrazingScene
+
+        scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+        try:
+            # Verify the invariant again after changing the wrist roll.  The
+            # camera must remain below the flange, not orbit beside it.
+            joint = int(scene.model.joint("arm3_fr3_joint7").id)
+            qpos = int(scene.model.jnt_qposadr[joint])
+            scene.data.qpos[qpos] += 0.35
+            scene.sync_mounted_extensions("arm3")
+            link = scene.data.body("arm3_fr3_link7")
+            camera = scene.data.body("arm3_camera_rig")
+            link_rotation = np.asarray(link.xmat).reshape(3, 3)
+            camera_rotation = np.asarray(camera.xmat).reshape(3, 3)
+            local = link_rotation.T @ (np.asarray(camera.xpos) - np.asarray(link.xpos))
+            np.testing.assert_allclose(local, [0.0, 0.0, 0.107], atol=1e-8)
+            np.testing.assert_allclose(
+                link_rotation.T @ camera_rotation,
+                np.eye(3),
+                atol=1e-8,
+            )
+        finally:
+            scene.close()
+
+    def test_fin_magazine_clears_finished_pallet_sweep(self) -> None:
+        from brazing_sim.config import make_order_spec
+        from brazing_sim.layout import SHALLOW_U_LAYOUT
+        from brazing_sim.scene import BrazingScene
+
+        scene = BrazingScene(ROOT / "brazing_line.xml", order="C", raw=True)
+        try:
+            spec = make_order_spec("C")
+            lane_left = SHALLOW_U_LAYOUT.output_lane_x - SHALLOW_U_LAYOUT.output_pallet_half_width_m
+            table = scene.data.geom("fin_magazine_top")
+            table_right = float(table.xpos[0] + scene.model.geom("fin_magazine_top").size[0])
+            self.assertGreaterEqual(
+                lane_left - table_right,
+                SHALLOW_U_LAYOUT.raw_material_clearance_m,
+            )
+            half_fin_length = 0.5 * spec.fin_length
+            for index in range(1, spec.fin_count + 1):
+                centre_x = float(scene.data.body(f"fin_{index:02d}").xpos[0])
+                self.assertGreaterEqual(
+                    lane_left - (centre_x + half_fin_length),
+                    SHALLOW_U_LAYOUT.raw_material_clearance_m,
+                )
+        finally:
+            scene.close()
+
+    def test_fin_magazine_upper_tier_is_open_and_does_not_cover_lower_fins(self) -> None:
+        import mujoco
+
+        self.assertEqual(
+            mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_GEOM,
+                "fin_magazine_upper_shelf",
+            ),
+            -1,
+        )
+        for name in (
+            "fin_magazine_upper_left_rail",
+            "fin_magazine_upper_right_rail",
+        ):
+            rail = self.model.geom(name)
+            # End-support rails may run along the rows, but must remain thin
+            # across each fin so the central pickup window stays unobstructed.
+            self.assertLessEqual(float(rail.size[0]), 0.015 + 1e-9)
+            # The upper-tier fins have their centres at Z=0.380 m and are
+            # 60 mm tall, so the open end rails must support their lower edge
+            # at Z=0.350 m without covering the pickup window.
+            self.assertAlmostEqual(float(rail.pos[2] + rail.size[2]), 0.350, places=6)
+        for name in (
+            "fin_magazine_upper_rear_support_left",
+            "fin_magazine_upper_rear_support_right",
+            "fin_magazine_upper_front_support_left",
+            "fin_magazine_upper_front_support_right",
+        ):
+            self.model.geom(name)
+
     def test_industrial_detail_layer_is_visual_only(self) -> None:
         """High-detail shells must never change motion or contact behaviour."""
 
@@ -144,9 +238,6 @@ class BrazingXmlContractTests(unittest.TestCase):
             "arm1_gripper_mount_flange",
             "arm2_dispenser_flange_ring",
             "arm2_left_nozzle_sleeve",
-            "conveyor_drive_motor",
-            "conveyor_home_sensor",
-            "batch_transfer_left_mast",
             "furnace_left_outer_skin",
             "furnace_control_cabinet",
             "furnace_exhaust_stack",
@@ -159,8 +250,8 @@ class BrazingXmlContractTests(unittest.TestCase):
             self.assertEqual(int(geom.group[0]), 1, name)
 
         # Door skins move with the existing door joint, while nozzle detail
-        # follows the existing permanent Arm2 tool body and does not add a
-        # second kinematic mechanism.
+        # follows the one quick-change Arm2 tool body and does not add a
+        # second process tool.
         door_skin = self.model.geom("furnace_door_outer_skin")
         dispenser_ring = self.model.geom("arm2_dispenser_flange_ring")
         self.assertEqual(
@@ -174,14 +265,14 @@ class BrazingXmlContractTests(unittest.TestCase):
 
     def test_visual_quality_profile_is_interactive_gpu_friendly(self) -> None:
         quality = self.model.vis.quality
-        self.assertLessEqual(int(quality.shadowsize), 2048)
+        self.assertEqual(int(quality.shadowsize), 0)
         self.assertLessEqual(int(quality.offsamples), 2)
         self.assertEqual(int(quality.numslices), 16)
         self.assertEqual(int(quality.numstacks), 8)
         self.assertEqual(int(quality.numquads), 2)
         self.assertEqual(
             sum(bool(self.model.light_castshadow[index]) for index in range(self.model.nlight)),
-            1,
+            0,
         )
         # Camera clients request 640 x 480 by default; a larger implicit FBO
         # only consumes GPU memory and does not improve the interactive viewer.
@@ -207,8 +298,6 @@ class BrazingXmlContractTests(unittest.TestCase):
 
         axes = {
             "batch_outfeed_joint": ("batch_outfeed_actuator", (0.0, 1.0, 0.0)),
-            "batch_lift_joint": ("batch_lift_actuator", (0.0, 0.0, 1.0)),
-            "batch_pusher_joint": ("batch_pusher_actuator", (0.0, 1.0, 0.0)),
             "batch_output_joint": ("batch_output_actuator", (1.0, 0.0, 0.0)),
         }
         for joint_name, (actuator_name, axis) in axes.items():
@@ -253,8 +342,6 @@ class BrazingXmlContractTests(unittest.TestCase):
         self.assertTrue(all(right - left >= 0.15 for left, right in zip(shelf_heights, shelf_heights[1:])))
 
         for name in (
-            "batch_lift_position_sensor",
-            "batch_pusher_position_sensor",
             "batch_output_position_sensor",
             "batch_outfeed_position_sensor",
         ):
@@ -266,11 +353,122 @@ class BrazingXmlContractTests(unittest.TestCase):
             slot = self.model.body(f"batch_output_slot_{index:02d}")
             output_x.append(float(slot.pos[0]))
             output_z.append(float(slot.pos[2]))
-            self.model.geom(f"batch_output_slot_{index:02d}_deck")
-        self.assertTrue(all(right - left >= 0.48 for left, right in zip(output_x, output_x[1:])))
+        # Finished products now share one sequential inspection station before
+        # the enclosed delivery port, instead of occupying three large tables.
+        self.assertAlmostEqual(max(output_x) - min(output_x), 0.0, places=9)
         self.assertAlmostEqual(max(output_z) - min(output_z), 0.0, places=9)
+        output_y = [float(self.model.body(f"batch_output_slot_{index:02d}").pos[1]) for index in range(1, 4)]
+        self.assertTrue(all(value == -0.10 for value in output_y))
+        rack_infeed_x = 0.75
+        for body_name in (
+            "assembly_fixture",
+            "batch_transfer_base",
+            "batch_tray_01_station_anchor",
+        ):
+            self.assertAlmostEqual(
+                float(self.model.body(body_name).pos[0]),
+                rack_infeed_x,
+                places=9,
+            )
+            self.assertAlmostEqual(float(self.model.body(body_name).pos[1]), 0.0, places=9)
+        self.assertAlmostEqual(float(self.model.body("finished_output_conveyor").pos[0]), rack_infeed_x)
+        for index in range(1, 4):
+            self.assertEqual(
+                mujoco.mj_name2id(
+                    self.model,
+                    mujoco.mjtObj.mjOBJ_GEOM,
+                    f"batch_output_slot_{index:02d}_deck",
+                ),
+                -1,
+            )
+
+        outfeed = self.model.joint("batch_outfeed_joint")
+        self.assertEqual(tuple(float(value) for value in outfeed.range), (0.0, 0.84))
+
+        # Empty trays 02/03 still have driven indexer bodies, but the two
+        # obsolete light-blue cache tabletops must not exist visually.
+        for index in (2, 3):
+            body = self.model.body(f"batch_tray_{index:02d}_indexer_anchor")
+            joint = self.model.joint(f"batch_tray_{index:02d}_index_joint")
+            self.assertGreater(float(body.mass[0]), 0.0)
+            self.assertEqual(int(body.jntadr[0]), int(joint.id))
+            self.assertEqual(
+                mujoco.mj_name2id(
+                    self.model,
+                    mujoco.mjtObj.mjOBJ_GEOM,
+                    f"batch_tray_{index:02d}_index_carriage",
+                ),
+                -1,
+            )
+
+        tray_half_width = float(self.model.geom("batch_tray_01_geom").size[1])
+        for index in range(1, 4):
+            tray_body = self.model.body(f"batch_tray_{index:02d}")
+            for part in (
+                "template_plate",
+                "front_comb_base",
+                "rear_comb_base",
+            ):
+                geom = self.model.geom(f"batch_tray_{index:02d}_{part}")
+                self.assertEqual(int(geom.bodyid[0]), int(tray_body.id))
+        for name in (
+            "front_comb_frame_beam",
+            "front_comb_frame_beam_right",
+            "rear_comb_frame_beam",
+            "rear_comb_frame_beam_right",
+            "batch_lift_left_guide",
+            "batch_lift_right_guide",
+            *(f"batch_tray_{index:02d}_{side}_comb" for index in range(1, 4) for side in ("front", "rear")),
+        ):
+            self.assertEqual(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name),
+                -1,
+            )
+        lane_rear_edge = output_y[0] + tray_half_width
+        self.assertGreater(lane_rear_edge, output_y[0])
+
+        # The output leg is now a sequential -Y lane. It shares the rack
+        # infeed X centreline but carries finished trays decisively away from
+        # the furnace after Arm3 inspection.
+        output_box = self.model.body("finished_output_box").pos
+        output_gate = self.model.body("finished_output_gate").pos
+        self.assertAlmostEqual(float(output_box[0]), rack_infeed_x, places=9)
+        self.assertAlmostEqual(float(output_gate[0]), rack_infeed_x, places=9)
+        self.assertLess(float(output_gate[1]), output_y[0] - 0.5)
+        self.assertLess(float(output_box[1]), float(output_gate[1]))
+
+        self.model.body("finished_output_conveyor")
+        self.model.body("finished_output_box")
+        self.model.geom("finished_output_sign")
+        self.model.site("finished_output_inside_site")
+        gate = self.model.joint("finished_output_gate_joint")
+        gate_actuator = self.model.actuator("finished_output_gate_actuator")
+        self.model.sensor("finished_output_gate_position_sensor")
+        self.assertEqual(int(gate.type[0]), int(mujoco.mjtJoint.mjJNT_SLIDE))
+        self.assertEqual(tuple(float(value) for value in gate.axis), (0.0, 0.0, 1.0))
+        self.assertEqual(int(gate_actuator.trnid[0]), int(gate.id))
+        self.assertEqual(tuple(float(value) for value in gate.range), (0.0, 0.5))
+        gate_body = self.model.body("finished_output_gate")
+        gate_edge = self.model.geom("finished_output_gate_bottom_edge")
+        box_body = self.model.body("finished_output_box")
+        box_roof = self.model.geom("finished_output_box_roof")
+        open_gate_bottom = (
+            float(gate_body.pos[2])
+            + float(gate.range[1])
+            + float(gate_edge.pos[2])
+            - float(gate_edge.size[2])
+        )
+        box_roof_top = float(box_body.pos[2]) + float(box_roof.pos[2]) + float(box_roof.size[2])
+        self.assertGreater(open_gate_bottom, box_roof_top)
 
         for name in (
+            *(f"conveyor_roller_{index:02d}" for index in range(1, 10)),
+            "conveyor_left_frame",
+            "conveyor_right_frame",
+            "batch_transfer_left_mast",
+            "batch_transfer_right_mast",
+            "batch_lift_deck",
+            "batch_pusher_crossbar",
             "batch_pusher_outer_left_housing",
             "batch_pusher_outer_right_housing",
             "batch_pusher_inner_left_beam",
@@ -280,9 +478,15 @@ class BrazingXmlContractTests(unittest.TestCase):
             "batch_pusher_right_contact_pad",
             "batch_pusher_drive_rod",
         ):
-            geom = self.model.geom(name)
-            self.assertEqual(int(geom.contype[0]), 0)
-            self.assertEqual(int(geom.conaffinity[0]), 0)
+            self.assertEqual(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name),
+                -1,
+            )
+        belt = self.model.geom("conveyor_belt")
+        self.assertEqual(tuple(float(value) for value in belt.size), (0.23, 0.465, 0.008))
+        self.assertEqual(
+            tuple(float(value) for value in self.model.joint("batch_outfeed_joint").range), (0.0, 0.84)
+        )
 
     def test_front_and_rear_comb_modules_are_complete_matching_pairs(self) -> None:
         self.model.body("fixture_front_comb_frame")
@@ -326,9 +530,24 @@ class BrazingXmlContractTests(unittest.TestCase):
                     places=9,
                 )
 
-            pedestal = self.model.geom(f"{end}_comb_frame_beam")
-            pedestal_world_x = frame_x + float(pedestal.pos[0])
-            self.assertGreater(sign * pedestal_world_x, base_half_length)
+            # The former full-height blue end plate was deliberately removed.
+            # A narrow top rail on two slim posts now grounds the cantilevered
+            # comb teeth without recreating a solid visual wall.
+            top_rail = self.model.geom(f"{end}_comb_top_rail")
+            top_rail_world_x = frame_x + float(top_rail.pos[0])
+            self.assertGreater(sign * top_rail_world_x, base_half_length)
+            for post_name in ("post_left", "post_right"):
+                post = self.model.geom(f"{end}_comb_{post_name}")
+                self.assertAlmostEqual(
+                    float(post.pos[2] - post.size[2]),
+                    tray_top,
+                    places=9,
+                )
+                self.assertAlmostEqual(
+                    float(post.pos[2] + post.size[2]),
+                    float(top_rail.pos[2] + top_rail.size[2]),
+                    places=9,
+                )
 
             for pitch_mm in (15, 20, 30, 40):
                 rail = self.model.geom(f"{end}_comb_insert_{pitch_mm}mm_rail")
@@ -342,6 +561,22 @@ class BrazingXmlContractTests(unittest.TestCase):
                 guide_z = (
                     float(guide.pos[2] - guide.size[2]),
                     float(guide.pos[2] + guide.size[2]),
+                )
+                top_rail_x = (
+                    float(top_rail.pos[0] - top_rail.size[0]),
+                    float(top_rail.pos[0] + top_rail.size[0]),
+                )
+                top_rail_z = (
+                    float(top_rail.pos[2] - top_rail.size[2]),
+                    float(top_rail.pos[2] + top_rail.size[2]),
+                )
+                self.assertLessEqual(
+                    max(top_rail_x[0], guide_x[0]),
+                    min(top_rail_x[1], guide_x[1]),
+                )
+                self.assertLessEqual(
+                    max(top_rail_z[0], guide_z[0]),
+                    min(top_rail_z[1], guide_z[1]),
                 )
                 self.assertLess(max(rail_x[0], guide_x[0]), min(rail_x[1], guide_x[1]))
                 self.assertLess(max(rail_z[0], guide_z[0]), min(rail_z[1], guide_z[1]))
@@ -502,18 +737,18 @@ class BrazingXmlContractTests(unittest.TestCase):
         slide = self.model.joint("conveyor_slide_joint")
         actuator = self.model.actuator("conveyor_slide_actuator")
         self.assertEqual(int(slide.type[0]), int(mujoco.mjtJoint.mjJNT_SLIDE))
-        self.assertEqual(tuple(float(value) for value in slide.axis), (0.0, 1.0, 0.0))
-        self.assertEqual(tuple(float(value) for value in slide.range), (0.0, 0.63))
+        self.assertEqual(tuple(float(value) for value in slide.axis), (1.0, 0.0, 0.0))
+        self.assertEqual(tuple(float(value) for value in slide.range), (0.0, 0.84))
         self.assertEqual(int(actuator.trnid[0]), int(slide.id))
 
-        home = self.model.site("conveyor_home_site").pos
-        furnace_target = self.model.site("conveyor_furnace_site").pos
-        furnace_body = self.model.body("furnace").pos
-        furnace_site = self.model.site("furnace_tray_pose").pos
-        furnace_world = furnace_body + furnace_site
-        self.assertAlmostEqual(float(home[0]), float(furnace_target[0]), places=9)
+        data = mujoco.MjData(self.model)
+        mujoco.mj_forward(self.model, data)
+        home = data.site("conveyor_home_site").xpos
+        furnace_target = data.site("conveyor_furnace_site").xpos
+        furnace_world = data.site("furnace_tray_pose").xpos
+        self.assertAlmostEqual(float(home[1]), float(furnace_target[1]), places=9)
         self.assertAlmostEqual(float(home[2]), float(furnace_target[2]), places=9)
-        self.assertGreater(float(furnace_target[1]), float(home[1]))
+        self.assertGreater(float(furnace_target[0]), float(home[0]))
         for actual, expected in zip(furnace_world, furnace_target):
             self.assertAlmostEqual(float(actual), float(expected), places=9)
 
@@ -525,28 +760,26 @@ class BrazingXmlContractTests(unittest.TestCase):
         self.assertGreaterEqual(clear_width, handled_tray_width + 0.04)
 
     def test_arm1_tool_rack_is_between_table1_and_table2(self) -> None:
-        table1_x = float(self.model.body("raw_material_rack").pos[0])
-        rack_x = float(self.model.body("arm1_tool_rack").pos[0])
-        table2_x = float(self.model.body("table2").pos[0])
-        self.assertLess(table1_x, rack_x)
-        self.assertLess(rack_x, table2_x)
-        self.assertAlmostEqual(rack_x, -0.49, places=6)
-        self.assertAlmostEqual(float(self.model.body("arm1_tool_rack").pos[1]), 0.42, places=6)
+        base_x = float(self.model.body("base_plate_magazine").pos[0])
+        fin_x = float(self.model.body("fin_magazine").pos[0])
+        rack = self.model.body("arm1_tool_rack").pos
+        self.assertLess(base_x, float(rack[0]))
+        self.assertLess(float(rack[0]), fin_x)
+        self.assertAlmostEqual(float(rack[0]), 0.0, places=6)
+        self.assertGreater(float(rack[1]), -0.42)
+        self.assertLess(float(rack[1]), 0.0)
 
-    def test_arm2_has_only_a_permanently_mounted_dispenser(self) -> None:
+    def test_arm2_has_one_permanently_mounted_dispenser(self) -> None:
         import mujoco
 
-        for removed in (
-            "arm2_tool_rack",
-            "arm2_tray_transfer",
-        ):
+        self.model.body("arm2_dual_brazing_dispenser_tool")
+        for removed in ("arm2_tray_transfer",):
             self.assertEqual(
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, removed),
                 -1,
             )
         for removed in (
             "arm2_toolchange_tray_transfer",
-            "arm2_rack_brazing_dispenser",
             "arm2_rack_tray_transfer",
             "arm2_tray_carry",
         ):
@@ -556,6 +789,14 @@ class BrazingXmlContractTests(unittest.TestCase):
             )
         dispenser_weld = self.model.equality("arm2_dispenser_tool_weld")
         self.assertEqual(int(self.model.eq_active0[dispenser_weld.id]), 1)
+        self.assertEqual(
+            mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_EQUALITY,
+                "arm2_rack_brazing_dispenser",
+            ),
+            -1,
+        )
 
     def test_fixture_and_tray_do_not_self_collide(self) -> None:
         xml = (ROOT / "brazing_line.xml").read_text(encoding="utf-8")

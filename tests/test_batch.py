@@ -60,6 +60,24 @@ def test_batch_products_are_independent_and_orders_are_fixed() -> None:
     assert batch.terminal
 
 
+def test_starting_any_batch_never_reveals_empty_cache_tray_boards() -> None:
+    scene, _single, coordinator = _coordinators(fast=True)
+    try:
+        coordinator.start_batch("A", layers=3, now=scene.time)
+        for index in (2, 3):
+            geom = scene.registry.geom_id(f"batch_tray_{index:02d}_geom")
+            assert float(scene.model.geom_rgba[geom, 3]) == 0.0
+
+        # Even a legacy caller asking to show the cache cannot resurrect the
+        # two light-blue boards. They appear only with a real product payload.
+        coordinator.transfer.reset(show_empty_cache=True)
+        for index in (2, 3):
+            geom = scene.registry.geom_id(f"batch_tray_{index:02d}_geom")
+            assert float(scene.model.geom_rgba[geom, 3]) == 0.0
+    finally:
+        scene.close()
+
+
 def test_fast_three_layer_batch_runs_one_shared_cycle_and_passes() -> None:
     scene, _single, coordinator = _coordinators(fast=True)
     try:
@@ -70,7 +88,7 @@ def test_fast_three_layer_batch_runs_one_shared_cycle_and_passes() -> None:
             scene.step()
 
         assert batch.stage is BatchStage.COMPLETE, coordinator.snapshot(scene.time)
-        assert [unit.phase for unit in batch.units] == [TrayUnitPhase.INSPECTED] * 3
+        assert [unit.phase for unit in batch.units] == [TrayUnitPhase.DELIVERED] * 3
         assert [unit.product.stage for unit in batch.units] == [OrderStage.PASS] * 3
         assert [shelf.state for shelf in batch.rack.shelves] == [RackShelfState.UNLOADED] * 3
         assert [unit.output_slot for unit in batch.units] == [0, 1, 2]
@@ -82,6 +100,37 @@ def test_fast_three_layer_batch_runs_one_shared_cycle_and_passes() -> None:
         assert snapshot["rack"]["load_order"] == [0, 1, 2]
         assert snapshot["rack"]["unload_order"] == [2, 1, 0]
         assert all(value is None for value in single_resource_values(coordinator))
+    finally:
+        scene.close()
+
+
+def test_complete_slotted_tray_follows_product_into_furnace_rack() -> None:
+    scene, _single, coordinator = _coordinators(fast=True)
+    try:
+        batch = coordinator.start_transfer_demo(now=scene.time)
+        deadline = scene.time + 8.0
+        while scene.time < deadline and not coordinator.paused:
+            coordinator.tick(scene.time)
+            scene.step()
+
+        assert coordinator.paused
+        assert batch.units[0].phase is TrayUnitPhase.LOCKED
+        assert bool(scene.data.eq_active[scene.registry.equality_id("batch_rack_tray_01_weld")])
+        tray_body = scene.registry.body_id("batch_tray_01")
+        for name in (
+            "batch_tray_01_geom",
+            "batch_tray_01_template_plate",
+            "batch_tray_01_front_comb_base",
+            "batch_tray_01_rear_comb_base",
+            "batch_tray_01_front_press",
+            "batch_tray_01_rear_press",
+            "batch_tray_01_base",
+            "batch_tray_01_fin_01",
+            "batch_tray_01_braze_01",
+        ):
+            geom_id = scene.registry.geom_id(name)
+            assert int(scene.model.geom_bodyid[geom_id]) == tray_body
+            assert float(scene.model.geom_rgba[geom_id, 3]) == 1.0
     finally:
         scene.close()
 
@@ -134,19 +183,27 @@ def test_shared_furnace_fault_classifies_all_three_units(
         scene.close()
 
 
-def test_physical_lift_transfer_is_continuous_and_pause_can_resume() -> None:
+def test_direct_furnace_conveyor_is_continuous_and_pause_can_resume() -> None:
     scene, _single, coordinator = _coordinators(fast=False)
     try:
         batch = coordinator.start_transfer_demo(now=scene.time)
         positions = [scene.registry.free_body_pose("batch_tray_01").position.copy()]
         observed_phases: set[TransferPhase] = set()
-        push_samples: list[tuple[float, float]] = []
+        belt_samples: list[tuple[float, float]] = []
 
         for _ in range(900):
             coordinator.tick(scene.time)
             scene.step()
-            positions.append(scene.registry.free_body_pose("batch_tray_01").position.copy())
+            tray_position = scene.registry.free_body_pose("batch_tray_01").position.copy()
+            positions.append(tray_position)
             observed_phases.add(coordinator.transfer.phase)
+            if coordinator.transfer.state["step"] == "load_conveyor_in":
+                belt_samples.append(
+                    (
+                        scene.registry.batch_joint_position("batch_outfeed_joint"),
+                        float(tray_position[0]),
+                    )
+                )
         coordinator.pause(scene.time)
         paused_axis = scene.registry.batch_joint_position("batch_outfeed_joint")
         for _ in range(300):
@@ -165,11 +222,11 @@ def test_physical_lift_transfer_is_continuous_and_pause_can_resume() -> None:
             tray_position = scene.registry.free_body_pose("batch_tray_01").position.copy()
             positions.append(tray_position)
             observed_phases.add(coordinator.transfer.phase)
-            if coordinator.transfer.phase is TransferPhase.PUSHING:
-                push_samples.append(
+            if coordinator.transfer.state["step"] == "load_conveyor_in":
+                belt_samples.append(
                     (
-                        scene.registry.batch_joint_position("batch_pusher_joint"),
-                        float(tray_position[1]),
+                        scene.registry.batch_joint_position("batch_outfeed_joint"),
+                        float(tray_position[0]),
                     )
                 )
 
@@ -178,15 +235,15 @@ def test_physical_lift_transfer_is_continuous_and_pause_can_resume() -> None:
         assert batch.rack.shelves[0].lock_engaged
         assert batch.units[0].phase is TrayUnitPhase.LOCKED
         assert {
-            TransferPhase.ALIGNING,
-            TransferPhase.PUSHING,
+            TransferPhase.CONVEYING_IN,
             TransferPhase.LOCKING,
+            TransferPhase.CONVEYING_OUT,
         }.issubset(observed_phases)
-        assert len(push_samples) > 100
-        pusher_travel = push_samples[-1][0] - push_samples[0][0]
-        tray_travel = push_samples[-1][1] - push_samples[0][1]
-        assert pusher_travel > 0.30
-        assert tray_travel == pytest.approx(pusher_travel, abs=0.003)
+        assert len(belt_samples) > 100
+        conveyor_travel = belt_samples[-1][0] - belt_samples[0][0]
+        tray_travel = belt_samples[-1][1] - belt_samples[0][1]
+        assert conveyor_travel > 0.75
+        assert tray_travel == pytest.approx(conveyor_travel, abs=0.003)
         assert scene.registry.batch_joint_position("batch_rack_lock_joint_0") == pytest.approx(
             0.025,
             abs=0.002,
@@ -228,14 +285,6 @@ def test_transfer_demo_opens_physical_door_before_first_tray_moves() -> None:
                 0.0,
                 abs=0.001,
             )
-            assert scene.registry.batch_joint_position("batch_lift_joint") == pytest.approx(
-                0.0,
-                abs=0.001,
-            )
-            assert scene.registry.batch_joint_position("batch_pusher_joint") == pytest.approx(
-                0.0,
-                abs=0.001,
-            )
             scene.step()
 
         assert started, "tray transfer did not start after the furnace door opened"
@@ -262,10 +311,9 @@ def test_next_empty_tray_indexes_while_previous_tray_enters_rack() -> None:
             if coordinator.transfer.operation == "load" and coordinator.transfer.prefetch_active_for(1):
                 observed_overlap = True
                 assert coordinator.transfer.phase in {
-                    TransferPhase.LIFTING,
-                    TransferPhase.PUSHING,
-                    TransferPhase.RETRACTING,
-                    TransferPhase.LOWERING,
+                    TransferPhase.CONVEYING_IN,
+                    TransferPhase.LOCKING,
+                    TransferPhase.CONVEYING_OUT,
                 }
                 break
             scene.step()
@@ -277,7 +325,7 @@ def test_next_empty_tray_indexes_while_previous_tray_enters_rack() -> None:
 
         coordinator.pause(scene.time)
         paused_index = scene.registry.batch_joint_position("batch_tray_02_index_joint")
-        paused_lift = scene.registry.batch_joint_position("batch_lift_joint")
+        paused_conveyor = scene.registry.batch_joint_position("batch_outfeed_joint")
         for _ in range(250):
             coordinator.tick(scene.time)
             scene.step()
@@ -285,8 +333,8 @@ def test_next_empty_tray_indexes_while_previous_tray_enters_rack() -> None:
             paused_index,
             abs=0.002,
         )
-        assert scene.registry.batch_joint_position("batch_lift_joint") == pytest.approx(
-            paused_lift,
+        assert scene.registry.batch_joint_position("batch_outfeed_joint") == pytest.approx(
+            paused_conveyor,
             abs=0.002,
         )
         coordinator.resume(scene.time)
@@ -296,7 +344,7 @@ def test_next_empty_tray_indexes_while_previous_tray_enters_rack() -> None:
         scene.close()
 
 
-def test_top_shelf_round_trip_lowers_before_finished_buffer_output() -> None:
+def test_top_shelf_round_trip_returns_on_direct_belt_before_output() -> None:
     scene, _single, coordinator = _coordinators(fast=False)
     try:
         batch = coordinator.start_batch("A", layers=3, now=scene.time)
@@ -342,8 +390,9 @@ def test_top_shelf_round_trip_lowers_before_finished_buffer_output() -> None:
         output = scene.registry.free_body_pose("batch_tray_03")
         target = scene.registry.site_pose("batch_output_slot_03_site")
         assert np.linalg.norm(output.position - target.position) < 0.002
-        steps = np.linalg.norm(np.diff(np.asarray(positions), axis=0), axis=1)
-        assert float(np.max(steps)) < 0.001
+        # Shelf selection occurs inside the furnace; the externally visible
+        # return is the single horizontal black-belt move followed by output.
+        assert np.ptp(np.asarray(positions)[:, 0]) > 0.75
     finally:
         scene.close()
 
@@ -412,9 +461,8 @@ def test_reset_homes_axes_releases_rack_and_restores_safe_door() -> None:
         assert coordinator.batch is None
         for joint in (
             "batch_outfeed_joint",
-            "batch_lift_joint",
-            "batch_pusher_joint",
             "batch_output_joint",
+            "finished_output_gate_joint",
         ):
             assert scene.registry.batch_joint_position(joint) == pytest.approx(0.0, abs=1e-9)
         for index in range(1, 4):
@@ -425,6 +473,144 @@ def test_reset_homes_axes_releases_rack_and_restores_safe_door() -> None:
         door_qpos = int(scene.model.jnt_qposadr[door_joint])
         assert float(scene.data.qpos[door_qpos]) == pytest.approx(0.0, abs=1e-9)
         assert all(value is None for value in single_resource_values(coordinator))
+    finally:
+        scene.close()
+
+
+def test_full_reset_restores_hidden_base_to_raw_rack() -> None:
+    scene, _single, _coordinator = _coordinators(fast=True)
+    try:
+        registry = scene.registry
+        base_geom = registry.geom_id("heatsink_base_plate_geom")
+        registry.set_workcell_visible(False)
+        assert float(scene.model.geom_rgba[base_geom, 3]) == 0.0
+
+        scene.reset("C", raw=True)
+
+        assert float(scene.model.geom_rgba[base_geom, 3]) > 0.0
+        assert int(scene.model.geom_contype[base_geom]) != 0
+        assert int(scene.model.geom_conaffinity[base_geom]) != 0
+        assert bool(scene.data.eq_active[registry.equality_id("raw_base_rack_weld")])
+        base = registry.free_body_pose("base_plate")
+        target = registry.site_pose("raw_base_site")
+        assert np.linalg.norm(base.position - target.position) < 1.0e-6
+    finally:
+        scene.close()
+
+
+def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> None:
+    scene, _single, coordinator = _coordinators(fast=False)
+    try:
+        batch = coordinator.start_batch("A", layers=1, now=scene.time)
+        unit = batch.units[0]
+        registry = scene.registry
+        registry.configure_batch_tray(0, unit.product)
+        registry.set_batch_comb_install_progress(0, 1.0)
+        registry.set_batch_tray_visible(0, carrier=True, payload=True)
+        registry.set_batch_weld("batch_station_tray_01_weld", False)
+        registry.set_free_body_pose(
+            "batch_tray_01",
+            registry.site_pose("batch_output_slot_01_site"),
+            forward=True,
+        )
+        registry.set_batch_weld(
+            "batch_output_tray_01_weld",
+            True,
+            recompute=("batch_output_slot_01", "batch_tray_01"),
+        )
+        # Normal unloading leaves the X carrier underneath the inspection
+        # point so delivery can continue without a retract/re-approach cycle.
+        registry.set_batch_joint_target(
+            "batch_output_joint",
+            "batch_output_actuator",
+            coordinator.transfer.OUTPUT_INSPECTION_M,
+            teleport=True,
+        )
+        unit.phase = TrayUnitPhase.INSPECTED
+        coordinator.transfer.start_delivery(0, scene.time)
+
+        checked_entry_interlock = False
+        checked_common_lane = False
+        checked_unloaded_carrier = False
+        checked_return_home = False
+        checked_close_interlock = False
+        checked_comb_removal = False
+        observed_steps: set[str] = set()
+        result = None
+        deadline = scene.time + 25.0
+        while scene.time < deadline:
+            result = coordinator.transfer.poll(scene.time)
+            observed_steps.add(str(coordinator.transfer.state["step"]))
+            tray_pose = registry.free_body_pose("batch_tray_01").position
+            if coordinator.transfer.state["step"] == "delivery_remove_comb":
+                assert registry.finished_output_gate_fraction <= 0.02
+                assert registry.batch_joint_position("batch_output_joint") == pytest.approx(
+                    coordinator.transfer.OUTPUT_INSPECTION_M,
+                    abs=0.002,
+                )
+                checked_comb_removal = True
+            if float(tray_pose[1]) < -0.15 and not checked_entry_interlock:
+                assert registry.finished_output_gate_fraction >= 0.98
+                assert float(tray_pose[0]) == pytest.approx(0.75, abs=0.002)
+                assert registry.batch_joint_position("batch_outfeed_joint") == pytest.approx(
+                    0.0,
+                    abs=0.002,
+                )
+                checked_entry_interlock = True
+                checked_common_lane = True
+            if coordinator.transfer.state["step"] == "delivery_return_home":
+                assert registry.finished_output_gate_fraction >= 0.98
+                assert registry.batch_joint_position("batch_outfeed_joint") == pytest.approx(
+                    0.0,
+                    abs=0.002,
+                )
+                tray_geom = registry.geom_id("batch_tray_01_geom")
+                template_geom = registry.geom_id("batch_tray_01_template_plate")
+                front_comb_base_geom = registry.geom_id("batch_tray_01_front_comb_base")
+                rear_comb_base_geom = registry.geom_id("batch_tray_01_rear_comb_base")
+                front_press_geom = registry.geom_id("batch_tray_01_front_press")
+                rear_press_geom = registry.geom_id("batch_tray_01_rear_press")
+                base_geom = registry.geom_id("batch_tray_01_base")
+                fin_geom = registry.geom_id("batch_tray_01_fin_01")
+                assert float(scene.model.geom_rgba[tray_geom, 3]) == 1.0
+                assert float(scene.model.geom_rgba[template_geom, 3]) == 1.0
+                assert float(scene.model.geom_rgba[front_comb_base_geom, 3]) == 0.0
+                assert float(scene.model.geom_rgba[rear_comb_base_geom, 3]) == 0.0
+                assert float(scene.model.geom_rgba[front_press_geom, 3]) == 1.0
+                assert float(scene.model.geom_rgba[rear_press_geom, 3]) == 1.0
+                assert float(scene.model.geom_rgba[base_geom, 3]) == 0.0
+                assert float(scene.model.geom_rgba[fin_geom, 3]) == 0.0
+                checked_unloaded_carrier = True
+                checked_return_home = True
+            if coordinator.transfer.state["step"] == "delivery_gate_close":
+                assert registry.batch_joint_position("batch_output_joint") == pytest.approx(
+                    0.0,
+                    abs=0.002,
+                )
+                assert registry.batch_joint_position("batch_outfeed_joint") == pytest.approx(
+                    0.0,
+                    abs=0.002,
+                )
+                checked_close_interlock = True
+            scene.step()
+            if str(result) == "SUCCEEDED":
+                break
+
+        assert str(result) == "SUCCEEDED"
+        assert checked_entry_interlock
+        assert checked_common_lane
+        assert checked_unloaded_carrier
+        assert checked_return_home
+        assert checked_close_interlock
+        assert checked_comb_removal
+        assert "delivery_remove_comb" in observed_steps
+        assert "delivery_pickup_lane" not in observed_steps
+        assert "delivery_pickup_position" not in observed_steps
+        assert "delivery_return_lane" not in observed_steps
+        assert unit.phase is TrayUnitPhase.DELIVERED
+        assert registry.finished_output_gate_fraction <= 0.02
+        tray_geom = registry.geom_id("batch_tray_01_geom")
+        assert float(scene.model.geom_rgba[tray_geom, 3]) == 0.0
     finally:
         scene.close()
 

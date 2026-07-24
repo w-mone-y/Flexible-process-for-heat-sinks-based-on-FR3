@@ -1,0 +1,43 @@
+{
+  "makespan": 1051.5499999995914,
+  "throughput_per_sim_second": 0.005705862774002503,
+  "completed_units": 6,
+  "completed_orders": 3,
+  "rework_units": 0,
+  "scrapped_units": 0,
+  "task_succeeded": 256,
+  "task_failed": 0,
+  "retry_count": 0,
+  "replan_count": 0,
+  "replan_time_seconds": 0.0,
+  "fault_count": 0,
+  "recovered_fault_count": 0,
+  "recovery_rate": 0.0,
+  "robot_busy_seconds": {
+    "MATERIAL_INDEXER": 9.24999999999568,
+    "EMPTY_TRAY_INDEXER": 12.199999999994319,
+    "CHANGEOVER_GANTRY": 152.2499999999351,
+    "ARM1": 715.9999999997834,
+    "TURNTABLE": 21.399999999991905,
+    "ARM2": 144.2499999999371,
+    "ARM3": 180.59999999991152,
+    "FIXTURE": 30.499999999988788,
+    "OUTFEED": 24.849999999991127,
+    "ELEVATOR": 48.29999999997597,
+    "TRANSFER_FORK": 42.2999999999729,
+    "RACK_LAYER_01": 3.0499999999994998,
+    "FURNACE": 30.249999999983913,
+    "RACK_LAYER_02": 2.09999999999809,
+    "RACK_LAYER_03": 1.049999999999045
+  },
+  "robot_utilization": {
+    "ARM1": 0.6808996243640927,
+    "ARM2": 0.13717845085825034,
+    "ARM3": 0.1717464694973912
+  },
+  "average_robot_utilization": 0.3299415149065781,
+  "average_task_wait_seconds": 22.094589552225454,
+  "zone_conflict_count": 0,
+  "tool_change_count": 6,
+  "on_time_rate": 1.0
+}

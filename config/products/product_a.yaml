@@ -18,3 +18,4 @@ bead_offset_m: 0.0025
 nozzle_tip_height_m: 0.0015
 material_speed_m_s: 0.10
 recipe: demo_brazing
+material_system: demo_aluminum_brazing

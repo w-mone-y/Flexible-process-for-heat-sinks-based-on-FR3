@@ -114,9 +114,10 @@ def test_preflight_rejects_product_c_raw_fin_inside_arm1_tool_rack() -> None:
     scene = BrazingScene(ROOT / "brazing_line.xml", order="C", raw=True)
     try:
         site = scene.model.site("raw_fin_07_site")
-        # Restore the former second-bank X coordinate that put C fin_07
-        # directly through the rack column.
-        site.pos[0] = 0.44
+        # Deliberately move fin_07 into the current central quick-change rack
+        # column to prove the clearance check follows the new layout.
+        site.pos[0] = 0.0
+        site.pos[1] = -0.085
         scene.mujoco.mj_forward(scene.model, scene.data)
         report = preflight_check(
             scene,
@@ -129,6 +130,31 @@ def test_preflight_rejects_product_c_raw_fin_inside_arm1_tool_rack() -> None:
             issue.object_name.startswith("raw_fin_07_site/") and "工具架净距" in issue.message
             for issue in report.issues
         )
+    finally:
+        scene.close()
+
+
+def test_preflight_rejects_overlapping_shallow_u_station_tables() -> None:
+    from brazing_sim.preflight import preflight_check
+    from brazing_sim.scene import BrazingScene
+
+    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    try:
+        # Restore the former compact S2A Y coordinate, which made the 490 x
+        # 350 mm S1/S2A table tops visibly overlap.
+        body = scene.model.body("station_s2a_dispensing")
+        body.pos[1] = 0.27
+        anchor = scene.model.body("station_s2a_anchor")
+        anchor.pos[1] = 0.27
+        scene.mujoco.mj_forward(scene.model, scene.data)
+        report = preflight_check(
+            scene,
+            order="A",
+            raise_on_error=False,
+            validate_current_sites=True,
+        )
+        assert not report.ok
+        assert any("相邻工位水平净距" in issue.message for issue in report.issues)
     finally:
         scene.close()
 

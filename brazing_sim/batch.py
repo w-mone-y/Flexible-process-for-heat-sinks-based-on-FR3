@@ -52,6 +52,7 @@ class BatchCoordinator:
         self.transfer_demo = False
         self.inspection_task: TaskSpec | None = None
         self._inspection_unit_index: int | None = None
+        self._delivery_unit_index: int | None = None
         self._transfer_resources: tuple[str, ...] = ()
         self._pending_load_index: int | None = None
         self._pending_furnace_fault: str | None = None
@@ -104,7 +105,7 @@ class BatchCoordinator:
         self.single.pause_after_stage = OrderStage.READY_FOR_TRANSFER
         if full_scene_reset:
             self.scene.reset(product, raw=True)
-            self.transfer.reset(show_empty_cache=True)
+            self.transfer.reset(show_empty_cache=False)
             self.scene.registry.set_furnace_door(0.0, teleport=True)
         else:
             self.scene.reset_workcell(product)
@@ -154,6 +155,7 @@ class BatchCoordinator:
         self.transfer_demo = False
         self.inspection_task = None
         self._inspection_unit_index = None
+        self._delivery_unit_index = None
         self._transfer_resources = ()
         self._pending_load_index = None
         self._pending_furnace_fault = None
@@ -198,6 +200,7 @@ class BatchCoordinator:
         # prerequisites immediately; otherwise the command looks idle while
         # the coordinator is correctly waiting for the furnace door to open.
         registry = self.scene.registry
+        registry.dock_assembly_tray_to_station("rack_infeed", snap=True)
         registry.place_base_on_tray(snap=True)
         self.scene.fixture_controller.configure_product(product.spec, product.fixture)
         for fin in product.active_fins:
@@ -248,10 +251,9 @@ class BatchCoordinator:
         if self.transfer.prefetch_active_for(next_index):
             return
         if self.transfer.phase not in {
-            TransferPhase.LIFTING,
-            TransferPhase.PUSHING,
-            TransferPhase.RETRACTING,
-            TransferPhase.LOWERING,
+            TransferPhase.CONVEYING_IN,
+            TransferPhase.LOCKING,
+            TransferPhase.CONVEYING_OUT,
         }:
             return
         resources = ("tray_indexer", "table2_zone")
@@ -401,12 +403,8 @@ class BatchCoordinator:
             raise RuntimeError("all planned rack shelves are required before brazing")
         if self.transfer.busy:
             raise RuntimeError("transfer carrier must be clear before furnace closure")
-        if (
-            abs(self.scene.registry.batch_joint_position("batch_pusher_joint")) > 0.002
-            or abs(self.scene.registry.batch_joint_position("batch_lift_joint")) > 0.002
-            or abs(self.scene.registry.batch_joint_position("batch_outfeed_joint")) > 0.002
-        ):
-            raise RuntimeError("lift and pusher must return home before furnace closure")
+        if abs(self.scene.registry.batch_joint_position("batch_outfeed_joint")) > 0.002:
+            raise RuntimeError("furnace conveyor must return home before furnace closure")
         if not self.single.resources.acquire(
             "furnace_rack",
             "batch_furnace",
@@ -515,6 +513,20 @@ class BatchCoordinator:
         self.single.resources.release("inspection_zone", Actor.ARM3.value)
         self.inspection_task = None
         self._inspection_unit_index = None
+        self._delivery_unit_index = index
+        self.transfer.start_delivery(index, now)
+        self.status = f"delivering tray {index + 1} through finished-goods port"
+
+    def _finish_delivery(self, now: float) -> None:
+        """Advance only after the lift gate has closed and payload vanished."""
+
+        assert self.batch is not None
+        assert self._delivery_unit_index is not None
+        index = self._delivery_unit_index
+        unit = self.batch.units[index]
+        if unit.phase is not TrayUnitPhase.DELIVERED:
+            raise RuntimeError("finished-product delivery completed without tray handoff")
+        self._delivery_unit_index = None
         if self._unload_position + 1 < len(self._unload_order):
             self._unload_position += 1
             self._unload_cursor = self._unload_order[self._unload_position]
@@ -626,7 +638,10 @@ class BatchCoordinator:
                     if result is TaskStatus.FAILED:
                         batch.fail(self.transfer.error or "batch unloading failed", timestamp)
                     elif result is TaskStatus.SUCCEEDED:
-                        self._start_post_inspection(timestamp)
+                        if self._delivery_unit_index is not None:
+                            self._finish_delivery(timestamp)
+                        else:
+                            self._start_post_inspection(timestamp)
         except Exception as exc:
             batch.fail(str(exc), timestamp)
             self.status = str(exc)
@@ -700,6 +715,7 @@ class BatchCoordinator:
         self.transfer_demo = False
         self.inspection_task = None
         self._inspection_unit_index = None
+        self._delivery_unit_index = None
         self._pending_load_index = None
         self._pending_furnace_fault = None
         self.process_plan = None
@@ -754,7 +770,7 @@ class BatchCoordinator:
                     "layers": len(batch.units),
                     "active_layer": batch.active_unit.layer_index + 1,
                     "elapsed_seconds": max(0.0, timestamp - batch.created_at),
-                    "completed_units": sum(unit.phase is TrayUnitPhase.INSPECTED for unit in batch.units),
+                    "completed_units": sum(unit.phase is TrayUnitPhase.DELIVERED for unit in batch.units),
                     "furnace_cycle_count": int(
                         self.furnace is not None and self.furnace.state.cycle_started_at is not None
                     ),

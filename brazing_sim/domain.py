@@ -194,6 +194,8 @@ class TrayUnitPhase(StrEnum):
     UNLOADING = "UNLOADING"
     UNLOADED = "UNLOADED"
     INSPECTED = "INSPECTED"
+    DELIVERING = "DELIVERING"
+    DELIVERED = "DELIVERED"
     MANUAL_REVIEW = "MANUAL_REVIEW"
     ERROR = "ERROR"
 
@@ -218,6 +220,9 @@ class TransferPhase(StrEnum):
     RETRACTING = "RETRACTING"
     LOWERING = "LOWERING"
     OUTPUT = "OUTPUT"
+    DELIVERY = "DELIVERY"
+    CONVEYING_IN = "CONVEYING_IN"
+    CONVEYING_OUT = "CONVEYING_OUT"
     PAUSED = "PAUSED"
     COMPLETE = "COMPLETE"
     ERROR = "ERROR"
@@ -934,8 +939,13 @@ class TransferState:
     outfeed_position_m: float = 0.0
     pusher_position_m: float = 0.0
     pusher_extension_ratio: float = 0.0
+    conveyor_position_m: float = 0.0
+    conveyor_progress: float = 0.0
     lock_position_m: float = 0.0
     output_position_m: float = 0.0
+    output_gate_fraction: float = 0.0
+    comb_removal_progress: float = 0.0
+    delivered_count: int = 0
     moving: bool = False
     error: str | None = None
 
