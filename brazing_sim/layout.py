@@ -29,8 +29,8 @@ class ShallowULayout:
     fin_pickup_x: float = 0.32
     fin_pickup_surface_z_m: float = 0.25
     fin_row_spacing_m: float = 0.075
-    fin_rows_per_tier: int = 6
-    fin_tier_spacing_m: float = 0.10
+    dense_fin_row_spacing_m: float = 0.065
+    fin_single_tier_span_m: float = 0.44
 
     output_lane_x: float = 0.75
     # The rigid output pallet is wider than the black belt.  Its swept edge,
@@ -46,22 +46,27 @@ class ShallowULayout:
         table_top_z: float,
         fin_height_m: float,
     ) -> tuple[float, float, float]:
-        """Return a stable two-tier raw-fin pose for a zero-based pool slot.
+        """Return a centred, single-tier raw-fin pose for one active blank.
 
-        At most six blanks occupy one tier.  A seventh or later blank is
-        placed on the upper indexed shelf instead of spreading into the
-        finished-product conveyor.  Rows remain centred and retain the 75 mm
-        gripper clearance used by the verified Arm1 pickup path.
+        Small orders retain the verified 75 mm gripper clearance.  C and
+        denser products use a compact pitch that shrinks only as required to
+        fit the 440 mm usable Table1 span.  Every blank remains on the same
+        physical pickup surface; a seventh fin is never hidden on an upper
+        shelf.
         """
 
         if index < 0 or count < 1 or index >= count:
             raise ValueError("raw-fin index must belong to the active order")
-        tier = index // self.fin_rows_per_tier
-        row = index % self.fin_rows_per_tier
-        rows = min(self.fin_rows_per_tier, count - tier * self.fin_rows_per_tier)
-        y = self.fin_magazine_xy[1] + (row - 0.5 * (rows - 1)) * self.fin_row_spacing_m
+        if count >= 7:
+            spacing = min(
+                self.dense_fin_row_spacing_m,
+                self.fin_single_tier_span_m / float(count - 1),
+            )
+        else:
+            spacing = self.fin_row_spacing_m
+        y = self.fin_magazine_xy[1] + (index - 0.5 * (count - 1)) * spacing
         support_z = max(float(table_top_z), self.fin_pickup_surface_z_m)
-        z = support_z + 0.5 * fin_height_m + tier * self.fin_tier_spacing_m
+        z = support_z + 0.5 * fin_height_m
         return self.fin_pickup_x, y, z
 
 

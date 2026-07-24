@@ -124,6 +124,7 @@ class SceneRegistry:
         self._batch_path_geometry: dict[tuple[int, int], tuple[np.ndarray, np.ndarray, float, float]] = {}
         self._batch_path_progress: dict[tuple[int, int], float] = {}
         self._batch_press_target_z: dict[int, float] = {}
+        self._batch_press_target_x: dict[int, tuple[float, float]] = {}
         self._batch_comb_geometry: dict[int, tuple[float, tuple[float, ...], float, float]] = {}
         self._batch_comb_installed: dict[int, bool] = {}
         self._fault_path_slots: dict[str, int] = {}
@@ -1267,13 +1268,17 @@ class SceneRegistry:
 
         The finished-goods box represents a downstream handoff.  Product,
         fins and brazing geoms disappear only after the complete assembly has
-        stopped inside the open box. The suspended comb has already been
-        withdrawn at the inspection point; the carrier plate, central
-        template and press bars remain welded to the transfer mechanism, so
-        the empty fixture visibly withdraws before the safety gate closes.
+        stopped inside the open box. The suspended comb and both short press
+        bars have already been withdrawn at the inspection point; only the
+        carrier plate and central template return before the gate closes.
         """
 
         self.set_batch_tray_visible(unit_index, carrier=True, payload=False)
+        # ``carrier=True`` restores reusable fixture defaults.  The comb has
+        # its own installed-state guard; preserve the completed press-removal
+        # milestone explicitly so the two bars do not reappear inside the
+        # outlet when the product payload is handed off.
+        self.set_batch_press_visible(unit_index, False)
 
     @staticmethod
     def _batch_tray_fixture_names(unit: int) -> frozenset[str]:
@@ -1427,6 +1432,7 @@ class SceneRegistry:
         base_top = 0.032 + spec.base_thickness / 2.0
         press_target_z = base_top + spec.fin_height + 0.003
         self._batch_press_target_z[int(unit_index)] = float(press_target_z)
+        self._batch_press_target_x[int(unit_index)] = (-float(press_x), float(press_x))
         for label, x in (("front_press", -press_x), ("rear_press", press_x)):
             geom_id = self.geom_id(f"{prefix}_{label}")
             self.model.geom_pos[geom_id, 0] = x
@@ -1647,12 +1653,45 @@ class SceneRegistry:
         amount = float(np.clip(fraction, 0.0, 1.0))
         eased = amount * amount * (3.0 - 2.0 * amount)
         target_z = self._batch_press_target_z[index]
+        target_x = self._batch_press_target_x[index]
         current_z = target_z + 0.060 * (1.0 - eased)
-        for suffix in ("front_press", "rear_press"):
+        for suffix, x in zip(("front_press", "rear_press"), target_x):
             geom_id = self.geom_id(f"batch_tray_{unit:02d}_{suffix}")
+            self.model.geom_pos[geom_id, 0] = x
             self.model.geom_pos[geom_id, 2] = current_z
             rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
             rgba[3] = 1.0
+            self.model.geom_rgba[geom_id] = rgba
+
+    def set_batch_press_removal_progress(self, unit_index: int, fraction: float) -> None:
+        """Lift and withdraw both short press bars before finished delivery.
+
+        Both bars remain visible throughout the quintic motion and disappear
+        only after reaching their safe removal poses.  This makes the tooling
+        handoff explicit instead of replacing it with an alpha jump.
+        """
+
+        unit = int(unit_index) + 1
+        index = int(unit_index)
+        if (
+            unit not in {1, 2, 3}
+            or index not in self._batch_press_target_z
+            or index not in self._batch_press_target_x
+        ):
+            raise ValueError(f"batch press is not configured for unit {unit_index}")
+        amount = float(np.clip(fraction, 0.0, 1.0))
+        eased = amount**3 * (10.0 - 15.0 * amount + 6.0 * amount**2)
+        target_z = self._batch_press_target_z[index]
+        front_x, rear_x = self._batch_press_target_x[index]
+        for suffix, start_x, direction in (
+            ("front_press", front_x, -1.0),
+            ("rear_press", rear_x, 1.0),
+        ):
+            geom_id = self.geom_id(f"batch_tray_{unit:02d}_{suffix}")
+            self.model.geom_pos[geom_id, 0] = start_x + direction * 0.085 * eased
+            self.model.geom_pos[geom_id, 2] = target_z + 0.075 * eased
+            rgba = np.asarray(self.model.geom_rgba[geom_id], dtype=float).copy()
+            rgba[3] = 1.0 if amount < 1.0 else 0.0
             self.model.geom_rgba[geom_id] = rgba
 
     def set_batch_press_locked(self, unit_index: int, locked: bool = True) -> None:

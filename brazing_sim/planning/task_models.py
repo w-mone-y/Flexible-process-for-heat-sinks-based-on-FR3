@@ -96,7 +96,7 @@ class TaskType(StrEnum):
 TASK_TYPE_LABELS_ZH: dict[TaskType, str] = {
     TaskType.INDEX_MATERIAL_KIT: "索引订单物料盒",
     TaskType.INDEX_EMPTY_TRAY: "空托盘补位",
-    TaskType.REMOVE_OLD_PRESS: "拆除旧压梁",
+    TaskType.REMOVE_OLD_PRESS: "拆除双压片",
     TaskType.REMOVE_OLD_COMB: "拆除旧梳齿",
     TaskType.REMOVE_OLD_MOLD: "拆除旧托盘模具",
     TaskType.FETCH_MOLD: "龙门取出目标模具",
@@ -230,6 +230,10 @@ def task_detail_label_zh(task: Mapping[str, Any]) -> str:
         module = str(payload.get("comb_module_name", ""))
         spacing = "".join(character for character in module if character.isdigit())
         detail = f"{spacing}毫米梳齿模块" if spacing else "订单匹配梳齿模块"
+    elif task_type is TaskType.REMOVE_OLD_COMB and payload.get("after_brazing"):
+        detail = "焊后梳齿板缓慢退出"
+    elif task_type is TaskType.REMOVE_OLD_PRESS and payload.get("after_brazing"):
+        detail = "两根短压片同步抬升并退出"
     elif task_type in {
         TaskType.FETCH_COMB,
         TaskType.INSTALL_COMB,

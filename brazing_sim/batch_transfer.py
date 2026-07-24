@@ -48,6 +48,7 @@ class BatchTransferActor:
     DELIVERY_GATE_OPEN_M = 0.500
     DELIVERY_DWELL_SECONDS = 0.45
     COMB_REMOVAL_SECONDS = 0.90
+    PRESS_REMOVAL_SECONDS = 1.20
     LOCK_DWELL_SECONDS = 0.75
     UNLOCK_DWELL_SECONDS = 0.45
     AXES = {
@@ -92,6 +93,8 @@ class BatchTransferActor:
         self._paused_hold_remaining = 0.0
         self._comb_removal_started_at: float | None = None
         self._paused_comb_removal_elapsed = 0.0
+        self._press_removal_started_at: float | None = None
+        self._paused_press_removal_elapsed = 0.0
 
     def _batch(self) -> BatchState:
         value = self._batch_source()
@@ -416,6 +419,7 @@ class BatchTransferActor:
         batch.transfer.shelf_index = unit.layer_index
         batch.transfer.moving = True
         batch.transfer.comb_removal_progress = 0.0
+        batch.transfer.press_removal_progress = 0.0
         self.operation = "delivery"
         self.unit_index = unit_index
         self.phase = TransferPhase.DELIVERY
@@ -425,7 +429,10 @@ class BatchTransferActor:
         self._motion = None
         self._comb_removal_started_at = float(now)
         self._paused_comb_removal_elapsed = 0.0
+        self._press_removal_started_at = None
+        self._paused_press_removal_elapsed = 0.0
         self.scene.registry.set_batch_comb_install_progress(unit_index, 1.0)
+        self.scene.registry.set_batch_press_removal_progress(unit_index, 0.0)
 
     def _begin_delivery_enter(self, index: int, tray: str, now: float) -> None:
         """Acquire the inspected tray and continue straight into the outlet.
@@ -472,6 +479,8 @@ class BatchTransferActor:
         self._paused_hold_remaining = 0.0
         self._comb_removal_started_at = None
         self._paused_comb_removal_elapsed = 0.0
+        self._press_removal_started_at = None
+        self._paused_press_removal_elapsed = 0.0
 
     def _advance_index(self) -> None:
         assert self.unit_index is not None
@@ -618,8 +627,9 @@ class BatchTransferActor:
         elif self._step == "delivery_unload":
             # The whole slotted fixture entered the box as one rigid assembly.
             # Simulate manual product removal only after it has stopped inside;
-            # the tray plate and press bars remain attached and visibly retrace
-            # the inbound path. The comb was removed before the gate opened.
+            # the tray plate remains attached and visibly retraces the inbound
+            # path. The comb and both press bars were removed before the gate
+            # opened.
             self.scene.registry.handoff_batch_payload(index)
             self._step = "delivery_return_home"
             self._begin_axis("output", 0.0, now)
@@ -639,25 +649,51 @@ class BatchTransferActor:
         else:
             raise RuntimeError(f"unknown finished-delivery step: {self._step}")
 
-    def _poll_comb_removal(self, now: float) -> bool:
-        """Withdraw the suspended comb before opening the finished-goods gate."""
+    def _poll_fixture_removal(self, now: float) -> bool:
+        """Withdraw the comb and both short press bars before opening the gate."""
 
-        if self.operation != "delivery" or self._step != "delivery_remove_comb":
+        if self.operation != "delivery":
             return False
         assert self.unit_index is not None
-        started = float(now) if self._comb_removal_started_at is None else self._comb_removal_started_at
-        duration = 0.0 if self.fast else self.COMB_REMOVAL_SECONDS
+        batch = self._batch()
+        if self._step == "delivery_remove_comb":
+            started = float(now) if self._comb_removal_started_at is None else self._comb_removal_started_at
+            duration = 0.0 if self.fast else self.COMB_REMOVAL_SECONDS
+            linear = 1.0 if duration <= 0.0 else min(1.0, max(0.0, (float(now) - started) / duration))
+            progress = quintic_time_scaling(linear)
+            self.scene.registry.set_batch_comb_install_progress(
+                self.unit_index,
+                1.0 - progress,
+            )
+            batch.transfer.phase = self.phase
+            batch.transfer.step = self._step
+            batch.transfer.comb_removal_progress = progress
+            if progress < 1.0:
+                batch.transfer.moving = True
+                return True
+            self._comb_removal_started_at = None
+            self._press_removal_started_at = float(now)
+            self._step = "delivery_remove_press"
+            self.scene.registry.set_batch_press_locked(self.unit_index, False)
+            self.scene.registry.set_batch_press_removal_progress(self.unit_index, 0.0)
+            batch.transfer.step = self._step
+            batch.transfer.moving = True
+            return True
+        if self._step != "delivery_remove_press":
+            return False
+        started = float(now) if self._press_removal_started_at is None else self._press_removal_started_at
+        duration = 0.0 if self.fast else self.PRESS_REMOVAL_SECONDS
         linear = 1.0 if duration <= 0.0 else min(1.0, max(0.0, (float(now) - started) / duration))
         progress = quintic_time_scaling(linear)
-        self.scene.registry.set_batch_comb_install_progress(self.unit_index, 1.0 - progress)
-        batch = self._batch()
+        self.scene.registry.set_batch_press_removal_progress(self.unit_index, progress)
+        batch.transfer.press_removal_progress = progress
         batch.transfer.phase = self.phase
         batch.transfer.step = self._step
-        batch.transfer.comb_removal_progress = progress
         batch.transfer.moving = progress < 1.0
         if progress < 1.0:
             return True
-        self._comb_removal_started_at = None
+        self._press_removal_started_at = None
+        self.scene.registry.set_batch_press_visible(self.unit_index, False)
         self._step = "delivery_gate_open"
         batch.transfer.step = self._step
         batch.transfer.moving = True
@@ -673,7 +709,7 @@ class BatchTransferActor:
             self._poll_prefetch(now)
             if not self.operation:
                 return TaskStatus.RUNNING if self._index_motion is not None else TaskStatus.SUCCEEDED
-            if self._poll_comb_removal(now):
+            if self._poll_fixture_removal(now):
                 return TaskStatus.RUNNING
             for _ in range(16 if self.fast else 1):
                 holding = self._hold_until is not None
@@ -745,6 +781,11 @@ class BatchTransferActor:
                 0.0,
                 timestamp - self._comb_removal_started_at,
             )
+        if self._step == "delivery_remove_press" and self._press_removal_started_at is not None:
+            self._paused_press_removal_elapsed = max(
+                0.0,
+                timestamp - self._press_removal_started_at,
+            )
         if self._motion is not None:
             self._resume_target = (self._motion.joint, self._motion.target)
             measured = self.scene.registry.batch_joint_position(self._motion.joint)
@@ -782,6 +823,9 @@ class BatchTransferActor:
         if self._step == "delivery_remove_comb":
             self._comb_removal_started_at = float(now) - self._paused_comb_removal_elapsed
             self._paused_comb_removal_elapsed = 0.0
+        elif self._step == "delivery_remove_press":
+            self._press_removal_started_at = float(now) - self._paused_press_removal_elapsed
+            self._paused_press_removal_elapsed = 0.0
         if self._motion is not None:
             target = self._motion.target
             key = next(key for key, value in self.AXES.items() if value[0] == self._motion.joint)
@@ -828,6 +872,8 @@ class BatchTransferActor:
         self._paused_hold_remaining = 0.0
         self._comb_removal_started_at = None
         self._paused_comb_removal_elapsed = 0.0
+        self._press_removal_started_at = None
+        self._paused_press_removal_elapsed = 0.0
 
     @property
     def busy(self) -> bool:
@@ -867,6 +913,9 @@ class BatchTransferActor:
             "finished_output_gate_fraction": self.scene.registry.finished_output_gate_fraction,
             "comb_removal_progress": (
                 self._batch().transfer.comb_removal_progress if self._batch_source() is not None else 0.0
+            ),
+            "press_removal_progress": (
+                self._batch().transfer.press_removal_progress if self._batch_source() is not None else 0.0
             ),
             "delivered_count": (
                 self._batch().transfer.delivered_count if self._batch_source() is not None else 0

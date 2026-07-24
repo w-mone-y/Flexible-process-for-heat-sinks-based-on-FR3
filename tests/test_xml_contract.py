@@ -196,36 +196,23 @@ class BrazingXmlContractTests(unittest.TestCase):
         finally:
             scene.close()
 
-    def test_fin_magazine_upper_tier_is_open_and_does_not_cover_lower_fins(self) -> None:
+    def test_fin_magazine_is_a_single_open_pickup_deck(self) -> None:
         import mujoco
 
-        self.assertEqual(
-            mujoco.mj_name2id(
-                self.model,
-                mujoco.mjtObj.mjOBJ_GEOM,
-                "fin_magazine_upper_shelf",
-            ),
-            -1,
-        )
         for name in (
+            "fin_magazine_upper_shelf",
             "fin_magazine_upper_left_rail",
             "fin_magazine_upper_right_rail",
-        ):
-            rail = self.model.geom(name)
-            # End-support rails may run along the rows, but must remain thin
-            # across each fin so the central pickup window stays unobstructed.
-            self.assertLessEqual(float(rail.size[0]), 0.015 + 1e-9)
-            # The upper-tier fins have their centres at Z=0.380 m and are
-            # 60 mm tall, so the open end rails must support their lower edge
-            # at Z=0.350 m without covering the pickup window.
-            self.assertAlmostEqual(float(rail.pos[2] + rail.size[2]), 0.350, places=6)
-        for name in (
             "fin_magazine_upper_rear_support_left",
             "fin_magazine_upper_rear_support_right",
             "fin_magazine_upper_front_support_left",
             "fin_magazine_upper_front_support_right",
         ):
-            self.model.geom(name)
+            self.assertEqual(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name),
+                -1,
+                name,
+            )
 
     def test_industrial_detail_layer_is_visual_only(self) -> None:
         """High-detail shells must never change motion or contact behaviour."""

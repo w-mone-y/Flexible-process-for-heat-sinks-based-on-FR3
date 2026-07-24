@@ -945,6 +945,7 @@ class TransferState:
     output_position_m: float = 0.0
     output_gate_fraction: float = 0.0
     comb_removal_progress: float = 0.0
+    press_removal_progress: float = 0.0
     delivered_count: int = 0
     moving: bool = False
     error: str | None = None

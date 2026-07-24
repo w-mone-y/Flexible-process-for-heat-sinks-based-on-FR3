@@ -50,8 +50,14 @@ def _tray_index(tray_id: str | None) -> int:
 class _TransferState:
     transfer_id: str
     destination: str
+    started_at: float
+    start_position: float
+    duration_s: float
     handed_off: bool = False
     settled_at: float | None = None
+    return_started_at: float | None = None
+    return_start_position: float | None = None
+    return_duration_s: float = 0.0
 
 
 @dataclass(slots=True)
@@ -453,6 +459,7 @@ class AsyncLinePhysicalSkill:
                 goal_pose,
                 0.70,
                 settle=True,
+                settle_s=0.10,
                 action=lambda: self._apply_process_action(1.0),
                 lock_joint7=True,
                 cartesian_linear=True,
@@ -464,6 +471,22 @@ class AsyncLinePhysicalSkill:
                 payload_target_pose=payload_goal,
                 position_tolerance_m=0.0002,
                 orientation_tolerance_deg=0.05,
+            ),
+            _ArmStage(
+                "翅片释放后槽内稳定确认",
+                goal_pose,
+                0.20,
+                settle=True,
+                settle_s=0.18,
+                lock_joint7=True,
+                # Releasing the payload changes the wrist load and can leave
+                # a harmless millimetre-scale servo residual.  The preceding
+                # loaded pure-Z placement already enforces 0.2 mm / 0.05 deg;
+                # this empty-gripper dwell only confirms that the fin remains
+                # in its slot, so it must use the controller's common 3 mm
+                # arrival threshold rather than create a no-progress deadlock.
+                position_tolerance_m=0.0030,
+                orientation_tolerance_deg=1.0,
             ),
             _ArmStage(
                 "夹爪松开并垂直撤离",
@@ -1030,7 +1053,17 @@ class AsyncLinePhysicalSkill:
             if task.task_type in TRANSFER_BINDINGS:
                 transfer_id, destination = TRANSFER_BINDINGS[task.task_type]
                 self.scene.registry.begin_batch_tray_async_transfer(task.tray_id or "", transfer_id)
-                self.transfer = _TransferState(transfer_id, destination)
+                start_position = self.scene.registry.async_transfer_position(transfer_id)
+                outbound_duration = 0.05 if self.fast else max(4.0, float(task.estimated_duration) * 2.25)
+                return_duration = 0.05 if self.fast else max(2.5, float(task.estimated_duration) * 1.25)
+                self.transfer = _TransferState(
+                    transfer_id=transfer_id,
+                    destination=destination,
+                    started_at=float(now),
+                    start_position=float(start_position),
+                    duration_s=outbound_duration,
+                    return_duration_s=return_duration,
+                )
             self._prepare_arm_motion()
         except Exception:
             # Starting a skill is transactional.  A failed IK/tool/ownership
@@ -1233,6 +1266,10 @@ class AsyncLinePhysicalSkill:
                 _tray_index(self.task.tray_id),
                 0.0,
             )
+        if self.task.task_type is TaskType.REMOVE_OLD_PRESS:
+            index = _tray_index(self.task.tray_id)
+            self.scene.registry.set_batch_press_removal_progress(index, 1.0)
+            self.scene.registry.set_batch_press_visible(index, False)
         if self.task.task_type is TaskType.LOCK_FIXTURE:
             self.scene.registry.set_batch_press_locked(
                 _tray_index(self.task.tray_id),
@@ -1270,10 +1307,18 @@ class AsyncLinePhysicalSkill:
         state = self.transfer
         if not state.handed_off:
             target = registry.async_transfer_limit(state.transfer_id)
-            registry.set_async_transfer_target(state.transfer_id, target)
+            elapsed = max(0.0, float(now) - state.started_at)
+            linear_fraction = float(np.clip(elapsed / max(state.duration_s, 1.0e-6), 0.0, 1.0))
+            command_fraction = quintic_time_scaling(linear_fraction)
+            command = state.start_position + command_fraction * (target - state.start_position)
+            registry.set_async_transfer_target(state.transfer_id, command)
             error = abs(registry.async_transfer_position(state.transfer_id) - target)
             velocity = abs(registry.async_transfer_velocity(state.transfer_id))
-            if error <= self.POSITION_TOLERANCE_M and velocity <= self.VELOCITY_TOLERANCE_M_S:
+            if (
+                linear_fraction >= 1.0
+                and error <= self.POSITION_TOLERANCE_M
+                and velocity <= self.VELOCITY_TOLERANCE_M_S
+            ):
                 if state.settled_at is None:
                     state.settled_at = float(now)
                 elif float(now) - state.settled_at >= self.SETTLE_SECONDS:
@@ -1284,21 +1329,43 @@ class AsyncLinePhysicalSkill:
                     )
                     state.handed_off = True
                     state.settled_at = None
+                    state.return_started_at = float(now)
+                    state.return_start_position = registry.async_transfer_position(state.transfer_id)
             else:
                 state.settled_at = None
-            progress = min(0.8, 0.8 * registry.async_transfer_position(state.transfer_id) / target)
+            actual_fraction = float(
+                np.clip(
+                    (registry.async_transfer_position(state.transfer_id) - state.start_position)
+                    / max(target - state.start_position, 1.0e-9),
+                    0.0,
+                    1.0,
+                )
+            )
+            progress = min(0.8, 0.8 * max(command_fraction, actual_fraction))
             return SkillExecutionResult.running_result({"progress": progress})
-        registry.set_async_transfer_target(state.transfer_id, 0.0)
+        if state.return_started_at is None:
+            state.return_started_at = float(now)
+        if state.return_start_position is None:
+            state.return_start_position = registry.async_transfer_position(state.transfer_id)
+        return_elapsed = max(0.0, float(now) - state.return_started_at)
+        return_linear = float(np.clip(return_elapsed / max(state.return_duration_s, 1.0e-6), 0.0, 1.0))
+        return_fraction = quintic_time_scaling(return_linear)
+        return_command = state.return_start_position * (1.0 - return_fraction)
+        registry.set_async_transfer_target(state.transfer_id, return_command)
         position = abs(registry.async_transfer_position(state.transfer_id))
         velocity = abs(registry.async_transfer_velocity(state.transfer_id))
-        if position <= self.POSITION_TOLERANCE_M and velocity <= self.VELOCITY_TOLERANCE_M_S:
+        if (
+            return_linear >= 1.0
+            and position <= self.POSITION_TOLERANCE_M
+            and velocity <= self.VELOCITY_TOLERANCE_M_S
+        ):
             if state.settled_at is None:
                 state.settled_at = float(now)
             elif float(now) - state.settled_at >= self.SETTLE_SECONDS:
                 return SkillExecutionResult.success({"progress": 1.0, "physical_transfer": state.transfer_id})
         else:
             state.settled_at = None
-        return SkillExecutionResult.running_result({"progress": 0.9})
+        return SkillExecutionResult.running_result({"progress": 0.8 + 0.2 * return_fraction})
 
     def update(self, now: float, dt: float) -> SkillExecutionResult:
         del dt
@@ -1370,6 +1437,11 @@ class AsyncLinePhysicalSkill:
                 _tray_index(self.task.tray_id),
                 1.0 - fraction,
             )
+        if self.task.task_type is TaskType.REMOVE_OLD_PRESS and self.task.payload.get("after_brazing"):
+            self.scene.registry.set_batch_press_removal_progress(
+                _tray_index(self.task.tray_id),
+                fraction,
+            )
         if self.task.task_type is TaskType.APPLY_PRESS:
             self.scene.registry.set_batch_press_progress(
                 _tray_index(self.task.tray_id),
@@ -1383,7 +1455,12 @@ class AsyncLinePhysicalSkill:
         action_threshold = (
             1.0
             if not returns_to_entry
-            or self.task.task_type in {TaskType.CONFIGURE_COMB, TaskType.REMOVE_OLD_COMB}
+            or self.task.task_type
+            in {
+                TaskType.CONFIGURE_COMB,
+                TaskType.REMOVE_OLD_COMB,
+                TaskType.REMOVE_OLD_PRESS,
+            }
             else self.ACTION_FRACTION
         )
         if fraction + 1.0e-12 >= action_threshold:
@@ -1427,6 +1504,7 @@ def build_physical_async_line_skill_registry(*, fast: bool = False) -> SkillRegi
         TaskType.INSPECT_BRAZING,
         TaskType.CONFIGURE_COMB,
         TaskType.REMOVE_OLD_COMB,
+        TaskType.REMOVE_OLD_PRESS,
         TaskType.PICK_FIN,
         TaskType.INSTALL_FIN,
         TaskType.INSPECT_FINS,

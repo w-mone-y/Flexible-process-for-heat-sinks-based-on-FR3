@@ -6,6 +6,7 @@ zones:
   - ZONE_S2A_ARM2
   - ZONE_S2B_ARM3
   - ZONE_S3_SHARED
+  - ZONE_S3_OUTPUT_INTERARM
   - ZONE_BASE_MAGAZINE
   - ZONE_FIN_MAGAZINE
   - ZONE_TRANSFER_12
@@ -50,7 +51,7 @@ resources:
     resource_type: FIXTURE
     current_tool: null
     available_tools: []
-    capabilities: [CONFIGURE_COMB, REMOVE_OLD_COMB, APPLY_PRESS, LOCK_FIXTURE]
+    capabilities: [CONFIGURE_COMB, REMOVE_OLD_COMB, REMOVE_OLD_PRESS, APPLY_PRESS, LOCK_FIXTURE]
   - resource_id: TRANSFER_S1_S2A
     resource_type: TRANSFER
     current_tool: null

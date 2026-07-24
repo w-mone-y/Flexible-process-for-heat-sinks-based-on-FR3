@@ -264,22 +264,9 @@
       <geom class="visual" name="fin_magazine_pick_surface" type="box"
             size="0.18 0.25 0.010" pos="0.32 -0.46 0.240"
             material="brushed_aluminium"/>
-      <!-- Open upper tier: the former 360 x 500 mm solid shelf hid every
-           lower blank from the operator and from the MuJoCo view.  Two slim
-           Y rails support only the fin ends, leaving the complete pickup
-           window open through the middle. -->
-      <geom class="visual" name="fin_magazine_upper_left_rail" type="box"
-            size="0.015 0.235 0.006" pos="0.17 -0.46 0.344" material="brushed_aluminium"/>
-      <geom class="visual" name="fin_magazine_upper_right_rail" type="box"
-            size="0.015 0.235 0.006" pos="0.47 -0.46 0.344" material="brushed_aluminium"/>
-      <geom class="visual" name="fin_magazine_upper_rear_support_left" type="box"
-            size="0.012 0.012 0.175" pos="0.17 -0.685 0.175" material="frame_steel"/>
-      <geom class="visual" name="fin_magazine_upper_rear_support_right" type="box"
-            size="0.012 0.012 0.175" pos="0.47 -0.685 0.175" material="frame_steel"/>
-      <geom class="visual" name="fin_magazine_upper_front_support_left" type="box"
-            size="0.012 0.012 0.175" pos="0.17 -0.235 0.175" material="frame_steel"/>
-      <geom class="visual" name="fin_magazine_upper_front_support_right" type="box"
-            size="0.012 0.012 0.175" pos="0.47 -0.235 0.175" material="frame_steel"/>
+      <!-- All active fin blanks are intentionally laid out on this one open
+           pickup deck.  Dense C/custom orders reduce row pitch in Python;
+           no upper shelf may obscure or physically split the material set. -->
       <body name="base_plate_magazine" pos="-0.60 -0.42 0">
         <geom class="visual" name="base_magazine_front" type="box" size="0.235 0.012 0.032"
               pos="0 -0.192 0.058" material="frame_steel"/>

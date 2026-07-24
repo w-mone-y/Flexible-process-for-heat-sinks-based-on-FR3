@@ -394,7 +394,7 @@ def test_batch_comb_physically_slides_in_and_slots_match_fin_targets() -> None:
         scene.close()
 
 
-def test_finished_comb_removal_precedes_every_output_route() -> None:
+def test_finished_comb_and_press_removal_precede_every_output_route() -> None:
     graph = build_task_graph(
         build_inline_plan(preset="A", order_id="REMOVE_BEFORE_OUTPUT", quantity=1, priority=10),
         flexible_cell=True,
@@ -405,9 +405,51 @@ def test_finished_comb_removal_precedes_every_output_route() -> None:
         if task.task_type is TaskType.REMOVE_OLD_COMB and task.payload.get("after_brazing")
     )
     assert graph.get(next(iter(removal.predecessors))).task_type is TaskType.POST_BRAZE_INSPECTION
+    press_removal = next(
+        task
+        for task in graph
+        if task.task_type is TaskType.REMOVE_OLD_PRESS and task.payload.get("after_brazing")
+    )
+    assert press_removal.predecessors == [removal.task_id]
     for route_type in (TaskType.ROUTE_PASS, TaskType.ROUTE_REWORK, TaskType.ROUTE_SCRAP):
         route = next(task for task in graph if task.task_type is route_type)
-        assert removal.task_id in route.predecessors
+        assert press_removal.task_id in route.predecessors
+
+
+def test_two_finished_press_bars_withdraw_together_before_becoming_hidden() -> None:
+    from brazing_sim.config import create_product_state, make_order_spec
+    from brazing_sim.scene import BrazingScene
+
+    scene = BrazingScene(order="A", raw=True)
+    try:
+        registry = scene.registry
+        registry.configure_batch_tray(
+            0,
+            create_product_state(
+                make_order_spec("A"),
+                order_id="PRESS_REMOVE",
+                created_at=0.0,
+            ),
+        )
+        registry.set_batch_press_progress(0, 1.0)
+        front = scene.model.geom("batch_tray_01_front_press")
+        rear = scene.model.geom("batch_tray_01_rear_press")
+        front_start = front.pos.copy()
+        rear_start = rear.pos.copy()
+
+        registry.set_batch_press_removal_progress(0, 0.5)
+        assert float(front.rgba[3]) == pytest.approx(1.0)
+        assert float(rear.rgba[3]) == pytest.approx(1.0)
+        assert float(front.pos[0]) < float(front_start[0])
+        assert float(rear.pos[0]) > float(rear_start[0])
+        assert float(front.pos[2]) > float(front_start[2])
+        assert float(rear.pos[2]) > float(rear_start[2])
+
+        registry.set_batch_press_removal_progress(0, 1.0)
+        assert float(front.rgba[3]) == pytest.approx(0.0)
+        assert float(rear.rgba[3]) == pytest.approx(0.0)
+    finally:
+        scene.close()
 
 
 def test_shallow_u_transfer_axes_end_at_their_named_station() -> None:
@@ -885,6 +927,7 @@ def test_normal_order_physically_continues_from_last_fin_to_finished_output() ->
             TaskType.UNLOAD_RACK_LAYER,
             TaskType.POST_BRAZE_INSPECTION,
             TaskType.REMOVE_OLD_COMB,
+            TaskType.REMOVE_OLD_PRESS,
             TaskType.ROUTE_PASS,
         }
         assert all(

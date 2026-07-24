@@ -506,6 +506,7 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
         registry = scene.registry
         registry.configure_batch_tray(0, unit.product)
         registry.set_batch_comb_install_progress(0, 1.0)
+        registry.set_batch_press_progress(0, 1.0)
         registry.set_batch_tray_visible(0, carrier=True, payload=True)
         registry.set_batch_weld("batch_station_tray_01_weld", False)
         registry.set_free_body_pose(
@@ -535,6 +536,7 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
         checked_return_home = False
         checked_close_interlock = False
         checked_comb_removal = False
+        checked_press_removal = False
         observed_steps: set[str] = set()
         result = None
         deadline = scene.time + 25.0
@@ -549,6 +551,15 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
                     abs=0.002,
                 )
                 checked_comb_removal = True
+            if coordinator.transfer.state["step"] == "delivery_remove_press":
+                assert registry.finished_output_gate_fraction <= 0.02
+                progress = float(coordinator.transfer.state["press_removal_progress"])
+                front_press = scene.model.geom("batch_tray_01_front_press")
+                rear_press = scene.model.geom("batch_tray_01_rear_press")
+                if 0.05 < progress < 0.95:
+                    assert float(front_press.rgba[3]) == pytest.approx(1.0)
+                    assert float(rear_press.rgba[3]) == pytest.approx(1.0)
+                    checked_press_removal = True
             if float(tray_pose[1]) < -0.15 and not checked_entry_interlock:
                 assert registry.finished_output_gate_fraction >= 0.98
                 assert float(tray_pose[0]) == pytest.approx(0.75, abs=0.002)
@@ -576,8 +587,8 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
                 assert float(scene.model.geom_rgba[template_geom, 3]) == 1.0
                 assert float(scene.model.geom_rgba[front_comb_base_geom, 3]) == 0.0
                 assert float(scene.model.geom_rgba[rear_comb_base_geom, 3]) == 0.0
-                assert float(scene.model.geom_rgba[front_press_geom, 3]) == 1.0
-                assert float(scene.model.geom_rgba[rear_press_geom, 3]) == 1.0
+                assert float(scene.model.geom_rgba[front_press_geom, 3]) == 0.0
+                assert float(scene.model.geom_rgba[rear_press_geom, 3]) == 0.0
                 assert float(scene.model.geom_rgba[base_geom, 3]) == 0.0
                 assert float(scene.model.geom_rgba[fin_geom, 3]) == 0.0
                 checked_unloaded_carrier = True
@@ -603,7 +614,9 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
         assert checked_return_home
         assert checked_close_interlock
         assert checked_comb_removal
+        assert checked_press_removal
         assert "delivery_remove_comb" in observed_steps
+        assert "delivery_remove_press" in observed_steps
         assert "delivery_pickup_lane" not in observed_steps
         assert "delivery_pickup_position" not in observed_steps
         assert "delivery_return_lane" not in observed_steps

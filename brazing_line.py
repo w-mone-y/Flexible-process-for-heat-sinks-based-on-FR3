@@ -1551,6 +1551,7 @@ class BrazingApplication:
                     "lock_position_m": 0.0,
                     "output_position_m": 0.0,
                     "comb_removal_progress": 0.0,
+                    "press_removal_progress": 0.0,
                     "moving": False,
                     "prefetch_unit_index": None,
                     "prefetch_complete_index": None,

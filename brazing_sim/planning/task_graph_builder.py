@@ -454,6 +454,14 @@ class ProcessPlanTaskGraphBuilder:
                     task.motion_constraints["lock_joint_indices"] = [6]
                 if task.task_type is TaskType.PICK_FIN:
                     task.required_zones = ["ZONE_FIN_MAGAZINE"]
+                elif task.task_type is TaskType.INSTALL_FIN:
+                    # Arm1's S3 insertion posture and Arm3's finished-output
+                    # camera posture have overlapping link-6/7 swept volumes
+                    # even though their nominal stations are different.  A
+                    # shared reservation serialises only these two hazardous
+                    # motions; base loading, dispensing and other inspections
+                    # remain free to overlap.
+                    task.required_zones.append("ZONE_S3_OUTPUT_INTERARM")
 
             # S1 -> S2A.  A high-reliability route performs its extra base
             # view at S1 before the pallet is released to the first slide.
@@ -893,6 +901,9 @@ class ProcessPlanTaskGraphBuilder:
         )
         graph.add_task(furnace)
 
+        post_inspection_zones = (
+            ("ZONE_OUTFEED", "ZONE_S3_OUTPUT_INTERARM") if self.flexible_cell else ("ZONE_OUTFEED",)
+        )
         previous_unload: str | None = None
         for assignment in sorted(plan.rack_assignments, key=lambda item: item.layer_index, reverse=True):
             unit_id = f"{plan.order.order_id}_UNIT_{assignment.unit_index + 1:02d}"
@@ -920,7 +931,7 @@ class ProcessPlanTaskGraphBuilder:
                 tray_id=assignment.tray_id,
                 predecessors=(unload.task_id,),
                 resources=("ARM3",),
-                zones=("ZONE_OUTFEED",),
+                zones=post_inspection_zones,
             )
             graph.add_task(inspect)
             route_predecessor = inspect.task_id
@@ -940,7 +951,7 @@ class ProcessPlanTaskGraphBuilder:
                     tray_id=assignment.tray_id,
                     predecessors=(inspect.task_id,),
                     resources=("ARM3",),
-                    zones=("ZONE_OUTFEED",),
+                    zones=post_inspection_zones,
                     payload={"camera_view": "side", "second_confirmation": True},
                 )
                 graph.add_task(second_view)
@@ -961,7 +972,23 @@ class ProcessPlanTaskGraphBuilder:
                 payload={"after_brazing": True, "condition_passthrough": True},
             )
             graph.add_task(remove_comb)
-            route_predecessor = remove_comb.task_id
+            remove_press = self._make(
+                task_id=_task_id(
+                    plan.order.order_id,
+                    assignment.unit_index,
+                    "REMOVE_FINISHED_PRESS",
+                ),
+                task_type=TaskType.REMOVE_OLD_PRESS,
+                plan=plan,
+                unit_id=unit_id,
+                tray_id=assignment.tray_id,
+                predecessors=(remove_comb.task_id,),
+                resources=("FIXTURE",),
+                zones=("ZONE_OUTFEED",),
+                payload={"after_brazing": True, "condition_passthrough": True},
+            )
+            graph.add_task(remove_press)
+            route_predecessor = remove_press.task_id
             for disposition, task_type in (
                 ("PASS", TaskType.ROUTE_PASS),
                 ("REWORK_REQUIRED", TaskType.ROUTE_REWORK),
