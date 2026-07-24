@@ -22,7 +22,10 @@ DEFAULT_DURATIONS: dict[TaskType, float] = {
     TaskType.PICK_BASE_PLATE: 12.0,
     TaskType.PLACE_BASE_PLATE: 12.0,
     TaskType.VERIFY_BASE_ALIGNMENT: 4.0,
-    TaskType.PREPARE_FIN_TOOL: 8.0,
+    # Keep the visible quick-change motion smooth enough to overlap the next
+    # tray's dispensing/inspection window instead of compressing its final
+    # loaded withdrawal into the exact tick when Arm2 becomes available.
+    TaskType.PREPARE_FIN_TOOL: 12.0,
     # Four/five/seven fin orders are dispensed at physical path speed.  A
     # 24-second planning envelope also exposes the intended cross-pallet
     # overlap: Arm1 can begin installing the returning tray while Arm2 is
@@ -495,7 +498,11 @@ class ProcessPlanTaskGraphBuilder:
                 tray_id=tray_id,
                 predecessors=(transfer_12_predecessor,),
                 resources=("TRANSFER_S1_S2A",),
-                zones=("ZONE_TRANSFER_12", "ZONE_S2A_ARM2"),
+                # A loaded slide owns both endpoint junctions until the
+                # carriage has arrived, handed the tray off and returned to
+                # zero.  Releasing S1 as soon as the logical owner changes
+                # allowed the next pallet to enter the same swept volume.
+                zones=("ZONE_TRANSFER_12", "ZONE_S1_ARM1", "ZONE_S2A_ARM2"),
                 route_phase="TRANSFER_S1_S2A",
                 payload={"source_station": "S1", "target_station": "S2A"},
             )
@@ -511,7 +518,7 @@ class ProcessPlanTaskGraphBuilder:
                 tray_id=tray_id,
                 predecessors=(items["DISPENSE"].task_id,),
                 resources=("TRANSFER_S2A_S2B",),
-                zones=("ZONE_TRANSFER_2A_2B", "ZONE_S2B_ARM3"),
+                zones=("ZONE_TRANSFER_2A_2B", "ZONE_S2A_ARM2", "ZONE_S2B_ARM3"),
                 route_phase="TRANSFER_S2A_S2B",
                 payload={"source_station": "S2A", "target_station": "S2B"},
             )
@@ -527,7 +534,7 @@ class ProcessPlanTaskGraphBuilder:
                 tray_id=tray_id,
                 predecessors=(items["INSPECT_BRAZING"].task_id,),
                 resources=("TRANSFER_S2B_S3",),
-                zones=("ZONE_TRANSFER_23", "ZONE_S3_SHARED"),
+                zones=("ZONE_TRANSFER_23", "ZONE_S2B_ARM3", "ZONE_S3_SHARED"),
                 route_phase="TRANSFER_S2B_S3",
                 payload={"source_station": "S2B", "target_station": "S3"},
             )
@@ -538,7 +545,11 @@ class ProcessPlanTaskGraphBuilder:
             transfer_3_rack = items["TRANSFER_OUT"]
             transfer_3_rack.task_type = TaskType.TRANSFER_S3_RACK
             transfer_3_rack.eligible_resources = ["TRANSFER_S3_RACK"]
-            transfer_3_rack.required_zones = ["ZONE_TRANSFER_3_RACK", "ZONE_RACK_FRONT"]
+            transfer_3_rack.required_zones = [
+                "ZONE_TRANSFER_3_RACK",
+                "ZONE_S3_SHARED",
+                "ZONE_RACK_FRONT",
+            ]
             transfer_3_rack.station_id = None
             transfer_3_rack.route_phase = "TRANSFER_S3_RACK"
             transfer_3_rack.payload.update({"source_station": "S3", "target_station": "RACK_INFEED"})

@@ -19,6 +19,7 @@ from brazing_sim.domain import (
     TransferPhase,
     TrayUnitPhase,
 )
+from brazing_sim.layout import SHALLOW_U_LAYOUT
 from brazing_sim.process import ActorResult, ProcessCoordinator
 from brazing_sim.scene import BrazingScene
 
@@ -242,7 +243,7 @@ def test_direct_furnace_conveyor_is_continuous_and_pause_can_resume() -> None:
         assert len(belt_samples) > 100
         conveyor_travel = belt_samples[-1][0] - belt_samples[0][0]
         tray_travel = belt_samples[-1][1] - belt_samples[0][1]
-        assert conveyor_travel > 0.75
+        assert conveyor_travel > 0.65
         assert tray_travel == pytest.approx(conveyor_travel, abs=0.003)
         assert scene.registry.batch_joint_position("batch_rack_lock_joint_0") == pytest.approx(
             0.025,
@@ -392,7 +393,7 @@ def test_top_shelf_round_trip_returns_on_direct_belt_before_output() -> None:
         assert np.linalg.norm(output.position - target.position) < 0.002
         # Shelf selection occurs inside the furnace; the externally visible
         # return is the single horizontal black-belt move followed by output.
-        assert np.ptp(np.asarray(positions)[:, 0]) > 0.75
+        assert np.ptp(np.asarray(positions)[:, 0]) > 0.65
     finally:
         scene.close()
 
@@ -562,7 +563,10 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
                     checked_press_removal = True
             if float(tray_pose[1]) < -0.15 and not checked_entry_interlock:
                 assert registry.finished_output_gate_fraction >= 0.98
-                assert float(tray_pose[0]) == pytest.approx(0.75, abs=0.002)
+                assert float(tray_pose[0]) == pytest.approx(
+                    SHALLOW_U_LAYOUT.output_lane_x,
+                    abs=0.002,
+                )
                 assert registry.batch_joint_position("batch_outfeed_joint") == pytest.approx(
                     0.0,
                     abs=0.002,

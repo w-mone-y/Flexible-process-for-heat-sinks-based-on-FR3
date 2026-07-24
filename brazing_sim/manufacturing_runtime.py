@@ -190,6 +190,9 @@ class ManufacturingRuntime:
         self._parallel_arm_seconds = 0.0
         self._max_parallel_arms = 0
         self._max_parallel_tasks = 0
+        # PICK and PLACE are separate UI/DAG milestones, but the physical
+        # payload makes the pair non-preemptible on Arm1.
+        self._arm1_payload_handoff: dict[str, str] | None = None
 
     @staticmethod
     def _normalize_scheduler_mode(value: str) -> str:
@@ -408,6 +411,27 @@ class ManufacturingRuntime:
 
     def _complete_task(self, task: ManufacturingTask, metrics: dict[str, Any], now: float) -> None:
         self.graph.mark_succeeded(task.task_id, now)
+        if task.task_type is TaskType.PICK_BASE_PLATE:
+            self._arm1_payload_handoff = {"unit_id": task.unit_id, "payload": "base_plate"}
+        elif task.task_type is TaskType.PICK_FIN:
+            self._arm1_payload_handoff = {
+                "unit_id": task.unit_id,
+                "payload": str(task.payload.get("fin_id", "fin_01")),
+            }
+        elif task.task_type is TaskType.PLACE_BASE_PLATE:
+            if (
+                self._arm1_payload_handoff is not None
+                and self._arm1_payload_handoff.get("unit_id") == task.unit_id
+                and self._arm1_payload_handoff.get("payload") == "base_plate"
+            ):
+                self._arm1_payload_handoff = None
+        elif task.task_type in {TaskType.INSTALL_FIN, TaskType.REINSTALL_FIN}:
+            if (
+                self._arm1_payload_handoff is not None
+                and self._arm1_payload_handoff.get("unit_id") == task.unit_id
+                and self._arm1_payload_handoff.get("payload") == str(task.payload.get("fin_id", "fin_01"))
+            ):
+                self._arm1_payload_handoff = None
         if self.motion_planning is not None:
             self.motion_planning.release_task(task)
         if task.assigned_resource and task.required_tool:
@@ -901,6 +925,52 @@ class ManufacturingRuntime:
     def _cell_task_available(self, task: ManufacturingTask) -> bool:
         """Keep a READY task queued until its physical pallet/station is valid."""
 
+        if task.task_type is TaskType.PREPARE_FIN_TOOL:
+            # Batch Arm1's work by tool.  Once one pallet leaves S1, its
+            # PREPARE_FIN_TOOL branch becomes READY while the following
+            # admitted pallet may still be indexing into the base-loading
+            # station.  Dispatching the ready branch immediately produces the
+            # wasteful suction -> gripper -> suction sequence observed with
+            # adjacent orders.  Keep the suction cup mounted until every
+            # currently released base pickup/place pair has finished; Arm2
+            # and Arm3 remain free to process earlier pallets meanwhile.
+            unfinished_base_tasks = [
+                candidate
+                for candidate in self.graph
+                if candidate.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
+                and not candidate.payload.get("queue_held")
+                and candidate.status
+                not in {
+                    TaskStatus.SUCCEEDED,
+                    TaskStatus.FAILED,
+                    TaskStatus.BLOCKED,
+                    TaskStatus.CANCELLED,
+                }
+            ]
+            if unfinished_base_tasks:
+                task.payload["planning_blockers"] = ["保持Arm1吸盘，等待当前在制订单全部完成基板取放"]
+                return False
+            task.payload.pop("planning_blockers", None)
+
+        handoff = self._arm1_payload_handoff
+        if handoff is not None and "ARM1" in task.eligible_resources:
+            same_unit = task.unit_id == handoff.get("unit_id")
+            payload = handoff.get("payload")
+            if payload == "base_plate":
+                allowed = same_unit and task.task_type is TaskType.PLACE_BASE_PLATE
+                blocker = "等待Arm1完成已吸附基板的连续放置"
+            else:
+                allowed = (
+                    same_unit
+                    and str(task.payload.get("fin_id", "")) == str(payload)
+                    and task.task_type in {TaskType.INSTALL_FIN, TaskType.REINSTALL_FIN}
+                )
+                blocker = f"等待Arm1完成已夹持{payload}的连续安装"
+            if not allowed:
+                task.payload["planning_blockers"] = [blocker]
+                return False
+            task.payload.pop("planning_blockers", None)
+
         if task.tray_id is None or task.tray_id not in self.tray_routes:
             return True
         route = self.tray_routes[task.tray_id]
@@ -1014,6 +1084,7 @@ class ManufacturingRuntime:
         if "ARM2" in self.resources.states:
             self.resources.get("ARM2").current_tool = "brazing_dispenser"
         self.zones.reset()
+        self._arm1_payload_handoff = None
         self.stopped = True
         self.events.publish(EventType.EMERGENCY_STOP, sim_time=now, source="operator")
 
@@ -1047,6 +1118,7 @@ class ManufacturingRuntime:
         self._parallel_arm_seconds = 0.0
         self._max_parallel_arms = 0
         self._max_parallel_tasks = 0
+        self._arm1_payload_handoff = None
         if self.motion_planning is not None:
             self.motion_planning.reset()
         self._reset_flexible_cell_state()

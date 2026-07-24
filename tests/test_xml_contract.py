@@ -346,7 +346,9 @@ class BrazingXmlContractTests(unittest.TestCase):
         self.assertAlmostEqual(max(output_z) - min(output_z), 0.0, places=9)
         output_y = [float(self.model.body(f"batch_output_slot_{index:02d}").pos[1]) for index in range(1, 4)]
         self.assertTrue(all(value == -0.10 for value in output_y))
-        rack_infeed_x = 0.75
+        from brazing_sim.layout import SHALLOW_U_LAYOUT
+
+        rack_infeed_x = SHALLOW_U_LAYOUT.rack_infeed_xy[0]
         for body_name in (
             "assembly_fixture",
             "batch_transfer_base",
@@ -370,7 +372,7 @@ class BrazingXmlContractTests(unittest.TestCase):
             )
 
         outfeed = self.model.joint("batch_outfeed_joint")
-        self.assertEqual(tuple(float(value) for value in outfeed.range), (0.0, 0.84))
+        self.assertEqual(tuple(float(value) for value in outfeed.range), (0.0, 0.69))
 
         # Empty trays 02/03 still have driven indexer bodies, but the two
         # obsolete light-blue cache tabletops must not exist visually.
@@ -470,9 +472,9 @@ class BrazingXmlContractTests(unittest.TestCase):
                 -1,
             )
         belt = self.model.geom("conveyor_belt")
-        self.assertEqual(tuple(float(value) for value in belt.size), (0.23, 0.465, 0.008))
+        self.assertEqual(tuple(float(value) for value in belt.size), (0.23, 0.37, 0.008))
         self.assertEqual(
-            tuple(float(value) for value in self.model.joint("batch_outfeed_joint").range), (0.0, 0.84)
+            tuple(float(value) for value in self.model.joint("batch_outfeed_joint").range), (0.0, 0.69)
         )
 
     def test_front_and_rear_comb_modules_are_complete_matching_pairs(self) -> None:
@@ -725,7 +727,7 @@ class BrazingXmlContractTests(unittest.TestCase):
         actuator = self.model.actuator("conveyor_slide_actuator")
         self.assertEqual(int(slide.type[0]), int(mujoco.mjtJoint.mjJNT_SLIDE))
         self.assertEqual(tuple(float(value) for value in slide.axis), (1.0, 0.0, 0.0))
-        self.assertEqual(tuple(float(value) for value in slide.range), (0.0, 0.84))
+        self.assertEqual(tuple(float(value) for value in slide.range), (0.0, 0.69))
         self.assertEqual(int(actuator.trnid[0]), int(slide.id))
 
         data = mujoco.MjData(self.model)

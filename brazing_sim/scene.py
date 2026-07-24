@@ -50,7 +50,7 @@ ASYNC_TRANSFER_SPECS = {
     "s1_s2a": ("transfer_s1_s2a_joint", "transfer_s1_s2a_actuator", 0.438634244),
     "s2a_s2b": ("transfer_s2a_s2b_joint", "transfer_s2a_s2b_actuator", 0.60),
     "s2b_s3": ("transfer_s2b_s3_joint", "transfer_s2b_s3_actuator", 0.438634244),
-    "s3_rack": ("transfer_s3_rack_joint", "transfer_s3_rack_actuator", 0.27),
+    "s3_rack": ("transfer_s3_rack_joint", "transfer_s3_rack_actuator", 0.52),
 }
 HOME_QPOS = np.asarray([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=float)
 # The -2/-1 rad shoulder offsets belonged to the retired central turntable.

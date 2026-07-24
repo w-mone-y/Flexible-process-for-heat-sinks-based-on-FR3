@@ -611,7 +611,10 @@ class BrazingApplication:
             created_at=self.scene.time,
         )
         self.scene.registry.configure_async_raw_kit(product)
-        consumed = self.v2_consumed_materials.setdefault(str(order_id), set())
+        # Raw blanks belong to one physical product unit, not to the whole
+        # order.  Keying this cache by order caused fin_01 of the second C
+        # unit to inherit the first unit's consumed state and disappear.
+        consumed = self.v2_consumed_materials.setdefault(str(unit_id), set())
         for item_name in sorted(consumed):
             self.scene.registry.set_async_raw_item_visible(item_name, False)
         self.v2_raw_kit_order_id = str(order_id)
@@ -1235,9 +1238,10 @@ class BrazingApplication:
             )
             if intended_finger_contact:
                 # MuJoCo reports overlap against the thin fin's long face;
-                # 12 mm corresponds to the two 6 mm finger half-widths and is
-                # limited strictly to the currently commanded fin.
-                return contact.distance >= -0.0125
+                # The slim 4.5 mm half-width fingers are limited strictly to
+                # the currently commanded fin; neighbouring fins are never
+                # covered by this intended-contact exception.
+                return contact.distance >= -0.0095
         if contact.distance < -0.003:
             return False
         arm1_tool_contact = "arm1_tool_rack" in pair and bool(

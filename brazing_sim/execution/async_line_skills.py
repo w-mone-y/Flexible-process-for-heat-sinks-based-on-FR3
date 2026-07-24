@@ -22,17 +22,15 @@ TRANSFER_BINDINGS = {
     TaskType.TRANSFER_S3_RACK: ("s3_rack", "rack_infeed"),
 }
 
-# Certified redundancy branch for the low Arm1 quick-change sockets.  It is
-# used only while the flange is empty and above the rack; workpiece-carrying
-# stages always continue from their measured joint state.
+# Certified fallback redundancy branch for the low Arm1 quick-change sockets.
+# Normal tool changes keep the measured branch and travel directly to the
+# rack; this seed is tried only if the direct solution is genuinely blocked.
 ARM1_TOOL_CHANGE_SEED = np.asarray(
     [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
     dtype=float,
 )
-# The attached 90 mm tool extension needs a different redundant wrist branch
-# to place its mount face into the low rack socket.  Keeping this certified
-# seed separate prevents the loaded return from falling into the bare-flange
-# local minimum.
+# The attached 90 mm tool extension has a separate fallback branch for the
+# rare case where the current loaded configuration cannot reach its socket.
 ARM1_LOADED_TOOL_CHANGE_SEED = np.asarray(
     [2.2301, -1.2219, -1.2726, -2.8300, 1.9602, 4.4728, 0.4040],
     dtype=float,
@@ -84,6 +82,12 @@ class _ArmStage:
     reverse_path: bool = False
     lock_joint7: bool = False
     joint7_value: float | None = None
+    # A fin pickup may need a different redundant wrist branch for the
+    # destination slot than for the raw-material pose.  Candidate selection
+    # is performed only at the first high, empty-gripper stage and validates
+    # every target listed here before joint 7 is frozen for descent/carry.
+    joint7_candidates: tuple[float, ...] = ()
+    joint7_validation_targets: tuple[Pose, ...] = ()
     full_orientation: bool = True
     cartesian_linear: bool = False
     cartesian_start: Pose | None = None
@@ -95,6 +99,16 @@ class _ArmStage:
     position_tolerance_m: float | None = None
     orientation_tolerance_deg: float | None = None
     preferred_seed: np.ndarray | None = None
+    # Optional progressive finger command.  The start value is sampled from
+    # the measured finger joints when this stage is planned, so a preceding
+    # partial release can flow continuously into the next opening/closing
+    # motion without a control jump.
+    gripper_target_fraction: float | None = None
+    gripper_start_fraction: float | None = None
+    # Workpiece motions prefer the current redundant branch.  Certified tool
+    # change stages may explicitly request their rack seed first.
+    prefer_current_seed: bool = True
+    entry_start_q: np.ndarray | None = None
 
 
 class AsyncLinePhysicalSkill:
@@ -105,7 +119,8 @@ class AsyncLinePhysicalSkill:
     SETTLE_SECONDS = 0.10
     ACTION_FRACTION = 0.62
     CONTACT_TOLERANCE_M = 0.008
-    STRICT_ENTRY_SETTLE_SECONDS = 0.10
+    STRICT_ENTRY_MOVE_SECONDS = 0.10
+    STRICT_ENTRY_SETTLE_SECONDS = 0.12
     TRAY_PAYLOAD_ORIGIN_Z_M = 0.032
     # FR3 visual playback remains well below the hardware limits.  At the
     # default 2 ms MuJoCo step this caps one-joint movement near 0.005 rad,
@@ -115,6 +130,11 @@ class AsyncLinePhysicalSkill:
     MAX_JOINT_ACCEL_RAD_S2 = 8.0
     QUINTIC_PEAK_VELOCITY = 1.875
     QUINTIC_PEAK_ACCELERATION = 5.7735026919
+    # A 10% finger stroke opens the jaw gap from 2 mm to about 6 mm.  That is
+    # sufficient to release a 2 mm fin while remaining inside the 15 mm C
+    # order pitch.  Full opening is deferred until the hand is safely above
+    # the raw-material approach corridor.
+    FIN_RELEASE_CLOSED_FRACTION = 0.90
 
     def __init__(self, task_type: TaskType) -> None:
         self.task_type = TaskType(task_type)
@@ -179,7 +199,10 @@ class AsyncLinePhysicalSkill:
                 # The finished pallet is wider than the black output belt.
                 # Arm3 scans from its reachable inboard edge while the fixed
                 # wrist camera still covers the complete product footprint.
-                [-0.10, 0.0, 0.17]
+                # The output lane is deliberately outside the S3 pallet
+                # envelope.  Keep the camera at its certified reachable x
+                # coordinate and observe from the pallet's inboard side.
+                [-0.35, 0.0, 0.17]
             )
         if self.task.task_type is TaskType.PICK_BASE_PLATE:
             return registry.site_pose("raw_base_site").position + np.asarray([0.0, 0.0, 0.20])
@@ -374,24 +397,78 @@ class AsyncLinePhysicalSkill:
     def _fin_pick_stages(self) -> list[_ArmStage]:
         assert self.task is not None
         fin_id = str(self.task.payload.get("fin_id", "fin_01"))
-        raw = self.scene.registry.free_body_pose(fin_id).position.copy()
+        raw_pose = self.scene.registry.free_body_pose(fin_id)
+        raw = raw_pose.position.copy()
         approach = raw + np.asarray([0.0, 0.0, 0.13])
         lift = raw + np.asarray([0.0, 0.0, 0.18])
+        pick_contact_pose = self._top_down_pose(raw)
+
+        # Predict the installation TCP from the ideal high pickup contact.
+        # This can be evaluated before the weld is enabled and therefore lets
+        # Arm1 choose a redundancy branch while its gripper is still empty.
+        # The real measured TCP-to-fin transform is still used after pickup
+        # by _fin_place_stages; this target is only a reachability gate.
+        target = np.asarray(self.task.payload.get("target_position"), dtype=float).copy()
+        target[2] += self.TRAY_PAYLOAD_ORIGIN_Z_M
+        payload_goal = self._tray_payload_pose(target)
+        payload_approach = Pose(
+            payload_goal.position + np.asarray([0.0, 0.0, 0.105]),
+            payload_goal.quaternion,
+        )
+        predicted_tcp_to_fin = pick_contact_pose.inverse().transformed(raw_pose)
+        predicted_install_approach = payload_approach.transformed(predicted_tcp_to_fin.inverse())
+        predicted_install_goal = payload_goal.transformed(predicted_tcp_to_fin.inverse())
+
+        # The useful branch for this cell lies inside this conservative range.
+        # Include the current measured value explicitly and let the online
+        # selector choose the nearest candidate that reaches pickup *and*
+        # placement, so A/B retain their short motions while C's outer slot
+        # can select the wider branch it actually needs.
+        current_joint7 = float(self.scene.data.qpos[self.scene.arms["arm1"].qpos_ids[6]])
+        joint7_candidates = tuple(
+            dict.fromkeys(
+                [
+                    current_joint7,
+                    *np.linspace(0.44, 1.24, 17, dtype=float).tolist(),
+                ]
+            )
+        )
         return [
             _ArmStage(
-                "翅片上方接近",
+                "翅片上方接近并渐进张开夹爪",
                 self._top_down_pose(approach),
                 0.85,
                 preferred_seed=ARM1_TOOL_CHANGE_SEED,
+                gripper_target_fraction=0.0,
+                # Resolve redundancy while still high and empty.  The
+                # resulting wrist-roll value is frozen before descent and is
+                # retained until the fin has been released above S3.
+                lock_joint7=True,
+                joint7_candidates=joint7_candidates,
+                joint7_validation_targets=(
+                    pick_contact_pose,
+                    predicted_install_approach,
+                    predicted_install_goal,
+                ),
             ),
             _ArmStage(
                 "夹爪进入翅片夹取面",
                 self._top_down_pose(raw),
                 0.60,
                 settle=True,
-                action=lambda: self._apply_process_action(1.0),
                 cartesian_linear=True,
                 preferred_seed=ARM1_TOOL_CHANGE_SEED,
+                lock_joint7=True,
+            ),
+            _ArmStage(
+                "夹爪两侧渐进夹紧翅片",
+                self._top_down_pose(raw),
+                0.42,
+                settle=True,
+                settle_s=0.10,
+                action=lambda: self._apply_process_action(1.0),
+                gripper_target_fraction=1.0,
+                lock_joint7=True,
             ),
             _ArmStage(
                 "夹紧后垂直抬升",
@@ -442,17 +519,20 @@ class AsyncLinePhysicalSkill:
                 "翅片平移安全走廊",
                 self._fixed_pose(corridor, carry_quaternion),
                 0.75,
-                lock_joint7=False,
+                lock_joint7=True,
             ),
             _ArmStage(
                 "翅片槽位正上方完成六维预对准",
                 approach_pose,
                 0.60,
-                lock_joint7=False,
+                lock_joint7=True,
                 settle=True,
                 settle_s=0.08,
-                position_tolerance_m=0.0010,
-                orientation_tolerance_deg=1.0,
+                # This is still 105 mm above the slot.  Accept the common
+                # 3 mm servo envelope here, then let the following smooth
+                # strict-entry gate close the final residual before Z moves.
+                position_tolerance_m=0.0030,
+                orientation_tolerance_deg=2.0,
             ),
             _ArmStage(
                 "翅片锁定槽位姿态后纯Z下降",
@@ -473,12 +553,13 @@ class AsyncLinePhysicalSkill:
                 orientation_tolerance_deg=0.05,
             ),
             _ArmStage(
-                "翅片释放后槽内稳定确认",
+                "翅片槽内稳定确认并小行程松爪",
                 goal_pose,
-                0.20,
+                0.38,
                 settle=True,
                 settle_s=0.18,
                 lock_joint7=True,
+                gripper_target_fraction=self.FIN_RELEASE_CLOSED_FRACTION,
                 # Releasing the payload changes the wrist load and can leave
                 # a harmless millimetre-scale servo residual.  The preceding
                 # loaded pure-Z placement already enforces 0.2 mm / 0.05 deg;
@@ -785,12 +866,22 @@ class AsyncLinePhysicalSkill:
             live_tcp_to_payload = stage.start_pose.inverse().transformed(current_payload)
             stage.cartesian_start = stage.payload_start_pose.transformed(live_tcp_to_payload.inverse())
             stage.target = stage.payload_target_pose.transformed(live_tcp_to_payload.inverse())
+        if stage.joint7_candidates and stage.joint7_value is None:
+            stage.joint7_value = self._select_fin_joint7_branch(controller, stage, seed)
         lock_value = float(seed[6]) if stage.joint7_value is None else float(stage.joint7_value)
         locks = {6: lock_value} if stage.lock_joint7 else None
         candidate_seeds = []
-        if stage.preferred_seed is not None:
-            candidate_seeds.append(np.asarray(stage.preferred_seed, dtype=float).copy())
-        candidate_seeds.append(seed)
+        preferred = (
+            None if stage.preferred_seed is None else np.asarray(stage.preferred_seed, dtype=float).copy()
+        )
+        if stage.prefer_current_seed:
+            candidate_seeds.append(seed)
+            if preferred is not None:
+                candidate_seeds.append(preferred)
+        else:
+            if preferred is not None:
+                candidate_seeds.append(preferred)
+            candidate_seeds.append(seed)
         midpoint_seed = controller.mid.copy()
         neutral_seed = np.asarray([0.0, -0.8, 0.0, -2.2, 0.0, 1.8, seed[6]], dtype=float)
         if locks:
@@ -846,7 +937,11 @@ class AsyncLinePhysicalSkill:
                         )
                     )
                 )
-                if xy_error > 1.0e-9 or rotation_error > 1.0e-8:
+                # Both poses are independently rebuilt from the same live
+                # TCP-to-payload transform.  MuJoCo/quaternion round-off can
+                # leave nanometre / microradian differences; reject actual
+                # lateral/roll motion, not numerical noise.
+                if xy_error > 1.0e-7 or rotation_error > 1.0e-6:
                     raise RuntimeError(f"{stage.label}不是纯Z轨迹，禁止开始下降")
             start_result = solve_target(
                 canonical_start,
@@ -855,16 +950,14 @@ class AsyncLinePhysicalSkill:
             )
             if start_result is None or not start_result.reachable:
                 raise RuntimeError(f"{stage.label}的高位对准姿态不可达")
-            # Reaffirm the already completed high alignment before the first
-            # downward sample.  This happens at the approach height and
-            # prevents one physics step of payload/weld compliance from being
-            # interpreted as XY or attitude motion during descent.
+            # Re-solve the exact high endpoint, but enter that equivalent
+            # redundant configuration through the smooth entry gate below.
+            # A direct qpos write here was the historical one-frame wrist
+            # twitch; omitting the exact endpoint caused payload compliance
+            # to drift laterally during the descent.
+            stage.entry_start_q = seed.copy()
             seed = start_result.joint_positions.copy()
             stage.start_pose = canonical_start
-            self.scene.data.qpos[controller.qpos_ids] = seed
-            self.scene.data.qvel[controller.dof_ids] = 0.0
-            self.scene.data.ctrl[controller.actuator_ids] = seed
-            self.scene.sync_mounted_extensions(self.resource_id.lower())
             candidate_seeds = [seed]
 
         result = solve_target(stage.target, candidate_seeds)
@@ -924,6 +1017,8 @@ class AsyncLinePhysicalSkill:
             stage.joint_path = np.stack(path)
             stage.joint_goal = stage.joint_path[-1].copy()
         self.arm_stage_start_q = seed
+        if stage.gripper_target_fraction is not None:
+            stage.gripper_start_fraction = self.scene.registry.arm1_gripper_closed_fraction()
         self._enforce_smooth_stage_duration(stage)
         self.arm_stage_started_at = float(now)
         self.arm_stage_entry_pending = bool(stage.strict_vertical)
@@ -932,6 +1027,104 @@ class AsyncLinePhysicalSkill:
         controller.full_orientation = stage.full_orientation
         self.arm_motion_ready = True
         return True, 1.0
+
+    def _select_fin_joint7_branch(
+        self,
+        controller: Any,
+        stage: _ArmStage,
+        seed: np.ndarray,
+    ) -> float:
+        """Choose a wrist branch before grasping that reaches both endpoints.
+
+        The fin remains orientation-locked after the gripper closes, so a
+        branch that is good only for Table1 cannot be repaired later without
+        violating the payload-stability rule.  Search a small deterministic
+        set in nearest-first order and validate pickup contact plus both S3
+        high/low poses with the parallel-gripper TCP already mounted.
+        """
+
+        lower = float(controller.lower[6]) + 1.0e-4
+        upper = float(controller.upper[6]) - 1.0e-4
+        values = sorted(
+            {float(np.clip(value, lower, upper)) for value in stage.joint7_candidates},
+            key=lambda value: (abs(value - float(seed[6])), value),
+        )
+        targets = (stage.target, *stage.joint7_validation_targets)
+        best_residual: tuple[float, float] | None = None
+        for value in values:
+            locks = {6: value}
+            branch_seed = seed.copy()
+            branch_seed[6] = value
+            certified_bare_seed = ARM1_TOOL_CHANGE_SEED.copy()
+            certified_bare_seed[6] = value
+            certified_loaded_seed = ARM1_LOADED_TOOL_CHANGE_SEED.copy()
+            certified_loaded_seed[6] = value
+            midpoint_seed = controller.mid.copy()
+            midpoint_seed[6] = value
+            neutral_seed = np.asarray(
+                [0.0, -0.8, 0.0, -2.2, 0.0, 1.8, value],
+                dtype=float,
+            )
+            branch_ok = True
+            branch_residual = (0.0, 0.0)
+            pickup_solution: np.ndarray | None = None
+            for target_index, target in enumerate(targets):
+                # The last validation pose is the seated slot pose and must
+                # satisfy the same exact tolerance used by the later pure-Z
+                # placement stage.  A loose high-pose-only check can accept a
+                # branch that gets within ~1.5 mm but can never seat the fin.
+                seated_target = target_index == len(targets) - 1
+                solved = None
+                for candidate_seed in (
+                    branch_seed,
+                    certified_bare_seed,
+                    certified_loaded_seed,
+                    midpoint_seed,
+                    neutral_seed,
+                ):
+                    solved = controller.solve_ik(
+                        target,
+                        tcp=True,
+                        seed=candidate_seed,
+                        max_iterations=900 if seated_target else 650,
+                        step_s=0.018 if seated_target else 0.022,
+                        locked_joints=locks,
+                        position_tolerance_m=0.0002 if seated_target else 0.0015,
+                        orientation_tolerance_rad=math.radians(0.05 if seated_target else 1.0),
+                        full_orientation=True,
+                    )
+                    if solved.reachable:
+                        branch_seed = solved.joint_positions.copy()
+                        if target_index == 0:
+                            pickup_solution = branch_seed.copy()
+                        break
+                assert solved is not None
+                branch_residual = (
+                    max(branch_residual[0], float(solved.position_error_m)),
+                    max(branch_residual[1], float(solved.orientation_error_rad)),
+                )
+                if not solved.reachable:
+                    branch_ok = False
+                    break
+            if branch_ok:
+                # Feed the already validated pickup solution into the normal
+                # stage planner as a fallback.  The measured current branch
+                # remains first choice, so this affects only IK robustness
+                # after the physical direct tool change; it never changes the
+                # visible rack trajectory itself.
+                if pickup_solution is not None:
+                    stage.preferred_seed = pickup_solution
+                    stage.prefer_current_seed = True
+                return value
+            if best_residual is None or branch_residual < best_residual:
+                best_residual = branch_residual
+        position_error, orientation_error = best_residual or (float("inf"), float("inf"))
+        raise RuntimeError(
+            f"{self.task.task_id if self.task else self.task_type.value}: "
+            "夹取前没有同时覆盖原料位和安装槽的第七关节分支 "
+            f"(最佳残差 {position_error * 1000.0:.2f} mm/"
+            f"{math.degrees(orientation_error):.2f} deg)"
+        )
 
     def _prepare_arm_motion(self) -> None:
         if self.resource_id not in {"ARM1", "ARM2", "ARM3"}:
@@ -948,11 +1141,17 @@ class AsyncLinePhysicalSkill:
             elif self.task.task_type is TaskType.PICK_FIN:
                 self.context.prepare_v2_raw_kit(self.task.order_id, self.task.unit_id)
                 detailed_stages.extend(self._arm1_tool_change_stages("parallel_gripper"))
-                self.scene.registry.set_arm1_gripper_closed(0.0)
             elif self.task.task_type is TaskType.INSTALL_FIN:
                 if self.scene.arm1_tools.current_tool != "parallel_gripper":
                     raise RuntimeError("Arm1夹持翅片时禁止切换工具")
             elif self.task.task_type is TaskType.PREPARE_FIN_TOOL:
+                if self.scene.arm1_tools.current_tool == "parallel_gripper":
+                    # Multiple admitted orders each own a logical preparation
+                    # milestone, but one physical gripper is shared.  After
+                    # the first visible switch, following milestones are
+                    # idempotent confirmations—not another rack approach.
+                    self.duration = 0.10
+                    return
                 detailed_stages.extend(self._arm1_tool_change_stages("parallel_gripper"))
         elif self.resource_id == "ARM2":
             self.scene.registry.configure_dispenser(self._plan().execution_spec)
@@ -1001,7 +1200,7 @@ class AsyncLinePhysicalSkill:
 
         assert self.task is not None
         task_type = self.task.task_type
-        consumed = self.context.v2_consumed_materials.setdefault(self.task.order_id, set())
+        consumed = self.context.v2_consumed_materials.setdefault(self.task.unit_id, set())
         if task_type is TaskType.PICK_BASE_PLATE:
             self.scene.registry.set_arm1_suction_fraction(1.0)
             self.scene.registry.grasp_base(True)
@@ -1017,7 +1216,6 @@ class AsyncLinePhysicalSkill:
             fin_id = str(self.task.payload.get("fin_id", "fin_01"))
             consumed.add(fin_id)
             self.scene.registry.set_async_raw_item_visible(fin_id, False)
-            self.scene.registry.set_arm1_gripper_closed(0.0)
 
     def start(
         self,
@@ -1110,7 +1308,21 @@ class AsyncLinePhysicalSkill:
             # the preceding SE(3) segment therefore finishes before the
             # descent clock starts, rather than appearing as XY drift near
             # the workpiece.
-            command = np.clip(self.arm_stage_start_q, controller.lower, controller.upper)
+            entry_started = (
+                float(now) if self.arm_stage_entry_started_at is None else self.arm_stage_entry_started_at
+            )
+            entry_fraction = float(
+                np.clip(
+                    (float(now) - entry_started) / self.STRICT_ENTRY_MOVE_SECONDS,
+                    0.0,
+                    1.0,
+                )
+            )
+            entry_source = self.arm_stage_start_q if stage.entry_start_q is None else stage.entry_start_q
+            command = entry_source + quintic_time_scaling(entry_fraction) * (
+                self.arm_stage_start_q - entry_source
+            )
+            command = np.clip(command, controller.lower, controller.upper)
             controller.q_command = command
             self.scene.data.qpos[controller.qpos_ids] = command
             self.scene.data.qvel[controller.dof_ids] = 0.0
@@ -1119,17 +1331,47 @@ class AsyncLinePhysicalSkill:
             controller.full_orientation = stage.full_orientation
             controller.enabled = False
             self.scene.sync_mounted_extensions(self.resource_id.lower())
-            entry_started = (
-                float(now) if self.arm_stage_entry_started_at is None else self.arm_stage_entry_started_at
-            )
-            if float(now) - entry_started < self.STRICT_ENTRY_SETTLE_SECONDS:
+            if float(now) - entry_started < self.STRICT_ENTRY_MOVE_SECONDS + self.STRICT_ENTRY_SETTLE_SECONDS:
                 return False, 0.0
+            if stage.payload_name is not None and stage.payload_start_pose is not None:
+                # Seat the already welded payload at the exact high authored
+                # pose after the smooth redundant-joint correction has
+                # settled.  The correction is sub-millimetre and occurs
+                # 105+ mm above the product; recomputing the weld here removes
+                # constraint compliance from the following pure-Z path.
+                self.scene.registry.set_free_body_pose(
+                    stage.payload_name,
+                    stage.payload_start_pose,
+                    forward=True,
+                )
+                weld_name = (
+                    "arm1_grasp_base"
+                    if stage.payload_name == "base_plate"
+                    else f"arm1_grasp_{stage.payload_name}"
+                )
+                tool_body = (
+                    "arm1_suction_tool" if stage.payload_name == "base_plate" else "arm1_parallel_gripper"
+                )
+                self.scene.registry.set_weld(
+                    weld_name,
+                    True,
+                    recompute=(tool_body, stage.payload_name),
+                    forward=True,
+                )
             self.arm_stage_entry_pending = False
             self.arm_stage_entry_started_at = None
             self.arm_stage_started_at = float(now)
             return False, 0.0
         fraction = self._stage_progress(now, stage)
         command_fraction = quintic_time_scaling(fraction)
+        if stage.gripper_target_fraction is not None:
+            finger_start = (
+                self.scene.registry.arm1_gripper_closed_fraction()
+                if stage.gripper_start_fraction is None
+                else stage.gripper_start_fraction
+            )
+            finger_command = finger_start + command_fraction * (stage.gripper_target_fraction - finger_start)
+            self.scene.registry.set_arm1_gripper_closed(finger_command)
         if stage.joint_path is not None:
             scaled = command_fraction * (len(stage.joint_path) - 1)
             left_index = min(int(math.floor(scaled)), len(stage.joint_path) - 1)
@@ -1489,6 +1731,14 @@ class AsyncLinePhysicalSkill:
                 self.scene.registry.async_transfer_position(self.transfer.transfer_id),
             )
         self.cancelled = True
+        # ExecutionMonitor removes a timed-out execution immediately, so the
+        # reusable per-task-type skill must be released in the same call.
+        # Waiting for a future update would leave a ghost "skill still
+        # running" state and block every later fin of every order.
+        self.task = None
+        self.transfer = None
+        self.arm_stages.clear()
+        self.arm_stage_start_q = None
 
 
 def build_physical_async_line_skill_registry(*, fast: bool = False) -> SkillRegistry:

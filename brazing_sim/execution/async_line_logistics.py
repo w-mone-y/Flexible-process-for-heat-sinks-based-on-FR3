@@ -41,7 +41,11 @@ class AsyncLineLogisticsSkill:
     POSITION_TOLERANCE_M = 0.003
     VELOCITY_TOLERANCE_M_S = 0.04
     SETTLE_S = 0.08
-    OUTFEED_INSIDE_M = 0.840
+    # The rack-infeed origin moved +250 mm away from S3.  The furnace also
+    # moves 100 mm outward so its closed door remains clear of the complete
+    # legacy tray handle envelope; a 690 mm stroke reaches x=1.69 m without
+    # bringing the returning pallet through the fin-assembly envelope.
+    OUTFEED_INSIDE_M = 0.690
     OUTPUT_INSPECTION_M = 0.100
     OUTPUT_DELIVERY_M = 1.120
     GATE_OPEN_M = 0.500
@@ -463,6 +467,8 @@ class AsyncLineLogisticsSkill:
             measured = self.registry.batch_joint_position(self.axis.joint)
             self.registry.set_batch_joint_target(self.axis.joint, self.axis.actuator, measured)
         self.cancelled = True
+        self.task = None
+        self.axis = None
 
 
 LOGISTICS_TASK_TYPES = frozenset(

@@ -38,8 +38,8 @@ class BatchTransferActor:
     POSITION_TOLERANCE_M = 0.0015
     VELOCITY_TOLERANCE_M_S = 0.02
     SETTLE_SECONDS = 0.12
-    OUTFEED_TARGET_M = 0.840
-    # The rack-infeed carrier starts at (0.75, 0). Its local X output slide is
+    OUTFEED_TARGET_M = 0.690
+    # The rack-infeed carrier starts at (1.00, 0). Its local X output slide is
     # world -Y, so 0.10 m is the Arm3-reachable post-inspection point and 1.12 m is
     # inside the enclosed finished-goods port.
     OUTPUT_HOME_OUTFEED_M = 0.0

@@ -22,7 +22,11 @@ class ShallowULayout:
     station_s2a_xy: tuple[float, float] = (-0.30, 0.40)
     station_s2b_xy: tuple[float, float] = (0.30, 0.40)
     station_s3_xy: tuple[float, float] = (0.48, 0.00)
-    rack_infeed_xy: tuple[float, float] = (0.75, 0.00)
+    # Keep a complete 410 mm pallet envelope clear of S3 while a previous
+    # order is returning from the furnace.  At x=0.95 the S3 and infeed
+    # pallet edges retain 60 mm of real clearance instead of overlapping by
+    # 140 mm at the former x=0.75 junction.
+    rack_infeed_xy: tuple[float, float] = (1.00, 0.00)
 
     base_magazine_xy: tuple[float, float] = (-0.60, -0.42)
     fin_magazine_xy: tuple[float, float] = (0.32, -0.46)
@@ -32,10 +36,10 @@ class ShallowULayout:
     dense_fin_row_spacing_m: float = 0.065
     fin_single_tier_span_m: float = 0.44
 
-    output_lane_x: float = 0.75
+    output_lane_x: float = 1.00
     # The rigid output pallet is wider than the black belt.  Its swept edge,
     # rather than the decorative belt edge, is the safety-critical boundary.
-    output_pallet_half_width_m: float = 0.205
+    output_pallet_half_width_m: float = 0.230
     raw_material_clearance_m: float = 0.040
 
     def raw_fin_position(
