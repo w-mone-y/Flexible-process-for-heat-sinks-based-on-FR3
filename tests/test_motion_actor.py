@@ -33,7 +33,7 @@ def test_trajectory_samples_include_waypoints_and_respect_spacing() -> None:
 def test_trajectory_validation_restores_live_simulation_state_once_complete() -> None:
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         controller = scene.arms["arm1"]
         start = controller.current_tcp_pose()
@@ -70,7 +70,7 @@ def test_arm1_grasp_welds_activate_and_reset() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="grasp-contract")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         registry = scene.registry
         registry.grasp_base(True)
@@ -89,7 +89,7 @@ def test_fin_grasp_constraint_handoff_preserves_the_contact_pose() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="fin-grasp-handoff")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         registry = scene.registry
         raw_pose = registry.free_body_pose("fin_01")
@@ -123,7 +123,7 @@ def test_arm1_closes_on_fin_then_releases_it_at_board_slot() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="arm1-carry")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         scene.registry.place_base_on_tray()
         neighbour_names = ("fin_01", "fin_03", "fin_04")
@@ -260,7 +260,7 @@ def test_arm1_reaches_product_c_fin_07_without_raw_rack_collision() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(make_order_spec("C"), order_id="arm1-c-fin-07")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         scene.registry.place_base_on_tray()
         actor = SceneTaskActor("arm1", scene, lambda: product)
@@ -305,7 +305,7 @@ def test_continuous_fin_pick_uses_local_lift_instead_of_remote_park() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="arm1-direct-next-fin")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         scene.arm1_tools.change_tool("parallel_gripper")
         actor = SceneTaskActor("arm1", scene, lambda: product)
@@ -338,7 +338,7 @@ def test_arm1_suction_transfers_base_then_releases_on_tray() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="arm1-suction")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         actor = SceneTaskActor("arm1", scene, lambda: product)
         task = TaskSpec("load-base", Actor.ARM1, TaskType.LOAD_BASE, timeout=60.0)
@@ -436,7 +436,7 @@ def test_arm1_suction_transfers_base_then_releases_on_tray() -> None:
 def test_arm1_quick_change_keeps_exactly_one_tool_on_flange() -> None:
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", raw=True)
     try:
         manager = scene.arm1_tools
         assert manager.current_tool is None
@@ -461,7 +461,7 @@ def test_arm1_can_visibly_prepare_gripper_without_entering_table2() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="arm1-background-tool-preparation")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         scene.arm1_tools.change_tool("suction_tool")
         actor = SceneTaskActor("arm1", scene, lambda: product)
@@ -503,7 +503,7 @@ def test_arm2_fixed_dispenser_completes_continuous_material_passes() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="arm2-fixed-dispenser")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         scene.registry.dock_assembly_tray_to_station("s2a", snap=True)
         scene.registry.place_base_on_tray(snap=True)
@@ -607,7 +607,7 @@ def test_arm2_fixed_dispenser_completes_continuous_material_passes() -> None:
 def test_material_marker_grows_from_the_actual_travel_endpoint() -> None:
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         scene.registry.place_base_on_tray(snap=True)
         path_id = "slot_01_left"

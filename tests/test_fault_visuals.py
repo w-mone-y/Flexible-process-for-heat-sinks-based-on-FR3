@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def physical_scene():
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=False)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=False)
     product = create_product_state(make_order_spec("A"))
     scene.reset(product, raw=False)
     visualizer = PhysicalFaultVisualizer(scene)

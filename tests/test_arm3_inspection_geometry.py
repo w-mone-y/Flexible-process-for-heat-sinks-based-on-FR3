@@ -38,7 +38,7 @@ def test_all_arm3_views_contain_the_complete_axis_aligned_product(preset: str) -
 
 
 def test_relocated_arm3_reaches_material_fin_and_finished_product_views() -> None:
-    scene = BrazingScene("brazing_line.xml", order="B", raw=True)
+    scene = BrazingScene("scenes/production/brazing_line.xml", order="B", raw=True)
     try:
         base = scene.data.body("arm3_base")
         np.testing.assert_allclose(base.xpos, [0.75, 0.40, 0.0], atol=1.0e-9)

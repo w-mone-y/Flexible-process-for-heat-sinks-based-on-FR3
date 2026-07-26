@@ -1051,7 +1051,9 @@ class SkillExecutor:
 
 
 def default_scene_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "brazing_line.xml"
+    from brazing_sim.paths import DEFAULT_SCENE_PATH
+
+    return DEFAULT_SCENE_PATH
 
 
 __all__ = [

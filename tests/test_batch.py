@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _coordinators(*, fast: bool) -> tuple[BrazingScene, ProcessCoordinator, BatchCoordinator]:
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     holder: dict[str, BatchCoordinator] = {}
     actors = build_scene_actors(
         scene,
@@ -143,7 +143,7 @@ def test_complete_slotted_tray_follows_product_into_furnace_rack() -> None:
 def test_async_logistics_keeps_one_attitude_from_infeed_through_finished_output() -> None:
     """Furnace-local -90 degree frames must never rotate the completed tray."""
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         registry = scene.registry
         product = create_product_state(order_id="async-logistics-orientation")

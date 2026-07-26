@@ -167,7 +167,9 @@ def test_dry_run_outputs_chinese_plan_without_starting_a_model() -> None:
 
 def test_flexible_mjcf_pool_comb_rack_welds_and_dynamic_c_nozzle() -> None:
     plan = build_preset_plan("C", quantity=1)
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=plan.execution_spec, raw=True)
+    scene = BrazingScene(
+        ROOT / "scenes" / "production" / "brazing_line.xml", order=plan.execution_spec, raw=True
+    )
     try:
         validate_process_plan(plan, scene)
         for index in range(1, 13):
@@ -190,7 +192,9 @@ def test_flexible_mjcf_pool_comb_rack_welds_and_dynamic_c_nozzle() -> None:
 @pytest.mark.parametrize("quantity", [1, 2])
 def test_partial_flexible_batches_braze_all_planned_layers_once(quantity: int) -> None:
     plan = build_preset_plan("B", quantity=quantity)
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=plan.execution_spec, raw=True)
+    scene = BrazingScene(
+        ROOT / "scenes" / "production" / "brazing_line.xml", order=plan.execution_spec, raw=True
+    )
     holder: dict[str, BatchCoordinator] = {}
     actors = build_scene_actors(scene, lambda: holder["batch"].product, fast=True)
     single = ProcessCoordinator(actors=actors, fast=True)

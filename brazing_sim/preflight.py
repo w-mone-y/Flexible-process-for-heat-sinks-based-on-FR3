@@ -33,7 +33,7 @@ class PreflightIssue:
     object_type: str
     module: str
     message: str
-    xml_file: str = "brazing_line.xml"
+    xml_file: str = "scenes/production/brazing_line.xml"
     suggestion: str = "请检查 MJCF 中的命名、层级和参数。"
 
     def format_chinese(self, index: int | None = None) -> str:
@@ -62,7 +62,7 @@ class PreflightReport:
 
     issues: list[PreflightIssue] = field(default_factory=list)
     checked_presets: tuple[str, ...] = ()
-    xml_file: str = "brazing_line.xml"
+    xml_file: str = "scenes/production/brazing_line.xml"
 
     @property
     def ok(self) -> bool:
@@ -806,7 +806,7 @@ def preflight_check(
     order: OrderSpec | str | Iterable[OrderSpec | str] | None = None,
     *,
     raise_on_error: bool = True,
-    xml_file: str | Path = "brazing_line.xml",
+    xml_file: str | Path = "scenes/production/brazing_line.xml",
     validate_current_sites: bool = False,
 ) -> PreflightReport:
     """Validate the MJCF contract and all selected order geometries.

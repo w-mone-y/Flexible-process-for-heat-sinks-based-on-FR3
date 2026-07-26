@@ -15,7 +15,7 @@ class ContactMonitorTests(unittest.TestCase):
             self.skipTest(str(exc))
         from brazing_sim.safety import ContactMonitor
 
-        model = mujoco.MjModel.from_xml_path(str(ROOT / "brazing_line.xml"))
+        model = mujoco.MjModel.from_xml_path(str(ROOT / "scenes" / "production" / "brazing_line.xml"))
         data = mujoco.MjData(model)
         home = np.asarray([0.0, 0.0, 0.0, -1.57079, 0.0, 1.57079, -0.7853])
         for arm in ("arm1", "arm2", "arm3"):
@@ -36,7 +36,7 @@ class ContactMonitorTests(unittest.TestCase):
         from brazing_sim.scene import BrazingScene
         from brazing_sim.safety import ContactMonitor
 
-        scene = BrazingScene(ROOT / "brazing_line.xml", order="C", raw=True)
+        scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="C", raw=True)
         try:
             initial = {
                 index: scene.registry.free_body_pose(f"fin_{index:02d}").position.copy()

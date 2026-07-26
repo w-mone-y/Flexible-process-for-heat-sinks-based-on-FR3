@@ -1,8 +1,0 @@
-{
-  "scheduler": "DYNAMIC_PRIORITY",
-  "tick_count": 21031,
-  "git_commit": "9cdfb2972621eb08ad497e58e9d352c668954c25",
-  "seed": 42,
-  "simulation_speed": 1.0,
-  "headless": true
-}

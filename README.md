@@ -276,12 +276,15 @@ JSONL / CSV / KPI / Qt / HTTP API
 ```
 
 ```text
-brazing_line.py               主入口、Viewer 与 headless 主循环
-brazing_line.xml              三台 FR3 与柔性产线 MJCF
-brazing_line_cinematic.py     精细视觉版入口
-run_flexible_order.py         YAML、dry-run、多订单与实验入口
+brazing_line.py               标准版兼容启动器
+brazing_line_cinematic.py     精细版兼容启动器
+run_flexible_order.py         YAML 订单兼容启动器
+scenes/production/            标准版与精细版 MuJoCo 场景
+assets/robots/fr3/            FR3 模型、网格和许可证
+assets/signs/                 中文设备铭牌
 config/                       产品、订单、配方、资源和调度配置
 brazing_sim/
+├── cli/                      三个启动器的真实实现
 ├── domain.py                 强类型订单、产品、任务和检测状态
 ├── flexible/                 配置加载、几何生成、工装和计划
 ├── planning/                 ManufacturingTask 与 TaskGraph
@@ -294,14 +297,15 @@ brazing_sim/
 ├── fixture.py                梳齿、压梁与力控压紧
 ├── async_line_router.py      四段输送与托盘所有权
 ├── batch_transfer.py         入炉、料架、出炉和成品交付
+├── paths.py                  项目目录和主场景权威路径
 └── api.py / ui.py            HTTP、终端与 Qt 控制台
 ```
 
 更完整的中文职责说明见：
 
-- [📚 项目目录说明](docs/项目目录说明.md)
-- [🎨 视觉模型与资产说明](docs/视觉模型与资产说明.md)
-- [🕰️ 旧电气板装配流程](docs/legacy_electrical_board.md)
+- [🧭 文档导航](docs/README.md)
+- [📚 项目目录说明](docs/architecture/项目目录说明.md)
+- [🎨 视觉模型与资产说明](docs/architecture/视觉模型与资产说明.md)
 
 <details>
 <summary><strong>展开查看关键物理与运动约束</strong></summary>

@@ -17,7 +17,7 @@ class BrazingXmlContractTests(unittest.TestCase):
             import mujoco
         except ImportError as exc:  # pragma: no cover
             raise unittest.SkipTest(str(exc))
-        cls.model = mujoco.MjModel.from_xml_path(str(ROOT / "brazing_line.xml"))
+        cls.model = mujoco.MjModel.from_xml_path(str(ROOT / "scenes" / "production" / "brazing_line.xml"))
 
     def test_three_prefixed_fr3_arms(self) -> None:
         for arm in ("arm1", "arm2", "arm3"):
@@ -158,7 +158,7 @@ class BrazingXmlContractTests(unittest.TestCase):
 
         from brazing_sim.scene import BrazingScene
 
-        scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+        scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
         try:
             # Verify the invariant again after changing the wrist roll.  The
             # camera must remain below the flange, not orbit beside it.
@@ -185,7 +185,7 @@ class BrazingXmlContractTests(unittest.TestCase):
         from brazing_sim.layout import SHALLOW_U_LAYOUT
         from brazing_sim.scene import BrazingScene
 
-        scene = BrazingScene(ROOT / "brazing_line.xml", order="C", raw=True)
+        scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="C", raw=True)
         try:
             spec = make_order_spec("C")
             lane_left = SHALLOW_U_LAYOUT.output_lane_x - SHALLOW_U_LAYOUT.output_pallet_half_width_m
@@ -226,7 +226,7 @@ class BrazingXmlContractTests(unittest.TestCase):
     def test_industrial_detail_layer_is_visual_only(self) -> None:
         """High-detail shells must never change motion or contact behaviour."""
 
-        xml_root = ElementTree.parse(ROOT / "brazing_line.xml").getroot()
+        xml_root = ElementTree.parse(ROOT / "scenes" / "production" / "brazing_line.xml").getroot()
         visual_geoms = xml_root.findall(".//geom[@class='visual']")
         self.assertGreaterEqual(len(visual_geoms), 100)
 
@@ -694,7 +694,7 @@ class BrazingXmlContractTests(unittest.TestCase):
             geom = self.model.geom(name)
             self.assertEqual(int(geom.type[0]), int(mujoco.mjtGeom.mjGEOM_CAPSULE))
 
-        xml_root = ElementTree.parse(ROOT / "brazing_line.xml").getroot()
+        xml_root = ElementTree.parse(ROOT / "scenes" / "production" / "brazing_line.xml").getroot()
 
         def fromto(name: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
             geom = xml_root.find(f".//geom[@name='{name}']")
@@ -882,7 +882,7 @@ class BrazingXmlContractTests(unittest.TestCase):
         )
 
     def test_fixture_and_tray_do_not_self_collide(self) -> None:
-        xml = (ROOT / "brazing_line.xml").read_text(encoding="utf-8")
+        xml = (ROOT / "scenes" / "production" / "brazing_line.xml").read_text(encoding="utf-8")
         self.assertIn('<exclude body1="assembly_fixture" body2="assembly_tray"/>', xml)
 
 

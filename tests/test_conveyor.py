@@ -16,7 +16,7 @@ def _ready_scene():
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="conveyor-physical")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     scene.registry.dock_assembly_tray_to_station("rack_infeed", snap=True)
     scene.registry.place_base_on_tray(snap=True)
     scene.fixture_controller.configure_product(product.spec, product.fixture)
@@ -54,7 +54,7 @@ def test_conveyor_rejects_an_unpressed_fixture() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="conveyor-gate")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         product.furnace.door_fraction = 1.0
         actor = ConveyorTaskActor(scene, lambda: product)
@@ -142,7 +142,7 @@ def test_physical_press_furnace_cycle_and_return_to_table2() -> None:
     from brazing_sim.safety import ContactMonitor
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     holder: dict[str, ProcessCoordinator] = {}
     actors = build_scene_actors(scene, lambda: holder["coordinator"].product)
     coordinator = ProcessCoordinator(actors=actors)

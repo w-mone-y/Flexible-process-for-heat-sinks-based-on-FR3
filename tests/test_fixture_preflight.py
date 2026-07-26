@@ -14,7 +14,7 @@ def test_preflight_accepts_all_flexible_fixture_presets() -> None:
     from brazing_sim.preflight import preflight_check
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         report = preflight_check(scene, order=("A", "B", "C"), raise_on_error=False)
         assert report.ok
@@ -27,7 +27,7 @@ def test_preflight_accepts_all_flexible_fixture_presets() -> None:
 def test_comb_and_press_are_absent_during_material_application() -> None:
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         scene.reset("A", raw=True)
         comb_names = ("front_comb_20_g01l", "rear_comb_20_g01l")
@@ -57,7 +57,7 @@ def test_comb_and_press_are_absent_during_material_application() -> None:
 def test_order_switch_shows_only_matching_front_and_rear_comb_pair() -> None:
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="B", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="B", raw=True)
     try:
         scene.fixture_controller.configure_product(make_order_spec("B"))
         for end in ("front", "rear"):
@@ -81,7 +81,7 @@ def test_preflight_rejects_a_floating_comb_pedestal() -> None:
     from brazing_sim.preflight import preflight_check
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         scene.model.geom("front_comb_left_support").pos[2] += 0.005
         report = preflight_check(scene, order="A", raise_on_error=False)
@@ -95,7 +95,7 @@ def test_preflight_rejects_a_comb_tooth_disconnected_from_its_base() -> None:
     from brazing_sim.preflight import preflight_check
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         guide = scene.model.geom("front_comb_20_g01l")
         guide.pos[0] = 0.030
@@ -111,7 +111,7 @@ def test_preflight_rejects_product_c_raw_fin_inside_arm1_tool_rack() -> None:
     from brazing_sim.preflight import preflight_check
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="C", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="C", raw=True)
     try:
         site = scene.model.site("raw_fin_07_site")
         # Deliberately move fin_07 into the current central quick-change rack
@@ -138,7 +138,7 @@ def test_preflight_rejects_overlapping_shallow_u_station_tables() -> None:
     from brazing_sim.preflight import preflight_check
     from brazing_sim.scene import BrazingScene
 
-    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order="A", raw=True)
     try:
         # Restore the former compact S2A Y coordinate, which made the 490 x
         # 350 mm S1/S2A table tops visibly overlap.
@@ -164,7 +164,7 @@ def test_physical_press_uses_touch_force_before_completing_hold() -> None:
     from brazing_sim.scene import BrazingScene
 
     product = create_product_state(order_id="press-touch")
-    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    scene = BrazingScene(ROOT / "scenes" / "production" / "brazing_line.xml", order=product, raw=True)
     try:
         scene.registry.place_base_on_tray()
         for fin in product.active_fins:

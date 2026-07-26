@@ -17,7 +17,7 @@ def test_cinematic_entry_preserves_explicit_xml_override() -> None:
 
 
 def test_cinematic_scene_inherits_complete_standard_contract() -> None:
-    standard = mujoco.MjModel.from_xml_path(str(ROOT / "brazing_line.xml"))
+    standard = mujoco.MjModel.from_xml_path(str(ROOT / "scenes" / "production" / "brazing_line.xml"))
     cinematic = mujoco.MjModel.from_xml_path(str(CINEMATIC_XML))
 
     assert cinematic.nbody > standard.nbody
@@ -43,7 +43,7 @@ def test_cinematic_scene_inherits_complete_standard_contract() -> None:
 
 
 def test_cinematic_overlay_is_visual_only_and_high_fidelity() -> None:
-    standard = mujoco.MjModel.from_xml_path(str(ROOT / "brazing_line.xml"))
+    standard = mujoco.MjModel.from_xml_path(str(ROOT / "scenes" / "production" / "brazing_line.xml"))
     model = mujoco.MjModel.from_xml_path(str(CINEMATIC_XML))
     quality = model.vis.quality
     assert int(quality.shadowsize) == 4096
