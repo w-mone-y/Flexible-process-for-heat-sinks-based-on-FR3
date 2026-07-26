@@ -47,7 +47,10 @@ class AsyncLineLogisticsSkill:
     # bringing the returning pallet through the fin-assembly envelope.
     OUTFEED_INSIDE_M = 0.690
     OUTPUT_INSPECTION_M = 0.100
-    OUTPUT_DELIVERY_M = 1.120
+    # The 460 mm-wide tray remains transverse to the output lane.  A 1.28 m
+    # stroke places its complete 320 mm longitudinal envelope beyond the gate
+    # instead of leaving the rear edge at the doorway.
+    OUTPUT_DELIVERY_M = 1.280
     GATE_OPEN_M = 0.500
     DOOR_SECONDS = 0.75
 
@@ -167,7 +170,14 @@ class AsyncLineLogisticsSkill:
         self.registry.set_batch_tray_visible(self.unit_index, carrier=False, payload=False)
         self.registry.set_batch_weld(self._carrier_weld(), False)
         shelf = self.registry.site_pose(f"batch_rack_shelf_site_{self.layer_index}")
-        self.registry.set_free_body_pose(self.tray_name, shelf, forward=True)
+        # The shelf belongs to a furnace body yawed -90 degrees for scene
+        # layout.  Copy only its position: the completed heat sink must retain
+        # the same lengthwise attitude it had on the infeed belt.
+        self.registry.move_free_body_preserving_orientation(
+            self.tray_name,
+            shelf,
+            forward=True,
+        )
         self.registry.set_batch_weld(
             self._rack_weld(),
             True,
@@ -179,7 +189,14 @@ class AsyncLineLogisticsSkill:
         self.registry.set_batch_tray_visible(self.unit_index, carrier=False, payload=False)
         self.registry.set_batch_weld(self._rack_weld(), False)
         carrier = self.registry.site_pose("batch_transfer_pose")
-        self.registry.set_free_body_pose(self.tray_name, carrier, forward=True)
+        # Keep the in-rack quaternion while moving vertically onto the output
+        # carrier.  The carriage's own local frame is also rotated -90 degrees
+        # and must never become a product rotation command.
+        self.registry.move_free_body_preserving_orientation(
+            self.tray_name,
+            carrier,
+            forward=True,
+        )
         self.registry.set_batch_weld(
             self._carrier_weld(),
             True,

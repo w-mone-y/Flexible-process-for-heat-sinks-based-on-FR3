@@ -12,7 +12,7 @@ from .config import derive_product_layout, make_order_spec
 from .domain import BrazingPathState, FinState, FixtureState, OrderSpec, ProductState
 from .fixture import FixtureController
 from .layout import SHALLOW_U_LAYOUT
-from .motion import ArmController, MotionConfig, Pose, default_scene_path, matrix_to_quat, pose_from_site
+from .motion import ArmController, MotionConfig, Pose, default_scene_path, matrix_to_quat
 from .preflight import PreflightReport, preflight_check
 from .tools import Arm1ToolManager, Arm2ToolManager
 
@@ -279,6 +279,29 @@ class SceneRegistry:
         self.data.qvel[dof : dof + 6] = 0.0
         if forward:
             self.mujoco.mj_forward(self.model, self.data)
+
+    def move_free_body_preserving_orientation(
+        self,
+        body_name: str,
+        target: Pose | Sequence[float],
+        *,
+        forward: bool = False,
+    ) -> None:
+        """Move a free body to one XYZ target without changing its attitude.
+
+        Furnace/rack sites inherit the furnace body's -90 degree layout
+        rotation.  That rotation describes the mechanism's local coordinate
+        system, not a requested pallet reorientation.  Logistics handoffs use
+        this helper so a tray that enters lengthwise also leaves lengthwise.
+        """
+
+        current = self.free_body_pose(body_name)
+        position = target.position if isinstance(target, Pose) else np.asarray(target, dtype=float)
+        self.set_free_body_pose(
+            body_name,
+            Pose(np.asarray(position, dtype=float), current.quaternion.copy()),
+            forward=forward,
+        )
 
     def product_pose(self) -> Pose:
         return self.free_body_pose("base_plate")
@@ -1044,37 +1067,50 @@ class SceneRegistry:
         )
 
     def seat_and_grasp_fin(self, fin_name: str) -> None:
-        """Centre a fin in the closed jaws and create one rigid relative pose.
+        """Transfer an already aligned fin from the rack to the closed jaws.
 
-        The fin is seated in the jaw frame so both 2 mm faces are exactly
-        parallel to the two finger inner faces.  Its centre is placed at the
-        grasp TCP, after which the closed fingers and fin are coupled by a weld
-        whose full SE(3) relative transform is recomputed.
+        The rack weld remains active while the grasp weld is authored from the
+        *measured contact pose*.  Only after that rigid relative transform is
+        installed is the rack weld released.  This constraint hand-off keeps
+        the fin's world pose bit-for-bit continuous; the previous implementation
+        rewrote the free-body quaternion to an ideal jaw frame and produced a
+        visible clockwise twitch at pickup (followed by an opposite correction
+        over the installation slot).
         """
 
         if fin_name not in FIN_NAMES:
             raise ValueError(f"unknown fin {fin_name!r}")
-        self.set_weld(f"raw_{fin_name}_rack_weld", False)
         self.set_weld(f"{fin_name}_fixture_weld", False)
         self.set_weld(f"arm1_grasp_{fin_name}", False)
+        # The progressive close stage has already reached its endpoint.  Stop
+        # the two finger slides exactly at the inner faces while the rack still
+        # owns the fin, so this final sub-millimetre servo settling cannot move
+        # or rotate the workpiece.
         self.snap_arm1_gripper_closed()
-        gripper_pose = self.free_body_pose("arm1_parallel_gripper")
-        grasp_tcp = pose_from_site(self.data, self.site_id("arm1_grasp_tcp"))
-        local_tcp = gripper_pose.inverse().transformed(grasp_tcp)
-        # The mounted gripper points local +Z down.  A 180 degree local-X
-        # rotation maps the upright fin frame to the two jaw planes exactly.
-        jaw_aligned_fin = gripper_pose.transformed(Pose(local_tcp.position, np.asarray([0.0, 1.0, 0.0, 0.0])))
-        self.set_free_body_pose(
-            fin_name,
-            jaw_aligned_fin,
+        fin_pose = self.free_body_pose(fin_name)
+        grasp_tcp = self.site_pose("arm1_grasp_tcp")
+        # Remove only the tiny translational servo residual (normally a few
+        # tens of micrometres).  The measured fin quaternion is deliberately
+        # retained, so seating the centre between the finger faces cannot
+        # recreate the old clockwise pickup twitch.
+        centred_pose = Pose(grasp_tcp.position, fin_pose.quaternion)
+        self.set_free_body_pose(fin_name, centred_pose)
+        self.set_weld(
+            f"raw_{fin_name}_rack_weld",
+            True,
+            recompute=("raw_material_rack", fin_name),
             forward=True,
         )
+        # Author the new constraint before releasing the old one.  Both welds
+        # agree on the current pose, so enabling/disabling them cannot inject a
+        # corrective angular impulse.
         self.set_weld(
             f"arm1_grasp_{fin_name}",
             True,
             recompute=("arm1_parallel_gripper", fin_name),
-            forward=True,
+            forward=False,
         )
+        self.set_weld(f"raw_{fin_name}_rack_weld", False, forward=True)
 
     def temporary_fix_fin(self, fin_name: str) -> None:
         self.set_weld(f"arm1_grasp_{fin_name}", False)

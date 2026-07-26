@@ -40,11 +40,12 @@ class BatchTransferActor:
     SETTLE_SECONDS = 0.12
     OUTFEED_TARGET_M = 0.690
     # The rack-infeed carrier starts at (1.00, 0). Its local X output slide is
-    # world -Y, so 0.10 m is the Arm3-reachable post-inspection point and 1.12 m is
-    # inside the enclosed finished-goods port.
+    # world -Y, so 0.10 m is the Arm3-reachable post-inspection point.  The
+    # 1.28 m delivery target carries the complete transverse tray beyond the
+    # widened outlet gate.
     OUTPUT_HOME_OUTFEED_M = 0.0
     OUTPUT_INSPECTION_M = 0.100
-    DELIVERY_INSIDE_M = 1.120
+    DELIVERY_INSIDE_M = 1.280
     DELIVERY_GATE_OPEN_M = 0.500
     DELIVERY_DWELL_SECONDS = 0.45
     COMB_REMOVAL_SECONDS = 0.90
@@ -502,7 +503,11 @@ class BatchTransferActor:
             self.scene.registry.set_batch_tray_visible(index, carrier=False, payload=False)
             self.scene.registry.set_batch_weld(self._carrier_weld(index), False)
             shelf_pose = self.scene.registry.site_pose(f"batch_rack_shelf_site_{shelf_index}")
-            self.scene.registry.set_free_body_pose(tray, shelf_pose, forward=True)
+            self.scene.registry.move_free_body_preserving_orientation(
+                tray,
+                shelf_pose,
+                forward=True,
+            )
             self.scene.registry.set_batch_weld(
                 self._rack_weld(index, shelf_index),
                 True,
@@ -557,7 +562,11 @@ class BatchTransferActor:
                 )
             self.scene.registry.set_batch_rack_lock(shelf_index, False, teleport=self.fast)
             carrier_pose = self.scene.registry.site_pose("batch_transfer_pose")
-            self.scene.registry.set_free_body_pose(tray, carrier_pose, forward=True)
+            self.scene.registry.move_free_body_preserving_orientation(
+                tray,
+                carrier_pose,
+                forward=True,
+            )
             self.scene.registry.set_batch_weld(
                 self._carrier_weld(index),
                 True,
@@ -587,7 +596,11 @@ class BatchTransferActor:
             tray = self._tray_name(index)
             if self.fast:
                 pose = self.scene.registry.site_pose(f"batch_output_slot_{index + 1:02d}_site")
-                self.scene.registry.set_free_body_pose(tray, pose, forward=True)
+                self.scene.registry.move_free_body_preserving_orientation(
+                    tray,
+                    pose,
+                    forward=True,
+                )
             self.scene.registry.set_batch_weld(self._carrier_weld(index), False)
             self.scene.registry.set_batch_weld(
                 self._output_weld(index),

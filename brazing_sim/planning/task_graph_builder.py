@@ -229,7 +229,11 @@ class ProcessPlanTaskGraphBuilder:
         install_ids: list[str] = []
         previous_install: str | None = None
         for target in plan.fin_targets:
-            predecessors = [configure_comb.task_id, prepare_tool.task_id]
+            # Picking happens at the independent raw-fin magazine and can
+            # overlap the visible comb installation at S3.  Only insertion
+            # needs the comb lock.  Prefetching the first fin removes the
+            # otherwise idle Arm1 gap after the guides visibly seat.
+            predecessors = [prepare_tool.task_id]
             if previous_install is not None:
                 predecessors.append(previous_install)
             pick_fin = self._make(
@@ -252,7 +256,7 @@ class ProcessPlanTaskGraphBuilder:
                 plan=plan,
                 unit_id=unit_id,
                 tray_id=tray_id,
-                predecessors=(pick_fin.task_id,),
+                predecessors=(pick_fin.task_id, configure_comb.task_id),
                 resources=("ARM1",),
                 zones=("ZONE_TABLE2_CORE",),
                 tool="parallel_gripper",

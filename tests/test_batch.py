@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from brazing_sim.actors import build_scene_actors
 from brazing_sim.batch import BatchCoordinator
-from brazing_sim.config import create_batch_state
+from brazing_sim.config import create_batch_state, create_product_state
 from brazing_sim.domain import (
     Actor,
     BatchStage,
@@ -20,6 +21,9 @@ from brazing_sim.domain import (
     TrayUnitPhase,
 )
 from brazing_sim.layout import SHALLOW_U_LAYOUT
+from brazing_sim.execution.async_line_logistics import AsyncLineLogisticsSkill
+from brazing_sim.planning.task_models import ManufacturingTask
+from brazing_sim.planning.task_models import TaskType as RuntimeTaskType
 from brazing_sim.process import ActorResult, ProcessCoordinator
 from brazing_sim.scene import BrazingScene
 
@@ -132,6 +136,65 @@ def test_complete_slotted_tray_follows_product_into_furnace_rack() -> None:
             geom_id = scene.registry.geom_id(name)
             assert int(scene.model.geom_bodyid[geom_id]) == tray_body
             assert float(scene.model.geom_rgba[geom_id, 3]) == 1.0
+    finally:
+        scene.close()
+
+
+def test_async_logistics_keeps_one_attitude_from_infeed_through_finished_output() -> None:
+    """Furnace-local -90 degree frames must never rotate the completed tray."""
+
+    scene = BrazingScene(ROOT / "brazing_line.xml", order="A", raw=True)
+    try:
+        registry = scene.registry
+        product = create_product_state(order_id="async-logistics-orientation")
+        registry.configure_batch_tray(0, product)
+        registry.set_batch_tray_visible(0, carrier=True, payload=True)
+        registry.dock_batch_tray_to_async_station("tray_01", "rack_infeed", snap=True)
+        reference = registry.free_body_pose("batch_tray_01").quaternion.copy()
+        visible_orientations = [reference]
+        context = SimpleNamespace(scene=scene, v2_furnace_visual={})
+
+        sequence = (
+            (RuntimeTaskType.MOVE_ELEVATOR, {}),
+            (RuntimeTaskType.LOAD_RACK_LAYER, {"layer_index": 0}),
+            (RuntimeTaskType.LOCK_RACK_LAYER, {"layer_index": 0}),
+            (RuntimeTaskType.RUN_FURNACE, {}),
+            (RuntimeTaskType.UNLOAD_RACK_LAYER, {"layer_index": 0}),
+            (RuntimeTaskType.ROUTE_PASS, {}),
+        )
+        for index, (task_type, payload) in enumerate(sequence):
+            skill = AsyncLineLogisticsSkill(task_type, fast=True)
+            task = ManufacturingTask(
+                task_id=f"orientation-{index}",
+                task_type=task_type,
+                order_id="ORIENTATION",
+                unit_id="ORIENTATION_U01",
+                tray_id="tray_01",
+                estimated_duration=0.2,
+                payload=payload,
+            )
+            skill.start(task, "LOGISTICS", context, scene.time)
+            for _ in range(100):
+                result = skill.update(scene.time, 0.02)
+                scene.step(10)
+                if float(scene.model.geom_rgba[registry.geom_id("batch_tray_01_geom"), 3]) > 0.5:
+                    visible_orientations.append(registry.free_body_pose("batch_tray_01").quaternion.copy())
+                if result.succeeded:
+                    break
+            else:
+                raise AssertionError(f"{task_type.value} did not finish")
+
+        maximum_angle = max(
+            2.0
+            * np.arccos(
+                min(
+                    1.0,
+                    abs(float(np.dot(reference, quaternion))),
+                )
+            )
+            for quaternion in visible_orientations
+        )
+        assert maximum_angle < np.deg2rad(0.25)
     finally:
         scene.close()
 
@@ -365,6 +428,7 @@ def test_top_shelf_round_trip_returns_on_direct_belt_before_output() -> None:
                 break
         assert str(result) == "SUCCEEDED"
 
+        reference_quaternion = scene.registry.free_body_pose("batch_tray_03").quaternion.copy()
         coordinator.transfer.start_load(2, scene.time)
         load_deadline = scene.time + 30.0
         while scene.time < load_deadline:
@@ -374,16 +438,21 @@ def test_top_shelf_round_trip_returns_on_direct_belt_before_output() -> None:
                 break
         assert str(result) == "SUCCEEDED"
         assert batch.rack.shelves[2].state is RackShelfState.LOCKED
+        rack_quaternion = scene.registry.free_body_pose("batch_tray_03").quaternion.copy()
+        assert abs(float(np.dot(reference_quaternion, rack_quaternion))) > 0.999999
 
         unit.phase = TrayUnitPhase.BRAZED
         batch.rack.shelves[2].state = RackShelfState.BRAZED
         coordinator.transfer.start_unload(2, scene.time)
         positions = [scene.registry.free_body_pose("batch_tray_03").position.copy()]
+        orientations = [rack_quaternion]
         deadline = scene.time + 45.0
         while scene.time < deadline:
             result = coordinator.transfer.poll(scene.time)
             scene.step()
-            positions.append(scene.registry.free_body_pose("batch_tray_03").position.copy())
+            tray_pose = scene.registry.free_body_pose("batch_tray_03")
+            positions.append(tray_pose.position.copy())
+            orientations.append(tray_pose.quaternion.copy())
             if str(result) == "SUCCEEDED":
                 break
 
@@ -394,6 +463,7 @@ def test_top_shelf_round_trip_returns_on_direct_belt_before_output() -> None:
         # Shelf selection occurs inside the furnace; the externally visible
         # return is the single horizontal black-belt move followed by output.
         assert np.ptp(np.asarray(positions)[:, 0]) > 0.65
+        assert min(abs(float(np.dot(reference_quaternion, value))) for value in orientations) > 0.999999
     finally:
         scene.close()
 
@@ -538,6 +608,7 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
         checked_close_interlock = False
         checked_comb_removal = False
         checked_press_removal = False
+        checked_fully_inside_output = False
         observed_steps: set[str] = set()
         result = None
         deadline = scene.time + 25.0
@@ -573,6 +644,17 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
                 )
                 checked_entry_interlock = True
                 checked_common_lane = True
+            if coordinator.transfer.state["step"] == "delivery_unload":
+                tray_half_length = float(scene.model.geom("batch_tray_01_geom").size[1])
+                gate_y = float(scene.model.body("finished_output_gate").pos[1])
+                # The trailing edge has cleared the open door, so the complete
+                # transverse tray is inside before its payload is removed.
+                assert float(tray_pose[1]) + tray_half_length < gate_y - 0.030
+                assert registry.batch_joint_position("batch_output_joint") == pytest.approx(
+                    coordinator.transfer.DELIVERY_INSIDE_M,
+                    abs=0.002,
+                )
+                checked_fully_inside_output = True
             if coordinator.transfer.state["step"] == "delivery_return_home":
                 assert registry.finished_output_gate_fraction >= 0.98
                 assert registry.batch_joint_position("batch_outfeed_joint") == pytest.approx(
@@ -619,6 +701,7 @@ def test_finished_product_unloads_and_empty_tray_exits_before_gate_closes() -> N
         assert checked_close_interlock
         assert checked_comb_removal
         assert checked_press_removal
+        assert checked_fully_inside_output
         assert "delivery_remove_comb" in observed_steps
         assert "delivery_remove_press" in observed_steps
         assert "delivery_pickup_lane" not in observed_steps

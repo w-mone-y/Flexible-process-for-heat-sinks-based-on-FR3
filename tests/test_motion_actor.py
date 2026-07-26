@@ -85,6 +85,37 @@ def test_arm1_grasp_welds_activate_and_reset() -> None:
         scene.close()
 
 
+def test_fin_grasp_constraint_handoff_preserves_the_contact_pose() -> None:
+    from brazing_sim.scene import BrazingScene
+
+    product = create_product_state(order_id="fin-grasp-handoff")
+    scene = BrazingScene(ROOT / "brazing_line.xml", order=product, raw=True)
+    try:
+        registry = scene.registry
+        raw_pose = registry.free_body_pose("fin_01")
+        registry.set_free_body_pose(
+            "fin_01",
+            Pose(registry.site_pose("arm1_grasp_tcp").position, raw_pose.quaternion),
+        )
+        registry.set_weld(
+            "raw_fin_01_rack_weld",
+            True,
+            recompute=("raw_material_rack", "fin_01"),
+            forward=True,
+        )
+        before = registry.free_body_pose("fin_01")
+
+        registry.seat_and_grasp_fin("fin_01")
+
+        after = registry.free_body_pose("fin_01")
+        assert np.linalg.norm(after.position - before.position) < 5.0e-5
+        assert quaternion_distance_rad(after.quaternion, before.quaternion) < 1.0e-12
+        assert scene.data.eq_active[registry.equality_id("raw_fin_01_rack_weld")] == 0
+        assert scene.data.eq_active[registry.equality_id("arm1_grasp_fin_01")] == 1
+    finally:
+        scene.close()
+
+
 def test_arm1_closes_on_fin_then_releases_it_at_board_slot() -> None:
     from brazing_sim.actors import SceneTaskActor
     from brazing_sim.domain import Actor, TaskSpec, TaskType

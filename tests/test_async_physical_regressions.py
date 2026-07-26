@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -43,6 +44,16 @@ class _ImmediateTransferRegistry:
         _transfer_id: str,
         _destination: str,
     ) -> None:
+        return None
+
+
+class _NoopHttpServer:
+    server_address = ("127.0.0.1", 0)
+
+    def shutdown(self) -> None:
+        return None
+
+    def server_close(self) -> None:
         return None
 
 
@@ -93,6 +104,128 @@ def test_s3_fin_install_and_output_camera_share_their_real_swept_zone() -> None:
     assert output_views
     assert all("ZONE_S3_OUTPUT_INTERARM" in task.required_zones for task in installs)
     assert all("ZONE_S3_OUTPUT_INTERARM" in task.required_zones for task in output_views)
+
+
+def test_first_fin_pick_overlaps_comb_install_but_insertion_waits_for_lock() -> None:
+    graph = build_task_graph(
+        build_inline_plan(
+            preset="A",
+            order_id="COMB_FIN_PIPELINE",
+            quantity=1,
+            priority=10,
+        ),
+        flexible_cell=True,
+    )
+    configure = next(task for task in graph if task.task_type is TaskType.CONFIGURE_COMB)
+    first_pick = next(
+        task
+        for task in graph
+        if task.task_type is TaskType.PICK_FIN and task.payload.get("fin_id") == "fin_01"
+    )
+    first_install = next(
+        task
+        for task in graph
+        if task.task_type is TaskType.INSTALL_FIN and task.payload.get("fin_id") == "fin_01"
+    )
+
+    assert configure.task_id not in first_pick.predecessors
+    assert configure.task_id in first_install.predecessors
+    assert first_pick.task_id in first_install.predecessors
+
+
+def test_comb_completion_has_no_ui_block_before_first_fin_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """First-fin IK is bounded and its pickup is prefetched during comb motion."""
+
+    monkeypatch.setattr(
+        "brazing_line.start_http_server",
+        lambda *_args, **_kwargs: _NoopHttpServer(),
+    )
+    application = BrazingApplication(
+        parse_args(
+            [
+                "--headless",
+                "--dt",
+                "0.02",
+                "--no-ui",
+                "--no-terminal-commands",
+                "--port",
+                "0",
+            ]
+        )
+    )
+    try:
+        application.process_command(
+            {
+                "type": "order_insert",
+                "mode": "preset",
+                "preset": "A",
+                "order_id": "COMB_FIN_NO_GAP",
+                "quantity": 1,
+                "priority": 10,
+                "route_strategy": "STANDARD",
+                "urgent": False,
+            }
+        )
+        first_planning_wall_s: float | None = None
+        configure = first_pick = first_install = None
+        for _ in range(6_000):
+            application.tick()
+            configure = next(
+                (
+                    task
+                    for task in application.manufacturing_runtime.graph
+                    if task.task_type is TaskType.CONFIGURE_COMB
+                ),
+                None,
+            )
+            first_pick = next(
+                (
+                    task
+                    for task in application.manufacturing_runtime.graph
+                    if task.task_type is TaskType.PICK_FIN and task.payload.get("fin_id") == "fin_01"
+                ),
+                None,
+            )
+            first_install = next(
+                (
+                    task
+                    for task in application.manufacturing_runtime.graph
+                    if task.task_type is TaskType.INSTALL_FIN and task.payload.get("fin_id") == "fin_01"
+                ),
+                None,
+            )
+            execution = next(
+                (
+                    item
+                    for item in application.manufacturing_runtime.executor.active.values()
+                    if item.task.task_type is TaskType.PICK_FIN
+                    and item.task.payload.get("fin_id") == "fin_01"
+                ),
+                None,
+            )
+            if (
+                first_planning_wall_s is None
+                and execution is not None
+                and execution.skill.arm_stages
+                and execution.skill.arm_stages[0].joint7_value is None
+            ):
+                started = time.perf_counter()
+                application.tick()
+                first_planning_wall_s = time.perf_counter() - started
+            if first_install is not None and first_install.status is TaskStatus.RUNNING:
+                break
+
+        assert configure is not None and configure.finished_at is not None
+        assert first_pick is not None and first_pick.finished_at is not None
+        assert first_install is not None and first_install.started_at is not None
+        assert first_planning_wall_s is not None
+        assert first_planning_wall_s < 0.50
+        assert first_pick.finished_at <= configure.finished_at
+        assert first_install.started_at - configure.finished_at <= 0.020001
+    finally:
+        application.close()
 
 
 def test_loaded_transfers_reserve_both_endpoint_junctions() -> None:
@@ -283,6 +416,70 @@ def test_b_second_fin_is_committed_at_its_own_slot() -> None:
         application.close()
 
 
+def test_a_fourth_fin_selects_an_insertion_capable_wrist_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The penultimate A fin must not discover a bad q7 branch above the comb."""
+
+    monkeypatch.setattr(
+        "brazing_line.start_http_server",
+        lambda *_args, **_kwargs: _NoopHttpServer(),
+    )
+    application = BrazingApplication(
+        parse_args(
+            [
+                "--headless",
+                "--dt",
+                "0.002",
+                "--no-ui",
+                "--no-terminal-commands",
+                "--port",
+                "0",
+            ]
+        )
+    )
+    try:
+        application.process_command(
+            {
+                "type": "order_insert",
+                "mode": "preset",
+                "preset": "A",
+                "order_id": "A_FIN_04_BRANCH_REGRESSION",
+                "quantity": 1,
+                "priority": 10,
+                "route_strategy": "STANDARD",
+                "urgent": False,
+            }
+        )
+        fourth = None
+        for _ in range(85_000):
+            application.tick()
+            fourth = next(
+                (
+                    task
+                    for task in application.manufacturing_runtime.graph
+                    if task.task_type is TaskType.INSTALL_FIN and task.payload.get("fin_id") == "fin_04"
+                ),
+                None,
+            )
+            if fourth is not None and fourth.status in {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+            }:
+                break
+
+        assert fourth is not None
+        assert fourth.status is TaskStatus.SUCCEEDED, fourth.failure_reason
+        assert float(application.scene.model.geom("batch_tray_01_fin_04").rgba[3]) == pytest.approx(1.0)
+        assert not [
+            fault
+            for fault in application.manufacturing_runtime.faults.values()
+            if fault.related_task_id == fourth.task_id
+        ]
+    finally:
+        application.close()
+
+
 def test_c_all_seven_fins_use_progressive_grip_and_are_committed() -> None:
     application = BrazingApplication(
         parse_args(
@@ -298,6 +495,7 @@ def test_c_all_seven_fins_use_progressive_grip_and_are_committed() -> None:
         )
     )
     samples: list[float] = []
+    maximum_carry_path_joint_step_rad = 0.0
     try:
         application.process_command(
             {
@@ -315,6 +513,19 @@ def test_c_all_seven_fins_use_progressive_grip_and_are_committed() -> None:
         installs = []
         for _ in range(24_000):
             application.tick()
+            for execution in application.manufacturing_runtime.executor.active.values():
+                if execution.task.task_type is not TaskType.INSTALL_FIN:
+                    continue
+                skill = execution.skill
+                if not skill.arm_stages or len(skill.arm_stages) < 2:
+                    continue
+                carry_stage = skill.arm_stages[1]
+                if carry_stage.joint_path is None:
+                    continue
+                maximum_carry_path_joint_step_rad = max(
+                    maximum_carry_path_joint_step_rad,
+                    float(np.max(np.abs(np.diff(carry_stage.joint_path, axis=0)))),
+                )
             running_first = any(
                 task.task_type in {TaskType.PICK_FIN, TaskType.INSTALL_FIN}
                 and task.payload.get("fin_id") == "fin_01"
@@ -353,6 +564,7 @@ def test_c_all_seven_fins_use_progressive_grip_and_are_committed() -> None:
             ) == pytest.approx(1.0)
         assert any(0.10 < value < 0.85 for value in samples)
         assert samples[-1] == pytest.approx(0.90, abs=0.03)
+        assert maximum_carry_path_joint_step_rad < 0.20
         assert application.manufacturing_runtime.recovery.plans == {}
     finally:
         application.close()

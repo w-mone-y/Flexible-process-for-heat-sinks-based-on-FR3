@@ -17,6 +17,7 @@ import numpy as np
 from .conveyor import ConveyorTaskActor
 from .domain import ProductState, TaskSpec, TaskType
 from .fixture import FixtureTaskActor
+from .inspection import top_down_inspection_pose
 from .motion import (
     ExecutionState,
     PolylineTrajectory,
@@ -41,21 +42,6 @@ def _top_down_quaternion(yaw: float = 0.0) -> np.ndarray:
         ]
     )
     return matrix_to_quat(rotation)
-
-
-def _look_at_quaternion(position: Any, focus: Any) -> np.ndarray:
-    """Orient local +Z from a camera TCP toward a product focus point."""
-
-    tool_axis = np.asarray(focus, dtype=float) - np.asarray(position, dtype=float)
-    tool_axis /= max(float(np.linalg.norm(tool_axis)), 1.0e-12)
-    reference_y = np.asarray([0.0, 1.0, 0.0])
-    local_x = np.cross(reference_y, tool_axis)
-    if float(np.linalg.norm(local_x)) < 1.0e-9:
-        reference_y = np.asarray([1.0, 0.0, 0.0])
-        local_x = np.cross(reference_y, tool_axis)
-    local_x /= max(float(np.linalg.norm(local_x)), 1.0e-12)
-    local_y = np.cross(tool_axis, local_x)
-    return matrix_to_quat(np.column_stack((local_x, local_y, tool_axis)))
 
 
 def _site_pose(scene: BrazingScene, name: str) -> Pose:
@@ -212,6 +198,11 @@ class SceneTaskActor:
             TaskType.APPLY_MATERIAL,
             TaskType.REAPPLY_MATERIAL,
         }
+        is_arm3_inspection = self.arm_name == "arm3" and kind in {
+            TaskType.PRE_INSPECT,
+            TaskType.MATERIAL_INSPECT,
+            TaskType.POST_INSPECT,
+        }
         reference = trajectory.waypoints[0]
         is_strict_vertical = bool(
             is_arm1_rigid_payload_motion
@@ -239,7 +230,17 @@ class SceneTaskActor:
                     for waypoint in trajectory.waypoints
                 ),
                 trajectory.speed_m_s,
-                min(trajectory.sample_spacing_m, 0.0015),
+                min(trajectory.sample_spacing_m, 0.0010),
+            )
+        elif is_arm1_rigid_payload_motion and trajectory.sample_spacing_m > 0.0010:
+            # Joint interpolation between otherwise accurate Cartesian IK
+            # samples can bow the wrist attitude by a few hundredths of a
+            # degree.  One-millimetre samples keep the rigidly held fin below
+            # the visual threshold without changing the authored speed.
+            trajectory = PolylineTrajectory(
+                trajectory.waypoints,
+                trajectory.speed_m_s,
+                0.0010,
             )
         if is_arm2_material_motion and trajectory.sample_spacing_m > 0.003:
             # Linear interpolation in joint space can bow the 220 mm lance
@@ -275,7 +276,7 @@ class SceneTaskActor:
             # its precomputed dispensing samples close the remaining roll
             # residual as a full pose.  This keeps the long dual nozzle
             # vertical to better than 0.1 degree during kinematic playback.
-            full_orientation=is_arm1_rigid_payload_motion or is_arm2_material_motion,
+            full_orientation=(is_arm1_rigid_payload_motion or is_arm2_material_motion or is_arm3_inspection),
         )
         failed_entry = next(
             ((index, result) for index, result in enumerate(checks) if not result.reachable),
@@ -521,6 +522,30 @@ class SceneTaskActor:
     def _pose(self, position: Any, yaw: float = 0.0) -> Pose:
         return Pose(np.asarray(position, dtype=float), _top_down_quaternion(yaw))
 
+    def _framed_inspection_trajectory(self, current: Pose, scan: Pose) -> PolylineTrajectory:
+        """Reorient above the home XY before moving a downward camera laterally."""
+
+        approach = Pose(
+            scan.position + np.asarray([0.0, 0.0, 0.060], dtype=float),
+            scan.quaternion,
+        )
+        lift = Pose(
+            np.asarray(
+                [
+                    current.position[0],
+                    current.position[1],
+                    max(float(current.position[2]), 0.620),
+                ],
+                dtype=float,
+            ),
+            current.quaternion,
+        )
+        reorient = Pose(lift.position, scan.quaternion)
+        return PolylineTrajectory(
+            (current, lift, reorient, approach, scan, approach),
+            self.speed_m_s,
+        )
+
     def _path_world_points(self, path_id: str) -> tuple[np.ndarray, np.ndarray]:
         product = self._product()
         path = next(item for item in product.active_paths if item.path_id == path_id)
@@ -631,86 +656,24 @@ class SceneTaskActor:
             )
 
         if kind in {TaskType.PRE_INSPECT, TaskType.MATERIAL_INSPECT}:
-            product_pose = registry.product_pose().position
-            height = 0.44 if kind is TaskType.PRE_INSPECT else 0.38
-            # Generate views from the live station frame.  S2B and S3 occupy
-            # different arms of the shallow U, so retaining one turntable-era
-            # centre-line camera pose creates an unreachable wrist transition.
-            overview = self._pose(
-                [product_pose[0] + 0.12, product_pose[1], height],
-                math.pi,
+            product_pose = registry.product_pose()
+            spec = self._product().spec
+            local_surface_z = 0.5 * spec.base_thickness
+            if kind is TaskType.PRE_INSPECT:
+                local_surface_z += spec.fin_height
+            surface_center = product_pose.position + product_pose.rotation @ np.asarray(
+                [0.0, 0.0, local_surface_z],
+                dtype=float,
             )
-            end_view = self._pose([product_pose[0] + 0.17, product_pose[1], height - 0.05], math.pi / 2.0)
-            if kind is TaskType.PRE_INSPECT and product_pose[0] >= 0.30:
-                # At S3, remain on Arm3's +Y side of the workpiece and use
-                # two oblique looks.  The approach and both views were chosen
-                # from the station's certified reachable envelope, avoiding
-                # the wrist flip caused by a vertical camera yaw change.
-                focus = np.asarray(
-                    [product_pose[0], product_pose[1], product_pose[2] + 0.025],
-                    dtype=float,
-                )
-                entry_position = np.asarray(
-                    [product_pose[0] - 0.03, product_pose[1] + 0.32, 0.46],
-                    dtype=float,
-                )
-                overview_position = np.asarray(
-                    [product_pose[0], product_pose[1] + 0.18, 0.44],
-                    dtype=float,
-                )
-                end_position = np.asarray(
-                    [product_pose[0] + 0.10, product_pose[1] + 0.18, 0.44],
-                    dtype=float,
-                )
-                entry = Pose(entry_position, _look_at_quaternion(entry_position, focus))
-                overview = Pose(
-                    overview_position,
-                    _look_at_quaternion(overview_position, focus),
-                )
-                end_view = Pose(
-                    end_position,
-                    _look_at_quaternion(end_position, focus),
-                )
-                return (
-                    PolylineTrajectory(
-                        (current, entry, overview, end_view, overview),
-                        self.speed_m_s,
-                    ),
-                    noop,
-                )
-            if kind is TaskType.PRE_INSPECT and product_pose[0] < 0.0:
-                # Historical layouts may still place an inspection segment at
-                # negative X; retain the same safe near-side fallback.
-                focus = np.asarray(
-                    [product_pose[0], product_pose[1], product_pose[2] + 0.025],
-                    dtype=float,
-                )
-                overview_position = np.asarray(
-                    [product_pose[0] + 0.24, product_pose[1], 0.46],
-                    dtype=float,
-                )
-                end_position = np.asarray(
-                    [product_pose[0] + 0.28, product_pose[1] - 0.04, 0.43],
-                    dtype=float,
-                )
-                overview = Pose(
-                    overview_position,
-                    _look_at_quaternion(overview_position, focus),
-                )
-                end_focus = focus + np.asarray([0.09, 0.0, 0.0])
-                end_view = Pose(
-                    end_position,
-                    _look_at_quaternion(end_position, end_focus),
-                )
-            # Reorient over a certified clear camera waypoint before S2B.
-            camera_entry = self._pose([0.45, 0.25, max(0.48, height + 0.04)], math.pi)
-            return (
-                PolylineTrajectory(
-                    (current, camera_entry, overview, end_view, overview),
-                    self.speed_m_s,
-                ),
-                noop,
+            product_x_axis = product_pose.rotation[:, 0]
+            product_yaw = math.atan2(float(product_x_axis[1]), float(product_x_axis[0]))
+            scan = top_down_inspection_pose(
+                surface_center,
+                product_length_m=spec.base_length,
+                product_width_m=spec.base_width,
+                product_yaw_rad=product_yaw,
             )
+            return self._framed_inspection_trajectory(current, scan), noop
 
         if kind in {TaskType.APPLY_MATERIAL, TaskType.REAPPLY_MATERIAL}:
             process_spec = self._product().spec
@@ -871,60 +834,32 @@ class SceneTaskActor:
             )
 
         if kind is TaskType.POST_INSPECT:
-            product = np.asarray(
-                task.payload.get("world_position", registry.product_pose().position),
-                dtype=float,
-            )
-            top_clearance = float(task.payload.get("top_clearance_m", 0.22))
-            side_clearance = float(task.payload.get("side_clearance_m", 0.14))
-            top_yaw = float(task.payload.get("top_yaw_rad", math.pi))
-            side_yaw = float(task.payload.get("side_yaw_rad", -math.pi / 2.0))
-            top = self._pose(
-                product + np.asarray([0.0, 0.0, top_clearance]),
-                top_yaw,
-            )
-            side = self._pose(
-                product + np.asarray([0.0, -side_clearance, 0.13]),
-                side_yaw,
-            )
-            if 0.70 <= float(product[0]) <= 1.20 and abs(float(product[1])) <= 0.20:
-                # The single-product compatibility conveyor returns to the
-                # rack hand-off point.  Inspect it from Arm3's near side;
-                # reaching vertically above x=0.9 would put the wrist at its
-                # limit even though an oblique camera view covers the part.
-                focus = product + np.asarray([0.0, 0.0, 0.03])
-                entry_position = np.asarray([0.50, 0.32, 0.46], dtype=float)
-                top_position = np.asarray(
-                    [product[0] - 0.22, product[1] + 0.16, 0.42],
+            spec = self._product().spec
+            unit_index = task.payload.get("unit_index")
+            if isinstance(unit_index, int):
+                product_pose = registry.batch_tray_pose(unit_index)
+                local_surface_z = 0.032 + 0.5 * spec.base_thickness + spec.fin_height
+            else:
+                live_pose = registry.product_pose()
+                requested = np.asarray(
+                    task.payload.get("world_position", live_pose.position),
                     dtype=float,
                 )
-                side_position = top_position + np.asarray([0.04, -0.06, -0.02])
-                entry = Pose(entry_position, _look_at_quaternion(entry_position, focus))
-                top = Pose(top_position, _look_at_quaternion(top_position, focus))
-                side = Pose(side_position, _look_at_quaternion(side_position, focus))
-                return (
-                    PolylineTrajectory((current, entry, top, side, top), self.speed_m_s),
-                    noop,
-                )
-            if float(product[0]) < 0.30:
-                # A single-order tray returns on the centreline conveyor, not
-                # the former Table3 stand.  Observe it from Arm3's near side
-                # with two explicit oblique views, keeping clear of Arm2's
-                # folded waiting envelope.
-                focus = product + np.asarray([0.0, 0.0, 0.03])
-                top_position = product + np.asarray([0.10, 0.0, 0.203])
-                side_position = product + np.asarray([0.10, -0.15, 0.143])
-                top = Pose(top_position, _look_at_quaternion(top_position, focus))
-                side = Pose(side_position, _look_at_quaternion(side_position, focus))
-                camera_entry = self._pose([0.55, 0.20, 0.55], math.pi)
-                return (
-                    PolylineTrajectory(
-                        (current, camera_entry, top, side, top),
-                        self.speed_m_s,
-                    ),
-                    noop,
-                )
-            return PolylineTrajectory((current, top, side, top), self.speed_m_s), noop
+                product_pose = Pose(requested, live_pose.quaternion)
+                local_surface_z = 0.5 * spec.base_thickness + spec.fin_height
+            surface_center = product_pose.position + product_pose.rotation @ np.asarray(
+                [0.0, 0.0, local_surface_z],
+                dtype=float,
+            )
+            product_x_axis = product_pose.rotation[:, 0]
+            product_yaw = math.atan2(float(product_x_axis[1]), float(product_x_axis[0]))
+            scan = top_down_inspection_pose(
+                surface_center,
+                product_length_m=spec.base_length,
+                product_width_m=spec.base_width,
+                product_yaw_rad=product_yaw,
+            )
+            return self._framed_inspection_trajectory(current, scan), noop
 
         raise ValueError(f"unsupported scene task: {kind.value}")
 

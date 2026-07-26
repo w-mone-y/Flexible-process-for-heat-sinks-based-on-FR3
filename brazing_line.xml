@@ -45,8 +45,18 @@
     <texture name="worktop_tex" type="2d" builtin="checker" width="128" height="128"
              rgb1="0.30 0.33 0.37" rgb2="0.25 0.28 0.32"/>
     <texture name="finished_output_sign_tex" type="2d" file="assets/finished_output_sign.png"/>
+    <texture name="station_s1_sign_tex" type="2d" file="assets/station_s1_sign.png"/>
+    <texture name="station_s2a_sign_tex" type="2d" file="assets/station_s2a_sign.png"/>
+    <texture name="station_s2b_sign_tex" type="2d" file="assets/station_s2b_sign.png"/>
+    <texture name="station_s3_sign_tex" type="2d" file="assets/station_s3_sign.png"/>
+    <texture name="furnace_sign_tex" type="2d" file="assets/furnace_sign.png"/>
+    <texture name="post_inspection_sign_tex" type="2d" file="assets/post_inspection_sign.png"/>
     <mesh name="finished_output_sign_mesh" file="assets/finished_output_sign.obj"
           scale="0.175 0.004 0.050"/>
+    <mesh name="station_sign_mesh" file="assets/finished_output_sign.obj"
+          scale="0.108 0.004 0.032"/>
+    <mesh name="furnace_sign_mesh" file="assets/finished_output_sign.obj"
+          scale="0.135 0.004 0.034"/>
     <material name="floor_mat" texture="floor_tex" texuniform="true" texrepeat="6 6" reflectance="0.12"/>
     <material name="worktop_mat" texture="worktop_tex" texuniform="true" texrepeat="5 3"
               rgba="0.75 0.77 0.80 1" metallic="0.35" roughness="0.48"/>
@@ -74,6 +84,24 @@
     <material name="hot_mat" rgba="0.90 0.22 0.06 0.40" emission="0.45"/>
     <material name="tool_blue" rgba="0.10 0.38 0.78 1"/>
     <material name="tool_yellow" rgba="0.92 0.67 0.10 1"/>
+    <!-- Low-saturation worktop colours distinguish task ownership without
+         adding equipment silhouettes around the active robot envelopes. -->
+    <material name="station_s1_table_mat" rgba="0.57 0.67 0.79 1" metallic="0.25" roughness="0.52"/>
+    <material name="station_s2a_table_mat" rgba="0.80 0.66 0.51 1" metallic="0.25" roughness="0.52"/>
+    <material name="station_s2b_table_mat" rgba="0.55 0.73 0.62 1" metallic="0.25" roughness="0.52"/>
+    <material name="station_s3_table_mat" rgba="0.69 0.60 0.79 1" metallic="0.25" roughness="0.52"/>
+    <material name="station_s1_sign_mat" texture="station_s1_sign_tex"
+              rgba="1 1 1 1" emission="0.10" roughness="0.52"/>
+    <material name="station_s2a_sign_mat" texture="station_s2a_sign_tex"
+              rgba="1 1 1 1" emission="0.10" roughness="0.52"/>
+    <material name="station_s2b_sign_mat" texture="station_s2b_sign_tex"
+              rgba="1 1 1 1" emission="0.10" roughness="0.52"/>
+    <material name="station_s3_sign_mat" texture="station_s3_sign_tex"
+              rgba="1 1 1 1" emission="0.10" roughness="0.52"/>
+    <material name="furnace_sign_mat" texture="furnace_sign_tex"
+              rgba="1 1 1 1" emission="0.12" roughness="0.50"/>
+    <material name="post_inspection_sign_mat" texture="post_inspection_sign_tex"
+              rgba="1 1 1 1" emission="0.10" roughness="0.52"/>
     <material name="finished_output_sign_mat" texture="finished_output_sign_tex"
               rgba="1 1 1 1" emission="0.18" roughness="0.48"/>
   </asset>
@@ -157,7 +185,10 @@
     <frame pos="-0.32 0.70 0" euler="0 0 -0.8726646260">
       <attach model="fr3_asset" body="base" prefix="arm2_"/>
     </frame>
-    <frame pos="0.45 0.65 0" euler="0 0 -1.9198621772">
+    <!-- Arm3 is centred between S2B, S3 and the finished-output scan point.
+         Sampled full-SE(3) IK validates all three top-down camera poses to
+         1.5 mm / 1 degree while keeping the base outside both table tops. -->
+    <frame pos="0.75 0.40 0" euler="0 0 -1.9198621772">
       <attach model="fr3_asset" body="base" prefix="arm3_"/>
     </frame>
 
@@ -259,10 +290,10 @@
     <body name="raw_material_rack">
       <geom class="cell" name="raw_material_rack_top" size="0.24 0.20 0.05"
             pos="-0.60 -0.42 0.05" material="worktop_mat"/>
-      <geom class="cell" name="fin_magazine_top" size="0.18 0.25 0.05"
-            pos="0.32 -0.46 0.05" material="worktop_mat"/>
+      <geom class="cell" name="fin_magazine_top" size="0.18 0.105 0.05"
+            pos="0.32 -0.320 0.05" material="worktop_mat"/>
       <geom class="visual" name="fin_magazine_pick_surface" type="box"
-            size="0.18 0.25 0.010" pos="0.32 -0.46 0.240"
+            size="0.18 0.105 0.010" pos="0.32 -0.320 0.240"
             material="brushed_aluminium"/>
       <!-- All active fin blanks are intentionally laid out on this one open
            pickup deck.  Dense C/custom orders reduce row pitch in Python;
@@ -279,45 +310,47 @@
         <geom class="visual" name="raw_rack_base_label" type="box" size="0.085 0.004 0.020"
               pos="0 -0.196 0.055" material="safety_yellow"/>
       </body>
-      <body name="fin_magazine" pos="0.32 -0.46 0">
+      <body name="fin_magazine" pos="0.32 -0.320 0">
         <geom class="visual" name="fin_magazine_front" type="box" size="0.175 0.012 0.032"
-              pos="0 -0.242 0.058" material="frame_steel"/>
+              pos="0 -0.097 0.058" material="frame_steel"/>
         <geom class="visual" name="fin_magazine_rear" type="box" size="0.175 0.012 0.032"
-              pos="0 0.242 0.058" material="frame_steel"/>
+              pos="0 0.097 0.058" material="frame_steel"/>
         <geom class="visual" name="fin_magazine_comb_left" type="box" size="0.150 0.010 0.025"
-              pos="0 -0.225 0.115" material="tool_blue"/>
+              pos="0 -0.080 0.115" material="tool_blue"/>
         <geom class="visual" name="fin_magazine_comb_right" type="box" size="0.150 0.010 0.025"
-              pos="0 0.225 0.115" material="tool_blue"/>
+              pos="0 0.080 0.115" material="tool_blue"/>
         <geom class="visual" name="raw_rack_fin_label" type="box" size="0.085 0.004 0.020"
-              pos="0 -0.246 0.055" material="tool_blue"/>
+              pos="0 -0.101 0.055" material="tool_blue"/>
       </body>
       <site name="raw_base_site" type="box" pos="-0.60 -0.42 0.104" size="0.182 0.112 0.002"
             rgba="0.72 0.76 0.80 0.18" group="1"/>
-      <site name="raw_fin_01_site" pos="0.32 -0.6475 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_02_site" pos="0.32 -0.5725 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_03_site" pos="0.32 -0.4975 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_04_site" pos="0.32 -0.4225 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_05_site" pos="0.32 -0.3475 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_06_site" pos="0.32 -0.2725 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_07_site" pos="0.32 -0.6475 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_08_site" pos="0.32 -0.5725 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_09_site" pos="0.32 -0.4975 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_10_site" pos="0.32 -0.4225 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_11_site" pos="0.32 -0.3475 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
-      <site name="raw_fin_12_site" pos="0.32 -0.2725 0.380" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_01_site" pos="0.32 -0.415000 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_02_site" pos="0.32 -0.397727 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_03_site" pos="0.32 -0.380455 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_04_site" pos="0.32 -0.363182 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_05_site" pos="0.32 -0.345909 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_06_site" pos="0.32 -0.328636 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_07_site" pos="0.32 -0.311364 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_08_site" pos="0.32 -0.294091 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_09_site" pos="0.32 -0.276818 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_10_site" pos="0.32 -0.259545 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_11_site" pos="0.32 -0.242273 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
+      <site name="raw_fin_12_site" pos="0.32 -0.225000 0.280" size="0.004" rgba="0.2 0.8 1 0.8"/>
     </body>
 
     <!-- Shallow-U asynchronous pallet line.  Each station has an independent
          dock and every inter-station movement is a real actuator-driven slide. -->
     <body name="station_s1_base_loading" pos="-0.48 0 0">
       <geom class="cell" name="s1_table" type="box" size="0.245 0.175 0.090"
-            pos="0 0 0.090" material="worktop_mat"/>
+            pos="0 0 0.090" material="station_s1_table_mat"/>
       <geom class="visual" name="s1_blue_apron" type="box" size="0.230 0.010 0.030"
             pos="0 -0.178 0.105" material="tool_blue"/>
       <geom class="visual" name="s1_dock_left" type="box" size="0.010 0.145 0.016"
             pos="-0.225 0 0.196" material="stainless"/>
       <geom class="visual" name="s1_dock_right" type="box" size="0.010 0.145 0.016"
             pos="0.225 0 0.196" material="stainless"/>
+      <geom class="visual" name="s1_station_sign" type="mesh" mesh="station_sign_mesh"
+            pos="0 -0.190 0.108" material="station_s1_sign_mat"/>
       <site name="s1_entry_site" pos="0 0 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
       <site name="s1_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
       <site name="s1_exit_site" pos="0.12 0.108 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
@@ -326,13 +359,15 @@
 
     <body name="station_s2a_dispensing" pos="-0.30 0.40 0">
       <geom class="cell" name="s2a_table" type="box" size="0.245 0.175 0.090"
-            pos="0 0 0.090" material="worktop_mat"/>
+            pos="0 0 0.090" material="station_s2a_table_mat"/>
       <geom class="visual" name="s2a_orange_apron" type="box" size="0.230 0.010 0.030"
             pos="0 0.178 0.105" material="safety_orange"/>
       <geom class="visual" name="s2a_dock_left" type="box" size="0.010 0.145 0.016"
             pos="-0.225 0 0.196" material="stainless"/>
       <geom class="visual" name="s2a_dock_right" type="box" size="0.010 0.145 0.016"
             pos="0.225 0 0.196" material="stainless"/>
+      <geom class="visual" name="s2a_station_sign" type="mesh" mesh="station_sign_mesh"
+            pos="0 0.190 0.108" euler="0 0 3.14159265359" material="station_s2a_sign_mat"/>
       <site name="s2a_entry_site" pos="-0.12 -0.108 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
       <site name="s2a_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
       <site name="s2a_exit_site" pos="0.18 0 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
@@ -341,13 +376,15 @@
 
     <body name="station_s2b_material_inspection" pos="0.30 0.40 0">
       <geom class="cell" name="s2b_table" type="box" size="0.245 0.175 0.090"
-            pos="0 0 0.090" material="worktop_mat"/>
+            pos="0 0 0.090" material="station_s2b_table_mat"/>
       <geom class="visual" name="s2b_green_apron" type="box" size="0.230 0.010 0.030"
             pos="0 0.178 0.105" material="indicator_green"/>
       <geom class="visual" name="s2b_light_left" type="capsule" size="0.008"
             fromto="-0.210 -0.145 0.225 -0.210 0.145 0.225" material="stainless"/>
       <geom class="visual" name="s2b_light_right" type="capsule" size="0.008"
             fromto="0.210 -0.145 0.225 0.210 0.145 0.225" material="stainless"/>
+      <geom class="visual" name="s2b_station_sign" type="mesh" mesh="station_sign_mesh"
+            pos="0 0.190 0.108" euler="0 0 3.14159265359" material="station_s2b_sign_mat"/>
       <site name="s2b_entry_site" pos="-0.18 0 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
       <site name="s2b_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
       <site name="s2b_exit_site" pos="0.12 -0.108 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
@@ -356,9 +393,11 @@
 
     <body name="station_s3_fin_assembly" pos="0.48 0 0">
       <geom class="cell" name="s3_table" type="box" size="0.245 0.175 0.090"
-            pos="0 0 0.090" material="worktop_mat"/>
+            pos="0 0 0.090" material="station_s3_table_mat"/>
       <geom class="visual" name="s3_purple_apron" type="box" size="0.230 0.010 0.030"
             pos="0 -0.178 0.105" rgba="0.46 0.22 0.70 1"/>
+      <geom class="visual" name="s3_station_sign" type="mesh" mesh="station_sign_mesh"
+            pos="0 -0.190 0.108" material="station_s3_sign_mat"/>
       <site name="s3_entry_site" pos="-0.12 0.108 0.209" size="0.006" rgba="0.2 0.8 1 0.75"/>
       <site name="s3_target_site" pos="0 0 0.209" size="0.008" rgba="0.2 0.9 0.5 0.8"/>
       <site name="s3_exit_site" pos="0.21 0 0.209" size="0.006" rgba="1 0.6 0.1 0.8"/>
@@ -430,16 +469,6 @@
       <site name="transfer_s3_rack_site" size="0.006" rgba="1 0.6 0.1 0.8"/>
     </body>
 
-    <!-- Fourth empty pallet: three pallets may be WIP, one remains spare. -->
-    <body name="async_spare_tray_04" pos="-0.90 -0.05 0.209" gravcomp="1">
-      <freejoint name="async_spare_tray_04_free"/>
-      <geom name="async_spare_tray_04_geom" type="box" size="0.230 0.160 0.009"
-            mass="3" material="tray_mat" contype="0" conaffinity="0"/>
-      <geom class="visual" name="async_spare_tray_04_locator" type="box"
-            size="0.190 0.120 0.006" pos="0 0 0.018" material="fixture_mat"/>
-      <site name="async_spare_tray_04_site" size="0.006" rgba="0.2 0.8 1 0.8"/>
-    </body>
-
     <!-- Table2-to-furnace transport is intentionally minimal: one continuous
          black belt and one hidden actuator carriage.  The former roller bed,
          orange pusher, lift and their frames were removed because they hid and
@@ -459,7 +488,7 @@
         <joint name="batch_outfeed_joint" type="slide" axis="0 1 0" range="0 0.690" damping="180"/>
         <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
         <body name="batch_output_carriage" gravcomp="1">
-          <joint name="batch_output_joint" type="slide" axis="1 0 0" range="0 1.120" damping="180"/>
+          <joint name="batch_output_joint" type="slide" axis="1 0 0" range="0 1.280" damping="180"/>
           <inertial pos="0 0 0" mass="1.0" diaginertia="0.01 0.01 0.01"/>
           <site name="batch_transfer_pose" size="0.006" rgba="1 0.55 0.1 0.8"/>
         </body>
@@ -497,49 +526,49 @@
     <!-- Low-polygon finished-product conveyor and enclosed delivery box.  All
          detail geoms are visual-only so the upgrade adds no contact workload. -->
     <body name="finished_output_conveyor" pos="1.00 -0.61 0.165" euler="0 0 -1.57079632679">
-      <geom class="visual" name="finished_output_belt" type="box" size="0.540 0.165 0.012"
+      <geom class="visual" name="finished_output_belt" type="box" size="0.540 0.285 0.012"
             material="black_rubber"/>
       <geom class="visual" name="finished_output_left_rail" type="box" size="0.540 0.012 0.035"
-            pos="0 -0.170 0.005" material="frame_steel"/>
+            pos="0 -0.300 0.005" material="frame_steel"/>
       <geom class="visual" name="finished_output_right_rail" type="box" size="0.540 0.012 0.035"
-            pos="0 0.170 0.005" material="frame_steel"/>
-      <geom class="visual" name="finished_output_front_roller" type="cylinder" size="0.024 0.160"
+            pos="0 0.300 0.005" material="frame_steel"/>
+      <geom class="visual" name="finished_output_front_roller" type="cylinder" size="0.024 0.280"
             pos="-0.500 0 0.010" quat="0.70710678 0.70710678 0 0" material="stainless"/>
-      <geom class="visual" name="finished_output_rear_roller" type="cylinder" size="0.024 0.160"
+      <geom class="visual" name="finished_output_rear_roller" type="cylinder" size="0.024 0.280"
             pos="0.500 0 0.010" quat="0.70710678 0.70710678 0 0" material="stainless"/>
       <geom class="visual" name="finished_output_motor" type="cylinder" size="0.045 0.060"
-            pos="0.485 0.215 -0.010" quat="0.70710678 0.70710678 0 0" material="motor_blue"/>
+            pos="0.485 0.365 -0.010" quat="0.70710678 0.70710678 0 0" material="motor_blue"/>
       <geom class="visual" name="finished_output_motor_guard" type="box" size="0.075 0.055 0.060"
-            pos="0.485 0.195 -0.010" material="frame_steel" rgba="0.22 0.26 0.30 0.55"/>
-      <geom class="visual" name="finished_output_support_1" type="box" size="0.035 0.155 0.085"
+            pos="0.485 0.345 -0.010" material="frame_steel" rgba="0.22 0.26 0.30 0.55"/>
+      <geom class="visual" name="finished_output_support_1" type="box" size="0.035 0.270 0.085"
             pos="-0.320 0 -0.095" material="dark_steel"/>
-      <geom class="visual" name="finished_output_support_2" type="box" size="0.035 0.155 0.085"
+      <geom class="visual" name="finished_output_support_2" type="box" size="0.035 0.270 0.085"
             pos="0.270 0 -0.095" material="dark_steel"/>
     </body>
 
     <body name="finished_output_box" pos="1.00 -1.375 0.165" euler="0 0 -1.57079632679">
-      <geom class="visual" name="finished_output_box_floor" type="box" size="0.315 0.195 0.018"
+      <geom class="visual" name="finished_output_box_floor" type="box" size="0.315 0.323 0.018"
             pos="0 0 -0.010" material="dark_steel"/>
-      <geom class="visual" name="finished_output_box_back" type="box" size="0.018 0.195 0.235"
+      <geom class="visual" name="finished_output_box_back" type="box" size="0.018 0.323 0.235"
             pos="0.315 0 0.225" material="frame_steel"/>
       <geom class="visual" name="finished_output_box_front_wall" type="box" size="0.315 0.018 0.235"
-            pos="0 -0.195 0.225" material="frame_steel"/>
+            pos="0 -0.305 0.225" material="frame_steel"/>
       <geom class="visual" name="finished_output_box_rear_wall" type="box" size="0.315 0.018 0.235"
-            pos="0 0.195 0.225" material="frame_steel"/>
-      <geom class="visual" name="finished_output_box_roof" type="box" size="0.315 0.195 0.018"
+            pos="0 0.305 0.225" material="frame_steel"/>
+      <geom class="visual" name="finished_output_box_roof" type="box" size="0.315 0.323 0.018"
             pos="0 0 0.460" material="brushed_aluminium"/>
       <geom class="visual" name="finished_output_window" type="box" size="0.165 0.006 0.105"
-            pos="0.045 -0.216 0.245" material="dark_glass"/>
-      <geom class="visual" name="finished_output_left_bezel" type="box" size="0.025 0.200 0.245"
+            pos="0.045 -0.326 0.245" material="dark_glass"/>
+      <geom class="visual" name="finished_output_left_bezel" type="box" size="0.025 0.328 0.245"
             pos="-0.315 0 0.225" material="safety_yellow"/>
       <geom class="visual" name="finished_output_sign" type="mesh" mesh="finished_output_sign_mesh"
-            pos="0.020 -0.217 0.395" material="finished_output_sign_mat"/>
+            pos="0.020 -0.327 0.395" material="finished_output_sign_mat"/>
       <geom class="visual" name="finished_output_status_panel" type="box" size="0.055 0.008 0.035"
-            pos="0.245 -0.217 0.390" material="dark_steel"/>
+            pos="0.245 -0.327 0.390" material="dark_steel"/>
       <geom class="visual" name="finished_output_ready_lamp" type="sphere" size="0.009"
-            pos="0.225 -0.228 0.396" material="indicator_green"/>
+            pos="0.225 -0.338 0.396" material="indicator_green"/>
       <geom class="visual" name="finished_output_busy_lamp" type="sphere" size="0.009"
-            pos="0.260 -0.228 0.396" material="indicator_red"/>
+            pos="0.260 -0.338 0.396" material="indicator_red"/>
       <site name="finished_output_inside_site" pos="0.035 0 0.044" size="0.008"
             rgba="0.1 0.9 0.4 0.75"/>
     </body>
@@ -548,11 +577,11 @@
            lower edge, above the outlet roof line before a tray may enter. -->
       <joint name="finished_output_gate_joint" type="slide" axis="0 0 1" range="0 0.500" damping="90"/>
       <inertial pos="0 0 0.215" mass="12" diaginertia="0.25 0.25 0.08"/>
-      <geom class="visual" name="finished_output_gate_panel" type="box" size="0.018 0.195 0.205"
+      <geom class="visual" name="finished_output_gate_panel" type="box" size="0.018 0.323 0.205"
             pos="0 0 0.215" material="safety_yellow"/>
-      <geom class="visual" name="finished_output_gate_window" type="box" size="0.020 0.125 0.075"
+      <geom class="visual" name="finished_output_gate_window" type="box" size="0.020 0.220 0.075"
             pos="-0.001 0 0.225" material="dark_glass"/>
-      <geom class="visual" name="finished_output_gate_bottom_edge" type="box" size="0.024 0.200 0.018"
+      <geom class="visual" name="finished_output_gate_bottom_edge" type="box" size="0.024 0.328 0.018"
             pos="0 0 0.015" material="black_rubber"/>
     </body>
 
@@ -1464,6 +1493,8 @@
             pos="0.318 -0.238 0.380" material="dark_steel"/>
       <geom class="visual" name="furnace_front_header" type="box" size="0.318 0.022 0.026"
             pos="0 -0.238 0.696" material="dark_steel"/>
+      <geom class="visual" name="furnace_process_sign" type="mesh" mesh="furnace_sign_mesh"
+            pos="0 -0.265 0.735" material="furnace_sign_mat"/>
       <geom class="visual" name="furnace_front_sill" type="box" size="0.318 0.022 0.022"
             pos="0 -0.238 0.082" material="dark_steel"/>
       <geom class="visual" name="furnace_left_refractory_jamb" type="box" size="0.018 0.045 0.275"
@@ -1634,7 +1665,8 @@
 
     <!-- Table3 / post-braze inspection stand. -->
     <body name="table3" pos="1.65 -0.55 0">
-      <geom class="cell" name="table3_top" size="0.25 0.20 0.06" pos="0 0 0.06" material="worktop_mat"/>
+      <geom class="cell" name="table3_top" size="0.25 0.20 0.06" pos="0 0 0.06"
+            material="station_s2b_table_mat"/>
       <geom class="visual" name="table3_front_apron" type="box" size="0.235 0.012 0.035"
             pos="0 -0.190 0.070" material="frame_steel"/>
       <geom class="visual" name="table3_left_apron" type="box" size="0.012 0.175 0.035"
@@ -1643,6 +1675,8 @@
             pos="0.240 0 0.070" material="frame_steel"/>
       <geom class="visual" name="table3_inspection_light" type="cylinder" size="0.018 0.008"
             pos="0.205 -0.205 0.105" quat="0.70710678 0.70710678 0 0" material="indicator_green"/>
+      <geom class="visual" name="table3_station_sign" type="mesh" mesh="station_sign_mesh"
+            pos="0 -0.205 0.075" material="post_inspection_sign_mat"/>
       <site name="post_inspection_pose" pos="0 0 0.13" size="0.007" rgba="0.2 0.9 0.4 0.8"/>
     </body>
   </worldbody>
@@ -1906,7 +1940,7 @@
     <position name="batch_rack_lock_actuator_0" joint="batch_rack_lock_joint_0" kp="900" kv="55" ctrlrange="0 0.025" forcerange="-120 120"/>
     <position name="batch_rack_lock_actuator_1" joint="batch_rack_lock_joint_1" kp="900" kv="55" ctrlrange="0 0.025" forcerange="-120 120"/>
     <position name="batch_rack_lock_actuator_2" joint="batch_rack_lock_joint_2" kp="900" kv="55" ctrlrange="0 0.025" forcerange="-120 120"/>
-    <position name="batch_output_actuator" joint="batch_output_joint" kp="2600" kv="220" ctrlrange="0 1.120" forcerange="-1400 1400"/>
+    <position name="batch_output_actuator" joint="batch_output_joint" kp="2600" kv="220" ctrlrange="0 1.280" forcerange="-1400 1400"/>
     <position name="finished_output_gate_actuator" joint="finished_output_gate_joint" kp="1800" kv="150"
               ctrlrange="0 0.500" forcerange="-600 600"/>
     <position name="batch_tray_02_index_actuator" joint="batch_tray_02_index_joint" kp="2600" kv="220" ctrlrange="0 0.600" forcerange="-1400 1400"/>

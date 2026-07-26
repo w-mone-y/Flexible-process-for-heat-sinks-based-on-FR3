@@ -77,10 +77,17 @@ class BrazingXmlContractTests(unittest.TestCase):
         fin_magazine = self.model.body("fin_magazine").pos
         self.assertLess(float(base_magazine[0]), 0.0)
         self.assertGreater(float(fin_magazine[0]), 0.0)
-        # The fin rack is shifted 40 mm toward Arm1 to shorten S3 travel while
-        # keeping a wide, unobstructed central tool-change aisle.
-        self.assertLessEqual(abs(float(base_magazine[1] - fin_magazine[1])), 0.04 + 1e-9)
+        # Both magazines remain in the same Arm1 pickup band.  The compact fin
+        # deck sits 100 mm ahead of the base deck while its front edge still
+        # retains a physical service aisle to S3.
+        self.assertAlmostEqual(float(fin_magazine[1] - base_magazine[1]), 0.10)
         self.assertGreater(float(fin_magazine[0] - base_magazine[0]), 0.85)
+        fin_top = self.model.geom("fin_magazine_top")
+        s3_table = self.model.geom("s3_table")
+        s3_body = self.model.body("station_s3_fin_assembly")
+        fin_front_edge = float(fin_top.pos[1] + fin_top.size[1])
+        s3_rear_edge = float(s3_body.pos[1] + s3_table.pos[1] - s3_table.size[1])
+        self.assertGreaterEqual(s3_rear_edge - fin_front_edge, 0.04 - 1e-9)
         self.assertEqual(
             mujoco.mj_name2id(
                 self.model,
@@ -95,7 +102,9 @@ class BrazingXmlContractTests(unittest.TestCase):
         self.assertTrue(all(float(site[0]) > 0.0 for site in active_sites))
         fin_y = [float(site[1]) for site in active_sites]
         spacing = [right - left for left, right in zip(fin_y, fin_y[1:])]
-        self.assertTrue(all(value >= 0.07 - 1e-9 for value in spacing))
+        # These twelve XML sites are the capacity pool.  Order activation
+        # re-centres the used subset with the larger A/B/C runtime spacing.
+        self.assertTrue(all(value >= 0.015 - 1e-9 for value in spacing))
         self.assertGreater(
             float(self.model.geom("heatsink_base_plate_geom").size[0]),
             float(self.model.geom("heatsink_base_plate_geom").size[1]),
@@ -249,6 +258,70 @@ class BrazingXmlContractTests(unittest.TestCase):
             int(dispenser_ring.bodyid[0]),
             int(self.model.body("arm2_dual_brazing_dispenser_tool").id),
         )
+
+    def test_process_stations_use_text_and_subtle_colour_without_extra_silhouettes(
+        self,
+    ) -> None:
+        """Labels and low-saturation worktops identify the restored simple stations."""
+
+        import mujoco
+
+        for name in (
+            "s1_station_sign",
+            "s2a_station_sign",
+            "s2b_station_sign",
+            "s3_station_sign",
+            "furnace_process_sign",
+            "table3_station_sign",
+            "finished_output_sign",
+        ):
+            geom = self.model.geom(name)
+            self.assertEqual(int(geom.contype[0]), 0, name)
+            self.assertEqual(int(geom.conaffinity[0]), 0, name)
+            self.assertEqual(int(geom.group[0]), 1, name)
+
+        table_materials = {
+            int(self.model.geom("s1_table").matid[0]),
+            int(self.model.geom("s2a_table").matid[0]),
+            int(self.model.geom("s2b_table").matid[0]),
+            int(self.model.geom("s3_table").matid[0]),
+        }
+        self.assertEqual(len(table_materials), 4)
+
+        removed_details = (
+            "s1_vacuum_reservoir",
+            "s1_vacuum_manifold",
+            "s2a_feed_tank_left",
+            "s2a_metering_pump",
+            "s2b_scan_frame_header",
+            "s2b_reference_camera",
+            "s3_clamp_pod_left",
+            "s3_fin_profile_centre",
+            "table3_vision_frame_header",
+            "table3_quality_panel",
+            "transfer_12_belt",
+            "transfer_2a2b_belt",
+            "transfer_23_belt",
+            "transfer_3r_belt",
+        )
+        for name in removed_details:
+            self.assertEqual(
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name),
+                -1,
+                name,
+            )
+        self.assertEqual(
+            mujoco.mj_name2id(
+                self.model,
+                mujoco.mjtObj.mjOBJ_BODY,
+                "async_spare_tray_04",
+            ),
+            -1,
+        )
+
+        # Six labels are the only new scene geometry retained from the richer
+        # station pass, keeping the standard viewer near its original budget.
+        self.assertLessEqual(self.model.ngeom, 910)
 
     def test_visual_quality_profile_is_interactive_gpu_friendly(self) -> None:
         quality = self.model.vis.quality
@@ -430,6 +503,27 @@ class BrazingXmlContractTests(unittest.TestCase):
         self.model.body("finished_output_box")
         self.model.geom("finished_output_sign")
         self.model.site("finished_output_inside_site")
+        tray_geom = self.model.geom("batch_tray_01_geom")
+        tray_cross_lane_half_width = float(tray_geom.size[0])
+        tray_travel_half_length = float(tray_geom.size[1])
+        required_clear_half_width = tray_cross_lane_half_width + 0.030
+        output_belt = self.model.geom("finished_output_belt")
+        output_side_wall = self.model.geom("finished_output_box_front_wall")
+        output_gate_panel = self.model.geom("finished_output_gate_panel")
+        box_inner_half_width = abs(float(output_side_wall.pos[1])) - float(output_side_wall.size[1])
+        self.assertGreater(float(output_belt.size[1]), required_clear_half_width)
+        self.assertGreater(box_inner_half_width, required_clear_half_width)
+        self.assertGreater(float(output_gate_panel.size[1]), required_clear_half_width)
+
+        # At maximum delivery stroke the complete tray, not merely its centre,
+        # must be beyond the gate plane with at least 30 mm longitudinal room.
+        output_joint = self.model.joint("batch_output_joint")
+        output_actuator = self.model.actuator("batch_output_actuator")
+        delivery_stroke = float(output_joint.range[1])
+        tray_rear_edge_y = -delivery_stroke + tray_travel_half_length
+        self.assertLess(tray_rear_edge_y, float(output_gate[1]) - 0.030)
+        self.assertAlmostEqual(float(output_actuator.ctrlrange[1]), delivery_stroke)
+
         gate = self.model.joint("finished_output_gate_joint")
         gate_actuator = self.model.actuator("finished_output_gate_actuator")
         self.model.sensor("finished_output_gate_position_sensor")
