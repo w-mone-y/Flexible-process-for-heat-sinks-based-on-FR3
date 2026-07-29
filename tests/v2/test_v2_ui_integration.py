@@ -1,0 +1,241 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from brazing_sim.dual_line import DualLineRuntime
+from brazing_sim.dual_line.application import V2BrazingApplication, V2ControlSurface
+from brazing_sim.dual_line.cli import parse_args
+from brazing_sim.dual_line.presentation import V2StatePresenter
+from brazing_sim.api import validate_http_command
+from brazing_sim.ui import line_ui_profile
+
+
+def test_v2_viewer_starts_idle_and_only_explicit_headless_orders_are_submitted() -> None:
+    viewer = parse_args([])
+    explicit_headless = parse_args(["--headless", "--orders", "A,B"])
+
+    assert viewer.order_presets == ()
+    assert explicit_headless.order_presets == ("A", "B")
+
+
+def test_v2_reuses_the_full_v1_console_with_dual_branch_controls() -> None:
+    profile = line_ui_profile("V2_DUAL_INSTALL")
+
+    assert profile.tab_titles == (
+        "运行总览",
+        "订单规划",
+        "任务图 / 调度",
+        "异步流水工位",
+        "实时甘特图",
+        "产品工程图规划",
+        "资源与区域",
+        "故障与恢复规划",
+        "批次与物流",
+        "指标与实验",
+    )
+    assert [action.segment for action in profile.segment_actions] == [
+        "v2_base_loading",
+        "v2_dispensing",
+        "v2_material_inspection",
+        "v2_install_a",
+        "v2_install_b",
+        "v2_parallel_install",
+        "v2_merge_inspection",
+        "v2_furnace_batch",
+        "v2_post_braze_delivery",
+    ]
+    assert profile.station_titles["S3A_ARM1_INSTALL"] == "S3A Arm1 翅片安装"
+    assert profile.station_titles["S3B_ARM3_INSTALL"] == "S3B Arm3 翅片安装"
+
+
+def test_v2_state_presenter_matches_the_shared_ui_contract_without_fake_capabilities() -> None:
+    runtime = DualLineRuntime(fast=True)
+    presenter = V2StatePresenter()
+
+    state = presenter.present(runtime.snapshot(), simulation_speed=1.0, actual_rtf=0.0)
+
+    assert state["line_profile"] == "V2_DUAL_INSTALL"
+    assert state["status"] == "idle"
+    assert state["stage"] == "IDLE"
+    assert state["orders"] == []
+    assert set(state["arms"]) == {"arm1", "arm2", "arm3"}
+    assert {
+        "S1_BASE_LOADING",
+        "S2A_DISPENSING",
+        "S2B_MATERIAL_INSPECTION",
+        "S3A_ARM1_INSTALL",
+        "S3B_ARM3_INSTALL",
+        "S4_PRE_BRAZE_INSPECTION",
+    }.issubset(state["workstations"])
+    assert not any(state["ui_capabilities"]["segments"].values())
+    assert not state["ui_capabilities"]["custom_orders"]
+    assert not state["ui_capabilities"]["fault_injection"]
+    assert state["physical_execution_complete"] is False
+
+
+def test_v2_task_graph_uses_chinese_micro_tasks_and_updates_each_fin_immediately() -> None:
+    runtime = DualLineRuntime(fast=True)
+    presenter = V2StatePresenter()
+    runtime.submit_order("B", order_id="TASK_GRAPH_B")
+
+    for _ in range(2_000):
+        runtime.tick(0.05)
+        unit = runtime.units["TASK_GRAPH_B_UNIT_01"]
+        if unit.fins_installed >= 1:
+            break
+    else:
+        raise AssertionError("first fin was not installed")
+
+    state = presenter.present(
+        runtime.snapshot(),
+        simulation_speed=1.0,
+        actual_rtf=1.0,
+    )
+    fin_tasks = [task for task in state["tasks"] if task["task_type"] == "INSTALL_FIN"]
+
+    assert fin_tasks[0]["display_name_zh"] == "安装第 1 / 4 片翅片"
+    assert fin_tasks[0]["status"] == "SUCCEEDED"
+    assert fin_tasks[0]["status_zh"] == "已完成"
+    assert fin_tasks[1]["status"] in {"READY", "RUNNING"}
+    assert state["resources_v2"]["ARM2"]["current_tool"] == "固定双喷嘴焊料枪"
+
+
+def test_v2_task_graph_does_not_claim_arm3_before_install_branch_assignment() -> None:
+    runtime = DualLineRuntime(fast=True)
+    presenter = V2StatePresenter()
+    runtime.submit_order("A", order_id="PENDING_BRANCH")
+
+    state = presenter.present(
+        runtime.snapshot(),
+        simulation_speed=1.0,
+        actual_rtf=1.0,
+    )
+    fin_task = next(task for task in state["tasks"] if task["task_type"] == "INSTALL_FIN")
+
+    assert fin_task["station_id"] == "INSTALL_BRANCH_PENDING"
+    assert fin_task["eligible_resources"] == ["ARM1_OR_ARM3"]
+    assert fin_task["assigned_resource"] is None
+    assert "等待支路分配" in fin_task["display_detail_zh"]
+
+
+def test_v2_control_surface_drives_orders_speed_pause_continue_and_reset() -> None:
+    runtime = DualLineRuntime(fast=True)
+    controls = V2ControlSurface(runtime)
+
+    controls.process(
+        {
+            "type": "order_insert",
+            "order_id": "UI_V2_A",
+            "preset": "A",
+            "quantity": 1,
+            "priority": 20,
+        }
+    )
+    assert list(runtime.orders) == ["UI_V2_A"]
+
+    for _ in range(6):
+        controls.process({"type": "speed", "action": "accelerate"})
+    assert controls.simulation_speed == 32.0
+    controls.process({"type": "stop"})
+    assert runtime.paused
+    controls.process({"type": "continue"})
+    assert not runtime.paused
+
+    with pytest.raises(RuntimeError, match="尚未接通"):
+        controls.process({"type": "segment", "segment": "v2_install_a"})
+
+    controls.process({"type": "reset"})
+    assert runtime.orders == {}
+    assert controls.simulation_speed == 1.0
+
+
+def test_v2_control_surface_preserves_urgent_and_iso_due_time_semantics() -> None:
+    runtime = DualLineRuntime(fast=True)
+    controls = V2ControlSurface(runtime)
+    due_time = datetime.now().astimezone() + timedelta(minutes=30)
+
+    controls.process(
+        {
+            "type": "order_insert",
+            "order_id": "UI_V2_URGENT",
+            "preset": "C",
+            "quantity": 1,
+            "priority": 25,
+            "due_time": due_time.isoformat(),
+            "urgent": True,
+        }
+    )
+
+    unit = runtime.units["UI_V2_URGENT_UNIT_01"]
+    order = runtime.snapshot()["orders"][0]
+    presented = V2StatePresenter().present(
+        runtime.snapshot(),
+        simulation_speed=1.0,
+        actual_rtf=1.0,
+    )
+    assert unit.urgent
+    assert unit.due_at == pytest.approx(1_800.0, abs=2.0)
+    assert order["urgent"] is True
+    assert presented["orders"][0]["urgent"] is True
+
+
+def test_v2_presenter_exposes_install_selection_candidates_and_explanation() -> None:
+    runtime = DualLineRuntime(fast=True)
+    presenter = V2StatePresenter()
+    runtime.submit_order("A", order_id="EXPLAIN_BRANCH")
+
+    for _ in range(400):
+        runtime.tick(0.05)
+        if any(event["type"] == "INSTALL_ASSIGNED" for event in runtime.events):
+            break
+
+    state = presenter.present(
+        runtime.snapshot(),
+        simulation_speed=1.0,
+        actual_rtf=1.0,
+    )
+    scheduler = state["scheduler"]
+    assert scheduler["selected"]
+    assert {item["resource_id"] for item in scheduler["candidates"]} == {
+        "ARM1_A",
+        "ARM3_B",
+    }
+    assert scheduler["selected"][0]["explanation_zh"]
+
+
+def test_shared_http_api_accepts_v2_segment_names_for_the_v2_backend() -> None:
+    for segment in (
+        "v2_base_loading",
+        "v2_dispensing",
+        "v2_material_inspection",
+        "v2_install_a",
+        "v2_install_b",
+        "v2_parallel_install",
+        "v2_merge_inspection",
+        "v2_furnace_batch",
+        "v2_post_braze_delivery",
+    ):
+        assert validate_http_command("/segment", {"segment": segment}) == {
+            "type": "segment",
+            "segment": segment,
+        }
+
+
+def test_v2_application_publishes_real_carrier_transport_to_the_shared_ui() -> None:
+    args = parse_args(["--headless", "--orders", "A", "--fast"])
+    application = V2BrazingApplication(args)
+    try:
+        application.submit_cli_orders()
+        application.advance_frame()
+        state = application.publish(viewer_running=False)
+
+        assert state["line_profile"] == "V2_DUAL_INSTALL"
+        assert state["transfers"]["V2_TRAY_01"]["moving"]
+        assert state["transfers"]["V2_TRAY_01"]["target"] == "S1"
+        assert state["async_line"]["physical_tray_owners"]["V2_TRAY_01"] == "EMPTY_BUFFER"
+        assert state["tray_routes"]["V2_TRAY_01"]["physical_owner"] == "EMPTY_BUFFER"
+        assert state["ui_capabilities"]["orders"]
+    finally:
+        application.close()

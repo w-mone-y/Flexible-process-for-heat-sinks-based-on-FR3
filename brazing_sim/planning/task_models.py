@@ -286,7 +286,11 @@ def task_detail_label_zh(task: Mapping[str, Any]) -> str:
         detail = "安全恢复任务"
     if task.get("recovery_for") and "恢复" not in detail:
         detail = f"恢复任务 · {detail or unit}"
-    elif detail and unit not in {"整炉批次", "系统恢复"}:
+    elif (
+        detail
+        and unit not in {"整炉批次", "系统恢复"}
+        and task_type not in {TaskType.BATCH_READY, TaskType.RUN_FURNACE}
+    ):
         detail = f"{unit} · {detail}"
     elif not detail:
         detail = unit

@@ -9,7 +9,7 @@ from brazing_sim.config import create_product_state
 from brazing_sim.conveyor import ConveyorPhase, ConveyorTaskActor
 from brazing_sim.domain import Actor, FixtureStatus, TaskSpec, TaskType
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _ready_scene():

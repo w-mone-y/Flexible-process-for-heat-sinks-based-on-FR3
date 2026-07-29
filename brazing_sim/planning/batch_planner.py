@@ -67,6 +67,15 @@ def are_units_batch_compatible(units: Iterable[ProcessPlan]) -> bool:
         return False
     if sum(plan.quantity for plan in plans) > 3:
         return False
+    return are_process_plans_compatible(plans)
+
+
+def are_process_plans_compatible(units: Iterable[ProcessPlan]) -> bool:
+    """Check recipe/material/height without applying an order quantity limit."""
+
+    plans = tuple(units)
+    if not plans:
+        return False
     reference = plans[0]
     reference_recipe = reference.recipe
     reference_material = getattr(reference.product, "material_system", "demo_brazing_material")
@@ -90,5 +99,6 @@ __all__ = [
     "BatchCandidate",
     "BatchPlanner",
     "BatchReservation",
+    "are_process_plans_compatible",
     "are_units_batch_compatible",
 ]

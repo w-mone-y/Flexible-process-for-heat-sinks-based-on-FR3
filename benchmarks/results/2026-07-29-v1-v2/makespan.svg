@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520">
+  <rect width="960" height="520" rx="24" fill="#0f172a"/>
+  <text x="48" y="54" fill="#f8fafc" font-family="Arial,sans-serif" font-size="28" font-weight="700">完整运动仿真 makespan（越低越好）</text>
+  <text x="48" y="84" fill="#94a3b8" font-family="Arial,sans-serif" font-size="15">同机 headless 实测 · 单位：仿真秒</text>
+  <line x1="220" y1="116" x2="220" y2="454" stroke="#475569"/>
+  <g font-family="Arial,sans-serif" font-size="17" fill="#e2e8f0">
+    <text x="48" y="157">单件 A</text>
+    <text x="48" y="267">三件 A</text>
+    <text x="48" y="377">A/B/C</text>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="14" fill="#94a3b8">
+    <text x="48" y="184">V2 / V1</text>
+    <text x="48" y="294">V2 / V1</text>
+    <text x="48" y="404">V2 / V1</text>
+  </g>
+  <g>
+    <rect x="220" y="128" width="165" height="28" rx="7" fill="#22c55e"/>
+    <rect x="220" y="164" width="206" height="28" rx="7" fill="#64748b"/>
+    <rect x="220" y="238" width="287" height="28" rx="7" fill="#22c55e"/>
+    <rect x="220" y="274" width="668" height="28" rx="7" fill="#64748b"/>
+    <rect x="220" y="348" width="276" height="28" rx="7" fill="#22c55e"/>
+    <rect x="220" y="384" width="450" height="28" rx="7" fill="#64748b"/>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="15" font-weight="700" fill="#f8fafc">
+    <text x="395" y="148">V2 206.30 s</text>
+    <text x="436" y="184">V1 256.97 s</text>
+    <text x="517" y="258">V2 359.25 s</text>
+    <text x="800" y="294">V1 835.13 s</text>
+    <text x="506" y="368">V2 345.25 s</text>
+    <text x="680" y="404">V1 562.44 s</text>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="16" fill="#86efac">
+    <text x="220" y="224">↓ 19.7%</text>
+    <text x="520" y="334">↓ 57.0%</text>
+    <text x="506" y="444">↓ 38.6%</text>
+  </g>
+</svg>

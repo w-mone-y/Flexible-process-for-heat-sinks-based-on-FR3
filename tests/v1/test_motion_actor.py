@@ -8,7 +8,7 @@ import numpy as np
 from brazing_sim.config import create_product_state
 from brazing_sim.motion import PolylineTrajectory, Pose
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def quaternion_distance_rad(left: np.ndarray, right: np.ndarray) -> float:

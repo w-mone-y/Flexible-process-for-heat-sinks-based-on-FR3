@@ -13,7 +13,7 @@ from brazing_sim.manufacturing_config import (
     load_scheduler_config,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_v2_configuration_and_multi_order_files_load() -> None:

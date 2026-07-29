@@ -7,7 +7,7 @@ import numpy as np
 
 from brazing_line_cinematic import CINEMATIC_XML, cinematic_args
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_cinematic_entry_preserves_explicit_xml_override() -> None:

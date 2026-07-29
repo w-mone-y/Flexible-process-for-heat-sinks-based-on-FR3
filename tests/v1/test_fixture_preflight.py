@@ -7,7 +7,7 @@ import numpy as np
 from brazing_sim.config import FIXTURE_CONFIG, create_product_state, make_order_spec
 from brazing_sim.domain import Actor, PressState, TaskSpec, TaskStatus, TaskType
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_preflight_accepts_all_flexible_fixture_presets() -> None:

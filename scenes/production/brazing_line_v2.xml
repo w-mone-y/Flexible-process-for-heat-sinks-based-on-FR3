@@ -1,0 +1,1091 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="dual_install_brazing_line_v2">
+  <!--
+    Independent V2 scene. V1 remains in brazing_line.xml.
+    Material flow is left-to-right (+X), with two fin-installation branches,
+    one guarded merge and a front-load/rear-unload three-layer CAB furnace.
+  -->
+  <compiler angle="radian" autolimits="true" assetdir="../.." strippath="false"/>
+  <option timestep="0.002" integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <default>
+    <geom friction="1 0.01 0.001" solref="0.008 1" solimp="0.95 0.99 0.001"/>
+    <default class="structure">
+      <geom type="box" contype="1" conaffinity="1" rgba="0.34 0.38 0.43 1"/>
+    </default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" density="0" group="1"/>
+      <site group="1"/>
+    </default>
+    <default class="tray">
+      <!-- Keep the tray bottom 1 mm above a 210 mm station worktop.  Exact
+           bottom/top coincidence caused view-dependent colour flicker. -->
+      <geom type="box" size="0.20 0.14 0.014" mass="5"
+            contype="0" conaffinity="0" friction="1.2 0.01 0.001"/>
+    </default>
+  </default>
+
+  <asset>
+    <model name="fr3_asset" file="../../assets/robots/fr3/fr3.xml"/>
+    <model name="v2_product_tray_asset" file="../../assets/workcells/v2_product_tray.xml"/>
+    <model name="v2_fin_supply_asset" file="../../assets/workcells/v2_fin_supply.xml"/>
+    <texture name="v2_floor_tex" type="2d" builtin="checker" width="128" height="128"
+             rgb1="0.14 0.17 0.20" rgb2="0.10 0.12 0.15"/>
+    <texture name="v2_s1_sign_tex" type="2d"
+             file="assets/signs/station_s1_sign.png"/>
+    <texture name="v2_s2a_sign_tex" type="2d"
+             file="assets/signs/station_s2a_sign.png"/>
+    <texture name="v2_s2b_sign_tex" type="2d"
+             file="assets/signs/station_s2b_sign.png"/>
+    <texture name="v2_s3_sign_tex" type="2d"
+             file="assets/signs/station_s3_sign.png"/>
+    <texture name="v2_furnace_sign_tex" type="2d"
+             file="assets/signs/furnace_sign.png"/>
+    <texture name="v2_post_sign_tex" type="2d"
+             file="assets/signs/post_inspection_sign.png"/>
+    <texture name="v2_output_sign_tex" type="2d"
+             file="assets/signs/finished_output_sign.png"/>
+    <mesh name="v2_station_sign_mesh"
+          file="assets/meshes/finished_output_sign.obj"
+          scale="0.108 0.004 0.032"/>
+    <mesh name="v2_furnace_sign_mesh"
+          file="assets/meshes/finished_output_sign.obj"
+          scale="0.135 0.004 0.034"/>
+    <mesh name="v2_output_sign_mesh"
+          file="assets/meshes/finished_output_sign.obj"
+          scale="0.175 0.004 0.050"/>
+    <material name="v2_floor_mat" texture="v2_floor_tex" texuniform="true"
+              texrepeat="10 5" reflectance="0.04"/>
+    <material name="v2_s1_mat" rgba="0.43 0.61 0.80 1"/>
+    <material name="v2_s2_mat" rgba="0.81 0.60 0.37 1"/>
+    <material name="v2_inspect_mat" rgba="0.43 0.72 0.56 1"/>
+    <material name="v2_install_a_mat" rgba="0.67 0.53 0.79 1"/>
+    <material name="v2_install_b_mat" rgba="0.48 0.66 0.82 1"/>
+    <material name="v2_belt_mat" rgba="0.035 0.045 0.055 1"/>
+    <material name="v2_frame_mat" rgba="0.22 0.25 0.29 1"/>
+    <material name="v2_tray_mat" rgba="0.08 0.23 0.38 1"/>
+    <material name="v2_furnace_mat" rgba="0.22 0.24 0.27 1"/>
+    <material name="v2_hot_mat" rgba="0.92 0.25 0.05 0.45" emission="0.35"/>
+    <material name="v2_safety_mat" rgba="0.95 0.66 0.06 1"/>
+    <material name="v2_tool_mat" rgba="0.10 0.36 0.74 1"/>
+    <material name="v2_camera_mat" rgba="0.04 0.08 0.11 1"/>
+    <material name="v2_s1_sign_mat" texture="v2_s1_sign_tex"
+              rgba="1 1 1 1" emission="0.10"/>
+    <material name="v2_s2a_sign_mat" texture="v2_s2a_sign_tex"
+              rgba="1 1 1 1" emission="0.10"/>
+    <material name="v2_s2b_sign_mat" texture="v2_s2b_sign_tex"
+              rgba="1 1 1 1" emission="0.10"/>
+    <material name="v2_s3_sign_mat" texture="v2_s3_sign_tex"
+              rgba="1 1 1 1" emission="0.10"/>
+    <material name="v2_furnace_sign_mat" texture="v2_furnace_sign_tex"
+              rgba="1 1 1 1" emission="0.12"/>
+    <material name="v2_post_sign_mat" texture="v2_post_sign_tex"
+              rgba="1 1 1 1" emission="0.10"/>
+    <material name="v2_output_sign_mat" texture="v2_output_sign_tex"
+              rgba="1 1 1 1" emission="0.18"/>
+  </asset>
+
+  <visual>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.75 0.75 0.75"/>
+    <quality shadowsize="0" offsamples="2" numslices="12" numstacks="8"/>
+    <global azimuth="135" elevation="-28"/>
+  </visual>
+
+  <worldbody>
+    <light pos="1.8 0 3.0" dir="0 0 -1" directional="true" castshadow="false"/>
+    <geom name="v2_floor" type="plane" size="6 2 0.05" material="v2_floor_mat"/>
+
+    <!-- Robot layout: Arm1 owns upper installation branch, Arm2 dispensing,
+         Arm3 lower installation branch plus shared inspections. -->
+    <frame pos="-0.05 0.80 0" euler="0 0 -1.57079632679">
+      <attach model="fr3_asset" body="base" prefix="arm1_"/>
+    </frame>
+    <frame pos="-0.35 -0.60 0" euler="0 0 1.57079632679">
+      <attach model="fr3_asset" body="base" prefix="arm2_"/>
+    </frame>
+    <frame pos="0.97 -0.49 0" euler="0 0 2.35619449019">
+      <attach model="fr3_asset" body="base" prefix="arm3_"/>
+    </frame>
+    <body name="arm1_target" mocap="true"
+          pos="-0.050000000 0.492980430 0.590269558"
+          quat="0 0.382867352 -0.923803329 0">
+      <geom class="visual" name="v2_arm1_target_marker" type="sphere"
+            size="0.012" rgba="0.95 0.25 0.20 0"/>
+    </body>
+    <body name="arm2_target" mocap="true"
+          pos="-0.350000000 -0.292980430 0.590269558"
+          quat="0 0.923803329 0.382867352 0">
+      <geom class="visual" name="v2_arm2_target_marker" type="sphere"
+            size="0.012" rgba="0.95 0.55 0.10 0"/>
+    </body>
+    <body name="arm3_target" mocap="true"
+          pos="0.752904380 -0.272904380 0.590269558"
+          quat="0 0.706965995 0.707247539 0">
+      <geom class="visual" name="v2_arm3_target_marker" type="sphere"
+            size="0.012" rgba="0.20 0.90 0.40 0"/>
+    </body>
+
+    <!-- Arm1 retains the V1 physical quick-change arrangement.  Both tools
+         start on a rack outside the A-branch sweep and are never teleported. -->
+    <body name="v2_arm1_tool_rack" pos="-0.50 1.10 0">
+      <geom class="structure" name="v2_arm1_tool_rack_base"
+            size="0.075 0.14 0.025" pos="0 0 0.025"/>
+      <geom class="structure" name="v2_arm1_tool_rack_column"
+            size="0.030 0.025 0.145" pos="0 0.095 0.170"/>
+      <geom class="structure" name="v2_arm1_tool_rack_beam"
+            size="0.045 0.12 0.020" pos="0 0 0.315"/>
+      <geom class="visual" name="v2_arm1_rack_front_trim" type="box"
+            size="0.078 0.010 0.006" pos="0 -0.132 0.052"
+            material="v2_safety_mat"/>
+      <geom class="visual" name="v2_arm1_rack_left_brace" type="capsule"
+            size="0.010" fromto="-0.052 -0.095 0.052 -0.020 0.090 0.285"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm1_rack_right_brace" type="capsule"
+            size="0.010" fromto="0.052 -0.095 0.052 0.020 0.090 0.285"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm1_rack_gripper_cradle" type="cylinder"
+            size="0.035 0.006" pos="0 -0.040 0.296"
+            material="v2_belt_mat"/>
+      <geom class="visual" name="v2_arm1_rack_suction_cradle" type="cylinder"
+            size="0.035 0.006" pos="0 0.040 0.296"
+            material="v2_belt_mat"/>
+      <site name="v2_arm1_parallel_gripper_rack_site"
+            pos="0 -0.040 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_arm1_suction_tool_rack_site"
+            pos="0 0.040 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+    </body>
+
+    <body name="v2_arm1_parallel_gripper" pos="-0.50 1.06 0.295"
+          quat="0 1 0 0" gravcomp="1">
+      <freejoint name="v2_arm1_parallel_gripper_free"/>
+      <inertial pos="0 0 0.025" mass="0.28"
+                diaginertia="0.00045 0.00042 0.00018"/>
+      <geom name="v2_arm1_gripper_palm" type="box"
+            size="0.025 0.035 0.018" pos="0 0 0.018"
+            material="v2_frame_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm1_gripper_mount_flange"
+            type="cylinder" size="0.028 0.006" pos="0 0 -0.003"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm1_gripper_palm_cap" type="box"
+            size="0.021 0.031 0.006" pos="0 0 0.039"
+            material="v2_tool_mat"/>
+      <body name="v2_arm1_gripper_left_body" pos="0 0.026 0.058">
+        <joint name="v2_arm1_left_finger_joint" type="slide"
+               axis="0 -1 0" range="0 0.0202" damping="6"/>
+        <geom name="v2_arm1_gripper_left" type="box"
+              size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+              contype="4" conaffinity="2"/>
+        <geom class="visual" name="v2_arm1_gripper_left_pad" type="box"
+              size="0.0048 0.0012 0.034" pos="0 -0.0038 0"
+              material="v2_belt_mat"/>
+      </body>
+      <body name="v2_arm1_gripper_right_body" pos="0 -0.026 0.058">
+        <joint name="v2_arm1_right_finger_joint" type="slide"
+               axis="0 1 0" range="0 0.0202" damping="6"/>
+        <geom name="v2_arm1_gripper_right" type="box"
+              size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+              contype="4" conaffinity="2"/>
+        <geom class="visual" name="v2_arm1_gripper_right_pad" type="box"
+              size="0.0048 0.0012 0.034" pos="0 0.0038 0"
+              material="v2_belt_mat"/>
+      </body>
+      <site name="v2_arm1_parallel_gripper_mount_site"
+            pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
+      <site name="v2_arm1_grasp_tcp"
+            pos="0 0 0.090" size="0.005" rgba="1 0.75 0.1 1"/>
+    </body>
+
+    <body name="v2_arm1_suction_tool" pos="-0.50 1.14 0.295"
+          quat="0 1 0 0" gravcomp="1">
+      <freejoint name="v2_arm1_suction_tool_free"/>
+      <inertial pos="0 0 0.035" mass="0.20"
+                diaginertia="0.00028 0.00026 0.00010"/>
+      <geom name="v2_arm1_suction_adapter" type="cylinder"
+            size="0.025 0.010" pos="0 0 0.010"
+            material="v2_frame_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm1_suction_mount_ring" type="cylinder"
+            size="0.029 0.004" pos="0 0 -0.002" material="v2_frame_mat"/>
+      <geom name="v2_arm1_suction_bellows" type="cylinder"
+            size="0.020 0.022" pos="0 0 0.052"
+            material="v2_belt_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm1_suction_bellows_ring_1"
+            type="cylinder" size="0.022 0.002" pos="0 0 0.036"
+            material="v2_belt_mat"/>
+      <geom class="visual" name="v2_arm1_suction_bellows_ring_2"
+            type="cylinder" size="0.022 0.002" pos="0 0 0.047"
+            material="v2_belt_mat"/>
+      <geom class="visual" name="v2_arm1_suction_bellows_ring_3"
+            type="cylinder" size="0.022 0.002" pos="0 0 0.058"
+            material="v2_belt_mat"/>
+      <geom class="visual" name="v2_arm1_suction_bellows_ring_4"
+            type="cylinder" size="0.022 0.002" pos="0 0 0.069"
+            material="v2_belt_mat"/>
+      <geom name="v2_arm1_suction_pad" type="cylinder"
+            size="0.028 0.004" pos="0 0 0.086"
+            material="v2_belt_mat" contype="4" conaffinity="2"/>
+      <site name="v2_arm1_suction_tool_mount_site"
+            pos="0 0 0" size="0.004" rgba="1 0.55 0.1 1"/>
+      <site name="v2_arm1_suction_tcp"
+            pos="0 0 0.090" size="0.005" rgba="0.2 0.9 0.95 0.8"/>
+    </body>
+
+    <!-- V1-style base-plate pickup fixture.  The stock plate is the physical
+         proxy below; this frame remains visible before, during and after an
+         order so S1 has an unambiguous material source. -->
+    <body name="v2_base_supply_fixture" pos="-0.55 0.75 0">
+      <geom class="visual" name="v2_base_supply_deck" type="box"
+            size="0.215 0.140 0.015" pos="0 0 0.190" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_base_supply_left_locator" type="box"
+            size="0.008 0.125 0.018" pos="-0.202 0 0.213" material="v2_safety_mat"/>
+      <geom class="visual" name="v2_base_supply_right_locator" type="box"
+            size="0.008 0.125 0.018" pos="0.202 0 0.213" material="v2_safety_mat"/>
+      <geom class="visual" name="v2_base_supply_backstop" type="box"
+            size="0.215 0.008 0.025" pos="0 0.132 0.220" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_base_supply_front_marker" type="box"
+            size="0.080 0.006 0.010" pos="0 -0.137 0.211" material="v2_s1_mat"/>
+      <site name="v2_base_supply_pickup_site" pos="0 0 0.222"
+            size="0.006" rgba="0.2 0.9 0.95 0.8"/>
+    </body>
+
+    <!-- Reusable, physically constrained in-flight workpieces.  The tray
+         payload pool remains the settled product representation; these free
+         bodies make pickup, carry and release visible and verifiable before
+         a logical task is allowed to complete. -->
+    <body name="v2_arm1_raw_base_proxy" pos="-0.55 0.75 0.214"
+          gravcomp="1">
+      <freejoint name="v2_arm1_raw_base_proxy_free"/>
+      <inertial pos="0 0 0" mass="0.24"
+                diaginertia="0.0012 0.0028 0.0038"/>
+      <geom name="v2_arm1_raw_base_proxy_geom" type="box"
+            size="0.180 0.110 0.004" rgba="0.72 0.75 0.79 1"
+            contype="0" conaffinity="0"/>
+    </body>
+    <body name="v2_arm1_raw_fin_proxy" pos="0.45 0.955 0.280"
+          gravcomp="1">
+      <freejoint name="v2_arm1_raw_fin_proxy_free"/>
+      <inertial pos="0 0 0" mass="0.06"
+                diaginertia="0.00002 0.00047 0.00045"/>
+      <geom name="v2_arm1_raw_fin_proxy_geom" type="box"
+            size="0.150 0.001 0.030" rgba="0.73 0.76 0.80 1"
+            contype="0" conaffinity="0"/>
+    </body>
+    <body name="v2_arm3_raw_fin_proxy" pos="0.55 -0.945 0.280"
+          gravcomp="1">
+      <freejoint name="v2_arm3_raw_fin_proxy_free"/>
+      <inertial pos="0 0 0" mass="0.06"
+                diaginertia="0.00002 0.00047 0.00045"/>
+      <geom name="v2_arm3_raw_fin_proxy_geom" type="box"
+            size="0.150 0.001 0.030" rgba="0.73 0.76 0.80 1"
+            contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Arm2 has one permanent, vertically oriented dual-nozzle dispenser.
+         It is mounted at the initial flange pose, so scene startup has no
+         constraint snap before the controller takes ownership. -->
+    <body name="v2_arm2_dual_brazing_dispenser_tool"
+          pos="-0.350000000 -0.292980430 0.590269558"
+          quat="0 0.923803329 0.382867352 0" gravcomp="1">
+      <freejoint name="v2_arm2_dual_brazing_dispenser_tool_free"/>
+      <inertial pos="0 0 0.090" mass="0.32"
+                diaginertia="0.00120 0.00115 0.00016"/>
+      <geom name="v2_arm2_dispenser_adapter" type="cylinder"
+            size="0.025 0.008" pos="0 0 0.008"
+            material="v2_frame_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm2_dispenser_flange_ring"
+            type="cylinder" size="0.028 0.004" pos="0 0 -0.003"
+            material="v2_frame_mat"/>
+      <geom name="v2_arm2_dispenser_body" type="cylinder"
+            size="0.014 0.055" pos="0 0 0.065"
+            material="v2_tool_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm2_dispenser_body_upper_band"
+            type="cylinder" size="0.017 0.004" pos="0 0 0.025"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm2_dispenser_body_lower_band"
+            type="cylinder" size="0.017 0.004" pos="0 0 0.106"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm2_dispenser_left_cartridge"
+            type="capsule" size="0.006"
+            fromto="-0.017 0 0.035 -0.017 0 0.100"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm2_dispenser_right_cartridge"
+            type="capsule" size="0.006"
+            fromto="0.017 0 0.035 0.017 0 0.100"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_arm2_dispenser_valve_block"
+            type="box" size="0.025 0.020 0.010" pos="0 0 0.115"
+            material="v2_frame_mat"/>
+      <geom name="v2_arm2_dispenser_manifold" type="box"
+            size="0.022 0.026 0.012" pos="0 0 0.130"
+            material="v2_tool_mat" contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm2_dispenser_left_hose"
+            type="capsule" size="0.0035"
+            fromto="-0.017 0 0.040 -0.030 -0.021 0.139"
+            material="v2_belt_mat"/>
+      <geom class="visual" name="v2_arm2_dispenser_right_hose"
+            type="capsule" size="0.0035"
+            fromto="0.017 0 0.040 0.030 0.021 0.139"
+            material="v2_belt_mat"/>
+      <geom name="v2_arm2_left_feed_tube" type="capsule"
+            fromto="0 -0.020 0.138 0 -0.023506226 0.190"
+            size="0.0025" material="v2_belt_mat"
+            contype="0" conaffinity="0"/>
+      <geom name="v2_arm2_right_feed_tube" type="capsule"
+            fromto="0 0.020 0.138 0 0.023506226 0.190"
+            size="0.0025" material="v2_belt_mat"
+            contype="0" conaffinity="0"/>
+      <geom class="visual" name="v2_arm2_left_nozzle_sleeve"
+            type="capsule"
+            fromto="0 -0.023506226 0.190 0 -0.013003113 0.205"
+            size="0.0035" material="v2_s1_mat"/>
+      <geom class="visual" name="v2_arm2_right_nozzle_sleeve"
+            type="capsule"
+            fromto="0 0.023506226 0.190 0 0.013003113 0.205"
+            size="0.0035" material="v2_s1_mat"/>
+      <geom name="v2_arm2_left_nozzle" type="capsule"
+            fromto="0 -0.023506226 0.190 0 -0.0025 0.220"
+            size="0.002" material="v2_frame_mat"
+            contype="0" conaffinity="0"/>
+      <geom name="v2_arm2_right_nozzle" type="capsule"
+            fromto="0 0.023506226 0.190 0 0.0025 0.220"
+            size="0.002" material="v2_frame_mat"
+            contype="0" conaffinity="0"/>
+      <geom name="v2_arm2_left_nozzle_tip" type="sphere"
+            size="0.0012" pos="0 -0.0025 0.220"
+            material="v2_safety_mat" contype="0" conaffinity="0"/>
+      <geom name="v2_arm2_right_nozzle_tip" type="sphere"
+            size="0.0012" pos="0 0.0025 0.220"
+            material="v2_safety_mat" contype="0" conaffinity="0"/>
+      <site name="v2_arm2_dispenser_center_tcp"
+            pos="0 0 0.220" size="0.004" rgba="1 0.4 0.1 1"/>
+      <site name="v2_arm2_left_nozzle_tip_site"
+            pos="0 -0.0025 0.220" size="0.003" rgba="1 0.65 0.15 0.8"/>
+      <site name="v2_arm2_right_nozzle_tip_site"
+            pos="0 0.0025 0.220" size="0.003" rgba="1 0.65 0.15 0.8"/>
+    </body>
+
+    <body name="v2_arm3_hybrid_tool"
+          pos="0.752904380 -0.272904380 0.590269558"
+          quat="0 0.706965995 0.707247539 0" gravcomp="1">
+      <freejoint name="v2_arm3_hybrid_tool_free"/>
+      <inertial pos="0 0 0.055" mass="0.65" diaginertia="0.0012 0.0011 0.0006"/>
+      <!-- The camera remains fixed on the hybrid head.  The gripper below is
+           intentionally the same mechanical module as Arm1: identical palm,
+           fingers, inner pads, travel and 90 mm TCP.  The camera is visibly
+           mounted on the +X side of the palm so it stays outside the fin
+           insertion sweep while retaining a true camera-specific TCP. -->
+      <body name="v2_arm3_parallel_gripper">
+        <geom name="v2_arm3_gripper_palm" type="box"
+              size="0.025 0.035 0.018" pos="0 0 0.018"
+              material="v2_frame_mat" contype="0" conaffinity="0"/>
+        <geom class="visual" name="v2_arm3_gripper_mount_flange"
+              type="cylinder" size="0.028 0.006" pos="0 0 -0.003"
+              material="v2_frame_mat"/>
+        <geom class="visual" name="v2_arm3_gripper_palm_cap" type="box"
+              size="0.021 0.031 0.006" pos="0 0 0.039"
+              material="v2_tool_mat"/>
+        <body name="v2_arm3_left_finger" pos="0 0.026 0.058">
+          <joint name="v2_arm3_left_finger_joint" type="slide"
+                 axis="0 -1 0" range="0 0.0202" damping="6"/>
+          <geom name="v2_arm3_gripper_left" type="box"
+                size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+                contype="4" conaffinity="2"/>
+          <geom class="visual" name="v2_arm3_gripper_left_pad" type="box"
+                size="0.0048 0.0012 0.034" pos="0 -0.0038 0"
+                material="v2_belt_mat"/>
+        </body>
+        <body name="v2_arm3_right_finger" pos="0 -0.026 0.058">
+          <joint name="v2_arm3_right_finger_joint" type="slide"
+                 axis="0 1 0" range="0 0.0202" damping="6"/>
+          <geom name="v2_arm3_gripper_right" type="box"
+                size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+                contype="4" conaffinity="2"/>
+          <geom class="visual" name="v2_arm3_gripper_right_pad" type="box"
+                size="0.0048 0.0012 0.034" pos="0 0.0038 0"
+                material="v2_belt_mat"/>
+        </body>
+        <site name="v2_arm3_gripper_tcp" pos="0 0 0.090" size="0.005"
+              rgba="1 0.75 0.1 1"/>
+        <body name="v2_arm3_camera_rig" pos="0.038 0 0.025">
+          <geom class="visual" name="v2_arm3_camera_side_bracket" type="box"
+                size="0.014 0.008 0.006" pos="-0.014 0 0.004"
+                material="v2_frame_mat"/>
+          <geom name="v2_arm3_camera_housing" type="box" size="0.014 0.014 0.004"
+                pos="0 0 0.004" material="v2_tool_mat"
+                contype="0" conaffinity="0"/>
+          <geom class="visual" name="v2_arm3_camera_lens" type="cylinder"
+                size="0.009 0.002" pos="0 0 0.009" material="v2_camera_mat"/>
+          <geom class="visual" name="v2_arm3_camera_status_ring" type="cylinder"
+                size="0.011 0.001" pos="0 0 0.007" rgba="0.12 0.92 0.42 1"/>
+          <camera name="v2_arm3_inspection_camera" pos="0 0 0.011"
+                  quat="0 1 0 0" fovy="52"/>
+          <site name="v2_arm3_camera_tcp" pos="0 0 0.021" size="0.004"
+                rgba="0.20 1 0.35 0.9"/>
+        </body>
+      </body>
+    </body>
+
+    <!-- S1/S2 process row. -->
+    <body name="v2_station_s1" pos="-0.55 0.35 0">
+      <geom class="structure" name="v2_station_s1_top" size="0.24 0.16 0.025"
+            pos="0 0 0.185" material="v2_s1_mat"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="visual" name="v2_s1_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
+            material="v2_s1_sign_mat"/>
+      <site name="v2_station_s1_dock" pos="0 0 0.225" size="0.008" rgba="0.2 0.8 1 0.8"/>
+    </body>
+    <body name="v2_station_s2a" pos="-0.35 0 0">
+      <geom class="structure" name="v2_station_s2a_top" size="0.24 0.18 0.025"
+            pos="0 0 0.185" material="v2_s2_mat"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="visual" name="v2_s2a_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
+            material="v2_s2a_sign_mat"/>
+      <site name="v2_station_s2a_dock" pos="0 0 0.225" size="0.008" rgba="1 0.6 0.1 0.8"/>
+    </body>
+    <body name="v2_station_s2b" pos="0.50 0 0">
+      <geom class="structure" name="v2_station_s2b_top" size="0.22 0.18 0.025"
+            pos="0 0 0.185" material="v2_inspect_mat"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="-0.17 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="0.17 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="-0.17 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="0.17 0.13 0.08"/>
+      <geom class="visual" name="v2_s2b_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
+            material="v2_s2b_sign_mat"/>
+      <site name="v2_station_s2b_dock" pos="0 0 0.225" size="0.008" rgba="0.2 1 0.4 0.8"/>
+    </body>
+
+    <!-- Independent fin supply and installation branches. -->
+    <body name="v2_fin_table_a" pos="0.45 1.05 0">
+      <geom class="structure" size="0.22 0.14 0.025" pos="0 0 0.225"
+            material="v2_install_a_mat"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="-0.17 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="0.17 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="-0.17 0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="0.17 0.09 0.10"/>
+      <frame pos="0 0 0.250">
+        <attach model="v2_fin_supply_asset" body="magazine"
+                prefix="v2_fin_a_"/>
+      </frame>
+      <site name="v2_fin_table_a_dock" pos="0 0 0.265" size="0.008" rgba="0.8 0.4 1 0.8"/>
+    </body>
+    <body name="v2_station_s3a" pos="0.55 0.50 0">
+      <geom class="structure" size="0.24 0.18 0.025" pos="0 0 0.185"
+            material="v2_install_a_mat"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="visual" name="v2_s3a_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
+            material="v2_s3_sign_mat"/>
+      <site name="v2_station_s3a_dock" pos="0 0 0.225" size="0.008" rgba="0.8 0.4 1 0.8"/>
+    </body>
+    <body name="v2_fin_table_b" pos="0.55 -0.85 0">
+      <geom class="structure" name="v2_fin_table_b_top"
+            size="0.18 0.14 0.025" pos="0 0 0.225"
+            material="v2_install_b_mat"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="-0.14 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="0.14 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="-0.14 0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.20" pos="0.14 0.09 0.10"/>
+      <frame pos="0 0 0.250">
+        <attach model="v2_fin_supply_asset" body="magazine"
+                prefix="v2_fin_b_"/>
+      </frame>
+      <site name="v2_fin_table_b_dock" pos="0 0 0.265" size="0.008" rgba="0.2 0.7 1 0.8"/>
+    </body>
+    <body name="v2_station_s3b" pos="0.35 -0.45 0">
+      <geom class="structure" size="0.24 0.18 0.025" pos="0 0 0.185"
+            material="v2_install_b_mat"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="visual" name="v2_s3b_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 0.190 0.115"
+            euler="0 0 3.14159265359" material="v2_s3_sign_mat"/>
+      <site name="v2_station_s3b_dock" pos="0 0 0.225" size="0.008" rgba="0.2 0.7 1 0.8"/>
+    </body>
+
+    <!-- Both S3 branches stay on the 0.225 m station transport plane.
+         The A line follows the short north-side dog-leg.  The B line follows
+         the south perimeter of the Arm3 cell, so a complete tray, combs, fins
+         and press bars never sweep through S2B or any Arm3 link.  Each visible
+         pair below is one continuous mitered slide-rail route. -->
+    <body name="v2_merge">
+      <geom class="visual" name="v2_install_a_s4_rail_left" type="capsule"
+            size="0.008" fromto="0.550 0.555 0.198 1.455 0.555 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_a_s4_rail_right" type="capsule"
+            size="0.008" fromto="0.550 0.445 0.198 1.345 0.445 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_a_s4_rail_left_02" type="capsule"
+            size="0.008" fromto="1.455 0.555 0.198 1.455 0.000 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_a_s4_rail_right_02" type="capsule"
+            size="0.008" fromto="1.345 0.445 0.198 1.345 0.000 0.198"
+            material="v2_frame_mat"/>
+
+      <geom class="visual" name="v2_install_b_s4_rail_left" type="capsule"
+            size="0.008" fromto="0.350 -0.505 0.198 0.105 -0.505 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_right" type="capsule"
+            size="0.008" fromto="0.350 -0.395 0.198 -0.005 -0.395 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_left_02" type="capsule"
+            size="0.008" fromto="0.105 -0.505 0.198 0.105 -1.165 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_right_02" type="capsule"
+            size="0.008" fromto="-0.005 -0.395 0.198 -0.005 -1.275 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_left_03" type="capsule"
+            size="0.008" fromto="0.105 -1.165 0.198 1.495 -1.165 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_right_03" type="capsule"
+            size="0.008" fromto="-0.005 -1.275 0.198 1.605 -1.275 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_left_04" type="capsule"
+            size="0.008" fromto="1.495 -1.165 0.198 1.495 -0.055 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_right_04" type="capsule"
+            size="0.008" fromto="1.605 -1.275 0.198 1.605 0.055 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_left_05" type="capsule"
+            size="0.008" fromto="1.495 -0.055 0.198 1.400 -0.055 0.198"
+            material="v2_frame_mat"/>
+      <geom class="visual" name="v2_install_b_s4_rail_right_05" type="capsule"
+            size="0.008" fromto="1.605 0.055 0.198 1.400 0.055 0.198"
+            material="v2_frame_mat"/>
+      <site name="v2_merge_dock" pos="1.40 0 0.225" size="0.008" rgba="1 0.8 0.1 0.8"/>
+    </body>
+    <body name="v2_station_s4" pos="1.40 0 0">
+      <geom class="structure" name="v2_station_s4_top"
+            size="0.24 0.18 0.025" pos="0 0 0.185"
+            material="v2_inspect_mat"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="visual" name="v2_s4_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
+            material="v2_post_sign_mat"/>
+      <site name="v2_station_s4_dock" pos="0 0 0.225" size="0.008" rgba="0.2 1 0.4 0.8"/>
+    </body>
+
+    <!-- V1-style stainless slide rails for every inter-table route. -->
+    <geom class="visual" name="v2_s1_s2a_rail_left" type="capsule" size="0.008"
+          fromto="-0.502247 0.377288 0.198 -0.302247 0.027288 0.198"
+          material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s1_s2a_rail_right" type="capsule" size="0.008"
+          fromto="-0.597753 0.322712 0.198 -0.397753 -0.027288 0.198"
+          material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s2a_s2b_rail_left" type="capsule" size="0.008"
+          fromto="-0.35 0.055 0.198 0.50 0.055 0.198" material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s2a_s2b_rail_right" type="capsule" size="0.008"
+          fromto="-0.35 -0.055 0.198 0.50 -0.055 0.198" material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s2b_s3a_rail_left" type="capsule" size="0.008"
+          fromto="0.445274 0.005473 0.198 0.495274 0.505473 0.198"
+          material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s2b_s3a_rail_right" type="capsule" size="0.008"
+          fromto="0.554726 -0.005473 0.198 0.604726 0.494527 0.198"
+          material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s2b_s3b_rail_left" type="capsule" size="0.008"
+          fromto="0.552178 -0.017393 0.198 0.402178 -0.467393 0.198"
+          material="v2_frame_mat"/>
+    <geom class="visual" name="v2_s2b_s3b_rail_right" type="capsule" size="0.008"
+          fromto="0.447822 0.017393 0.198 0.297822 -0.432607 0.198"
+          material="v2_frame_mat"/>
+    <body name="v2_s1_s2a_carriage" pos="-0.55 0.35 0.225">
+      <joint name="v2_s1_s2a_joint" type="slide" axis="0.496 -0.868 0"
+             range="0 0.403" damping="90"/>
+      <inertial pos="0 0 0" mass="2.0" diaginertia="0.02 0.03 0.04"/>
+      <geom class="visual" name="v2_s1_s2a_carriage_geom" type="box"
+            size="0.20 0.14 0.010" pos="0 0 -0.026" material="v2_frame_mat"/>
+    </body>
+    <body name="v2_s2a_s2b_carriage" pos="-0.35 0 0.225">
+      <joint name="v2_s2a_s2b_joint" type="slide" axis="1 0 0" range="0 0.85" damping="90"/>
+      <inertial pos="0 0 0" mass="2.0" diaginertia="0.02 0.03 0.04"/>
+      <geom class="visual" name="v2_s2a_s2b_carriage_geom" type="box"
+            size="0.20 0.14 0.010" pos="0 0 -0.026" material="v2_frame_mat"/>
+    </body>
+    <body name="v2_branch_a_carriage" pos="0.50 0 0.225">
+      <joint name="v2_branch_a_joint" type="slide" axis="0.099504 0.995037 0"
+             range="0 0.502494" damping="90"/>
+      <inertial pos="0 0 0" mass="2.0" diaginertia="0.02 0.03 0.04"/>
+      <geom class="visual" name="v2_branch_a_carriage_geom" type="box"
+            size="0.20 0.14 0.010" pos="0 0 -0.026" material="v2_frame_mat"/>
+    </body>
+    <body name="v2_branch_b_carriage" pos="0.50 0 0.225">
+      <joint name="v2_branch_b_joint" type="slide" axis="-0.316228 -0.948683 0"
+             range="0 0.474342" damping="90"/>
+      <inertial pos="0 0 0" mass="2.0" diaginertia="0.02 0.03 0.04"/>
+      <geom class="visual" name="v2_branch_b_carriage_geom" type="box"
+            size="0.20 0.14 0.010" pos="0 0 -0.028" material="v2_frame_mat"/>
+    </body>
+    <!-- Three physical pre-furnace buffer positions. -->
+    <geom class="visual" name="v2_furnace_infeed_belt" type="box"
+          size="0.88 0.17 0.018" pos="2.02 0 0.190" material="v2_belt_mat"/>
+    <body name="v2_buffer_1_anchor" pos="1.85 0 0.225">
+      <site name="v2_buffer_1_dock" size="0.008" rgba="1 0.8 0.1 0.8"/>
+    </body>
+    <body name="v2_buffer_2_anchor" pos="2.30 0 0.225">
+      <site name="v2_buffer_2_dock" size="0.008" rgba="1 0.8 0.1 0.8"/>
+    </body>
+    <body name="v2_buffer_3_anchor" pos="2.75 0 0.225">
+      <site name="v2_buffer_3_dock" size="0.008" rgba="1 0.8 0.1 0.8"/>
+    </body>
+    <body name="v2_buffer_index_carriage" pos="1.40 0 0.225">
+      <joint name="v2_buffer_index_joint" type="slide" axis="1 0 0"
+             range="0 1.60" damping="120"/>
+      <inertial pos="0 0 0" mass="2.5" diaginertia="0.03 0.04 0.05"/>
+      <geom class="visual" name="v2_buffer_index_carriage_geom" type="box"
+            size="0.20 0.14 0.010" pos="0 0 -0.028" material="v2_frame_mat"/>
+    </body>
+
+    <!-- Pass-through CAB furnace: front door at low X, rear door at high X. -->
+    <body name="v2_through_furnace" pos="3.45 0 0">
+      <geom class="structure" name="v2_furnace_floor" size="0.48 0.35 0.035"
+            pos="0 0 0.12" material="v2_furnace_mat"/>
+      <geom class="structure" name="v2_furnace_roof" size="0.48 0.35 0.035"
+            pos="0 0 0.72" material="v2_furnace_mat"/>
+      <geom class="structure" name="v2_furnace_side_left" size="0.48 0.035 0.30"
+            pos="0 0.315 0.42" material="v2_furnace_mat"/>
+      <geom class="structure" name="v2_furnace_side_right" size="0.48 0.035 0.30"
+            pos="0 -0.315 0.42" material="v2_furnace_mat"/>
+      <geom class="visual" name="v2_furnace_hot_zone" type="box" size="0.40 0.27 0.25"
+            pos="0 0 0.42" material="v2_hot_mat"/>
+      <geom class="visual" name="v2_furnace_station_sign" type="mesh"
+            mesh="v2_furnace_sign_mesh" pos="-0.495 0 0.690"
+            euler="0 0 1.57079632679" material="v2_furnace_sign_mat"/>
+      <body name="v2_furnace_front_door" pos="-0.49 0 0.42" gravcomp="1">
+        <joint name="v2_furnace_front_door_joint" type="slide" axis="0 0 1"
+               range="0 0.56" damping="140"/>
+        <geom class="structure" size="0.035 0.35 0.30" material="v2_furnace_mat"/>
+        <geom class="visual" type="box" size="0.040 0.31 0.035"
+              pos="-0.01 0 -0.23" material="v2_safety_mat"/>
+      </body>
+      <body name="v2_furnace_rear_door" pos="0.49 0 0.42" gravcomp="1">
+        <joint name="v2_furnace_rear_door_joint" type="slide" axis="0 0 1"
+               range="0 0.56" damping="140"/>
+        <geom class="structure" size="0.035 0.35 0.30" material="v2_furnace_mat"/>
+        <geom class="visual" type="box" size="0.040 0.31 0.035"
+              pos="0.01 0 -0.23" material="v2_safety_mat"/>
+      </body>
+      <body name="v2_furnace_layer_0_anchor" pos="0 0 0.225">
+        <geom class="visual" type="box" size="0.42 0.28 0.008" material="v2_frame_mat"/>
+        <site name="v2_furnace_layer_0_dock" size="0.008" rgba="1 0.3 0.1 0.8"/>
+        <body name="v2_furnace_layer_0_lock" pos="0 0.29 0.035">
+          <joint name="v2_furnace_layer_0_lock_joint" type="slide" axis="0 -1 0"
+                 range="0 0.030" damping="30"/>
+          <geom class="structure" size="0.04 0.015 0.025" material="v2_safety_mat"/>
+        </body>
+      </body>
+      <body name="v2_furnace_layer_1_anchor" pos="0 0 0.365">
+        <geom class="visual" type="box" size="0.42 0.28 0.008" material="v2_frame_mat"/>
+        <site name="v2_furnace_layer_1_dock" size="0.008" rgba="1 0.3 0.1 0.8"/>
+        <body name="v2_furnace_layer_1_lock" pos="0 0.29 0.035">
+          <joint name="v2_furnace_layer_1_lock_joint" type="slide" axis="0 -1 0"
+                 range="0 0.030" damping="30"/>
+          <geom class="structure" size="0.04 0.015 0.025" material="v2_safety_mat"/>
+        </body>
+      </body>
+      <body name="v2_furnace_layer_2_anchor" pos="0 0 0.505">
+        <geom class="visual" type="box" size="0.42 0.28 0.008" material="v2_frame_mat"/>
+        <site name="v2_furnace_layer_2_dock" size="0.008" rgba="1 0.3 0.1 0.8"/>
+        <body name="v2_furnace_layer_2_lock" pos="0 0.29 0.035">
+          <joint name="v2_furnace_layer_2_lock_joint" type="slide" axis="0 -1 0"
+                 range="0 0.030" damping="30"/>
+          <geom class="structure" size="0.04 0.015 0.025" material="v2_safety_mat"/>
+        </body>
+      </body>
+    </body>
+    <!-- Front lift aligns the tray with one of three rails before the long,
+         fork-shaped pusher enters the furnace. -->
+    <body name="v2_furnace_lift" pos="2.75 0 0.225">
+      <joint name="v2_furnace_lift_joint" type="slide" axis="0 0 1"
+             range="0 0.280" damping="180"/>
+      <inertial pos="0 0 0" mass="12.0" diaginertia="0.20 0.22 0.18"/>
+      <geom class="visual" name="v2_furnace_lift_platform" type="box"
+            size="0.13 0.18 0.018" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_furnace_lift_left_rail" type="box"
+            size="0.13 0.015 0.025" pos="0 0.145 0.025"
+            material="v2_safety_mat"/>
+      <geom class="visual" name="v2_furnace_lift_right_rail" type="box"
+            size="0.13 0.015 0.025" pos="0 -0.145 0.025"
+            material="v2_safety_mat"/>
+      <body name="v2_furnace_pusher_carriage">
+        <joint name="v2_furnace_pusher_joint" type="slide" axis="1 0 0"
+               range="0 0.70" damping="150"/>
+        <inertial pos="0 0 0" mass="3.0" diaginertia="0.04 0.05 0.06"/>
+        <geom class="visual" name="v2_furnace_pusher_crossbar" type="box"
+              size="0.025 0.15 0.035" pos="-0.20 0 0.035"
+              material="v2_frame_mat"/>
+        <geom class="visual" name="v2_furnace_pusher_fork_left"
+              type="box" size="0.14 0.025 0.012" pos="0 0.105 0"
+              material="v2_safety_mat"/>
+        <geom class="visual" name="v2_furnace_pusher_fork_right"
+              type="box" size="0.14 0.025 0.012" pos="0 -0.105 0"
+              material="v2_safety_mat"/>
+      </body>
+    </body>
+
+    <!-- The rear extractor mirrors the front mechanism so unloading never
+         requires reversing tray orientation inside the pass-through furnace. -->
+    <body name="v2_furnace_rear_lift" pos="4.05 0 0.225">
+      <joint name="v2_furnace_rear_lift_joint" type="slide" axis="0 0 1"
+             range="0 0.280" damping="180"/>
+      <inertial pos="0 0 0" mass="12.0" diaginertia="0.20 0.22 0.18"/>
+      <geom class="visual" name="v2_furnace_rear_lift_platform" type="box"
+            size="0.24 0.18 0.018" material="v2_frame_mat"/>
+      <body name="v2_furnace_rear_extractor">
+        <joint name="v2_furnace_rear_extractor_joint" type="slide"
+               axis="-1 0 0" range="0 0.60" damping="150"/>
+        <inertial pos="0 0 0" mass="3.0" diaginertia="0.04 0.05 0.06"/>
+        <geom class="visual" name="v2_furnace_rear_extractor_crossbar"
+              type="box" size="0.025 0.15 0.035" pos="0.20 0 0.035"
+              material="v2_frame_mat"/>
+        <geom class="visual" name="v2_furnace_rear_extractor_fork_left"
+              type="box" size="0.22 0.025 0.012" pos="0 0.105 0"
+              material="v2_safety_mat"/>
+        <geom class="visual" name="v2_furnace_rear_extractor_fork_right"
+              type="box" size="0.22 0.025 0.012" pos="0 -0.105 0"
+              material="v2_safety_mat"/>
+      </body>
+    </body>
+
+    <!-- Rear-only unloading, fixed scan gantry, then finished output. -->
+    <geom class="visual" name="v2_output_belt" type="box"
+          size="0.55 0.19 0.018" pos="4.12 0 0.190" material="v2_belt_mat"/>
+    <body name="v2_output_carriage" pos="3.78 0 0.225">
+      <joint name="v2_output_transfer_joint" type="slide" axis="1 0 0"
+             range="0 0.86" damping="120"/>
+      <inertial pos="0 0 0" mass="2.5" diaginertia="0.03 0.04 0.05"/>
+      <geom class="visual" type="box" size="0.20 0.14 0.010" material="v2_safety_mat"/>
+    </body>
+    <body name="v2_post_braze_gantry" pos="4.20 0 0">
+      <geom class="structure" size="0.035 0.035 0.38" pos="0 0.30 0.38"/>
+      <geom class="structure" size="0.035 0.035 0.38" pos="0 -0.30 0.38"/>
+      <geom class="structure" size="0.055 0.32 0.035" pos="0 0 0.73"/>
+      <geom class="visual" name="v2_post_braze_station_sign" type="mesh"
+            mesh="v2_station_sign_mesh" pos="0 -0.305 0.650"
+            material="v2_post_sign_mat"/>
+      <camera name="v2_post_braze_camera" pos="0 0 0.68" fovy="45"/>
+      <site name="v2_post_braze_gantry_dock" pos="0 0 0.225" size="0.008"
+            rgba="0.2 1 0.4 0.8"/>
+    </body>
+    <body name="v2_finished_output_anchor" pos="4.64 0 0.225">
+      <site name="v2_finished_output_dock" size="0.010" rgba="1 0.8 0.1 0.9"/>
+    </body>
+    <body name="v2_finished_output_box" pos="4.62 0 0">
+      <geom class="structure" size="0.25 0.34 0.025" pos="0 0 0.15" material="v2_frame_mat"/>
+      <geom class="structure" size="0.025 0.34 0.28" pos="0.23 0 0.43" material="v2_frame_mat"/>
+      <geom class="structure" size="0.25 0.025 0.28" pos="0 0.315 0.43" material="v2_frame_mat"/>
+      <geom class="structure" size="0.25 0.025 0.28" pos="0 -0.315 0.43" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_finished_output_sign" type="mesh"
+            mesh="v2_output_sign_mesh" pos="-0.255 0 0.610"
+            euler="0 0 1.57079632679" material="v2_output_sign_mat"/>
+    </body>
+
+    <!-- Static ownership anchors. Equality activation is controlled by V2
+         backend; all welds start inactive so each handoff has one owner. -->
+    <body name="v2_s1_anchor" pos="-0.55 0.35 0.225"/>
+    <body name="v2_s2a_anchor" pos="-0.35 0 0.225"/>
+    <body name="v2_s2b_anchor" pos="0.50 0 0.225"/>
+    <body name="v2_install_a_anchor" pos="0.55 0.50 0.225"/>
+    <body name="v2_install_b_anchor" pos="0.35 -0.45 0.225"/>
+    <body name="v2_merge_a_wait_anchor" pos="1.40 0.50 0.225"/>
+    <body name="v2_merge_b_wait_anchor" pos="1.55 -1.22 0.225"/>
+    <body name="v2_merge_anchor" pos="1.40 0 0.225"/>
+    <body name="v2_s4_anchor" pos="1.40 0 0.225"/>
+    <body name="v2_post_scan_anchor" pos="4.20 0 0.225"/>
+    <body name="v2_output_anchor" pos="4.64 0 0.225"/>
+
+    <!-- Six trays start in a collision-free invisible-side buffer. Runtime
+         visibility/collision projection activates only trays with orders. -->
+    <body name="v2_tray_01_carrier" mocap="true" pos="-1.05 0.35 0.225"/>
+    <body name="v2_tray_02_carrier" mocap="true" pos="-1.50 0.35 0.225"/>
+    <body name="v2_tray_03_carrier" mocap="true" pos="-1.95 0.35 0.225"/>
+    <body name="v2_tray_04_carrier" mocap="true" pos="-2.40 0.35 0.225"/>
+    <body name="v2_tray_05_carrier" mocap="true" pos="-2.85 0.35 0.225"/>
+    <body name="v2_tray_06_carrier" mocap="true" pos="-3.30 0.35 0.225"/>
+    <body name="v2_tray_01" pos="-1.05 0.35 0.225" gravcomp="1">
+      <freejoint name="v2_tray_01_free"/>
+      <geom class="tray" name="v2_tray_01_geom" material="v2_tray_mat"/>
+      <site name="v2_tray_01_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_01_"/>
+    </body>
+    <body name="v2_tray_02" pos="-1.50 0.35 0.225" gravcomp="1">
+      <freejoint name="v2_tray_02_free"/>
+      <geom class="tray" name="v2_tray_02_geom" material="v2_tray_mat"/>
+      <site name="v2_tray_02_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_02_"/>
+    </body>
+    <body name="v2_tray_03" pos="-1.95 0.35 0.225" gravcomp="1">
+      <freejoint name="v2_tray_03_free"/>
+      <geom class="tray" name="v2_tray_03_geom" material="v2_tray_mat"/>
+      <site name="v2_tray_03_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_03_"/>
+    </body>
+    <body name="v2_tray_04" pos="-2.40 0.35 0.225" gravcomp="1">
+      <freejoint name="v2_tray_04_free"/>
+      <geom class="tray" name="v2_tray_04_geom" material="v2_tray_mat"/>
+      <site name="v2_tray_04_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_04_"/>
+    </body>
+    <body name="v2_tray_05" pos="-2.85 0.35 0.225" gravcomp="1">
+      <freejoint name="v2_tray_05_free"/>
+      <geom class="tray" name="v2_tray_05_geom" material="v2_tray_mat"/>
+      <site name="v2_tray_05_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_05_"/>
+    </body>
+    <body name="v2_tray_06" pos="-3.30 0.35 0.225" gravcomp="1">
+      <freejoint name="v2_tray_06_free"/>
+      <geom class="tray" name="v2_tray_06_geom" material="v2_tray_mat"/>
+      <site name="v2_tray_06_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_06_"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <weld name="v2_arm1_toolchange_parallel_gripper"
+          body1="arm1_fr3_link7" body2="v2_arm1_parallel_gripper"
+          active="false" solref="0.004 1"/>
+    <weld name="v2_arm1_toolchange_suction_tool"
+          body1="arm1_fr3_link7" body2="v2_arm1_suction_tool"
+          active="false" solref="0.004 1"/>
+    <weld name="v2_arm1_rack_parallel_gripper"
+          body1="v2_arm1_tool_rack" body2="v2_arm1_parallel_gripper"
+          active="true" solref="0.004 1"/>
+    <weld name="v2_arm1_rack_suction_tool"
+          body1="v2_arm1_tool_rack" body2="v2_arm1_suction_tool"
+          active="true" solref="0.004 1"/>
+    <weld name="v2_arm1_raw_base_feed_weld"
+          body1="v2_base_supply_fixture" body2="v2_arm1_raw_base_proxy"
+          active="false" solref="0.002 1"/>
+    <weld name="v2_arm1_grasp_base_proxy_weld"
+          body1="v2_arm1_suction_tool" body2="v2_arm1_raw_base_proxy"
+          active="false" solref="0.001 1"/>
+    <weld name="v2_arm1_raw_fin_feed_weld"
+          body1="v2_fin_table_a" body2="v2_arm1_raw_fin_proxy"
+          active="false" solref="0.002 1"/>
+    <weld name="v2_arm1_grasp_fin_proxy_weld"
+          body1="v2_arm1_parallel_gripper" body2="v2_arm1_raw_fin_proxy"
+          active="false" solref="0.001 1"/>
+    <weld name="v2_arm3_raw_fin_feed_weld"
+          body1="v2_fin_table_b" body2="v2_arm3_raw_fin_proxy"
+          active="false" solref="0.002 1"/>
+    <weld name="v2_arm3_grasp_fin_proxy_weld"
+          body1="v2_arm3_parallel_gripper" body2="v2_arm3_raw_fin_proxy"
+          active="false" solref="0.001 1"/>
+    <weld name="v2_arm2_dispenser_tool_weld"
+          body1="arm2_fr3_link7" body2="v2_arm2_dual_brazing_dispenser_tool"
+          active="true" solref="0.001 1"/>
+    <weld name="v2_arm3_hybrid_tool_weld" body1="arm3_fr3_link7"
+          body2="v2_arm3_hybrid_tool" active="true" solref="0.001 1"/>
+    <weld name="v2_tray_01_carrier_weld" body1="v2_tray_01_carrier"
+          body2="v2_tray_01" active="true" solref="0.0001 1"/>
+    <weld name="v2_tray_02_carrier_weld" body1="v2_tray_02_carrier"
+          body2="v2_tray_02" active="true" solref="0.0001 1"/>
+    <weld name="v2_tray_03_carrier_weld" body1="v2_tray_03_carrier"
+          body2="v2_tray_03" active="true" solref="0.0001 1"/>
+    <weld name="v2_tray_04_carrier_weld" body1="v2_tray_04_carrier"
+          body2="v2_tray_04" active="true" solref="0.0001 1"/>
+    <weld name="v2_tray_05_carrier_weld" body1="v2_tray_05_carrier"
+          body2="v2_tray_05" active="true" solref="0.0001 1"/>
+    <weld name="v2_tray_06_carrier_weld" body1="v2_tray_06_carrier"
+          body2="v2_tray_06" active="true" solref="0.0001 1"/>
+    <!-- Ownership matrix: exactly one row may be active for any tray. -->
+    <weld name="s1_v2_tray_01_weld" body1="v2_s1_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="s2a_v2_tray_01_weld" body1="v2_s2a_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="s2b_v2_tray_01_weld" body1="v2_s2b_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="install_a_v2_tray_01_weld" body1="v2_install_a_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="install_b_v2_tray_01_weld" body1="v2_install_b_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="merge_a_wait_v2_tray_01_weld" body1="v2_merge_a_wait_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="merge_b_wait_v2_tray_01_weld" body1="v2_merge_b_wait_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="merge_v2_tray_01_weld" body1="v2_merge_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="s4_v2_tray_01_weld" body1="v2_s4_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="buffer_1_v2_tray_01_weld" body1="v2_buffer_1_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="buffer_2_v2_tray_01_weld" body1="v2_buffer_2_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="buffer_3_v2_tray_01_weld" body1="v2_buffer_3_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="furnace_layer_0_v2_tray_01_weld" body1="v2_furnace_layer_0_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="furnace_layer_1_v2_tray_01_weld" body1="v2_furnace_layer_1_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="furnace_layer_2_v2_tray_01_weld" body1="v2_furnace_layer_2_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="post_scan_v2_tray_01_weld" body1="v2_post_scan_anchor" body2="v2_tray_01" active="false"/>
+    <weld name="output_v2_tray_01_weld" body1="v2_output_anchor" body2="v2_tray_01" active="false"/>
+
+    <weld name="s1_v2_tray_02_weld" body1="v2_s1_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="s2a_v2_tray_02_weld" body1="v2_s2a_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="s2b_v2_tray_02_weld" body1="v2_s2b_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="install_a_v2_tray_02_weld" body1="v2_install_a_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="install_b_v2_tray_02_weld" body1="v2_install_b_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="merge_a_wait_v2_tray_02_weld" body1="v2_merge_a_wait_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="merge_b_wait_v2_tray_02_weld" body1="v2_merge_b_wait_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="merge_v2_tray_02_weld" body1="v2_merge_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="s4_v2_tray_02_weld" body1="v2_s4_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="buffer_1_v2_tray_02_weld" body1="v2_buffer_1_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="buffer_2_v2_tray_02_weld" body1="v2_buffer_2_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="buffer_3_v2_tray_02_weld" body1="v2_buffer_3_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="furnace_layer_0_v2_tray_02_weld" body1="v2_furnace_layer_0_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="furnace_layer_1_v2_tray_02_weld" body1="v2_furnace_layer_1_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="furnace_layer_2_v2_tray_02_weld" body1="v2_furnace_layer_2_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="post_scan_v2_tray_02_weld" body1="v2_post_scan_anchor" body2="v2_tray_02" active="false"/>
+    <weld name="output_v2_tray_02_weld" body1="v2_output_anchor" body2="v2_tray_02" active="false"/>
+
+    <weld name="s1_v2_tray_03_weld" body1="v2_s1_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="s2a_v2_tray_03_weld" body1="v2_s2a_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="s2b_v2_tray_03_weld" body1="v2_s2b_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="install_a_v2_tray_03_weld" body1="v2_install_a_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="install_b_v2_tray_03_weld" body1="v2_install_b_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="merge_a_wait_v2_tray_03_weld" body1="v2_merge_a_wait_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="merge_b_wait_v2_tray_03_weld" body1="v2_merge_b_wait_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="merge_v2_tray_03_weld" body1="v2_merge_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="s4_v2_tray_03_weld" body1="v2_s4_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="buffer_1_v2_tray_03_weld" body1="v2_buffer_1_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="buffer_2_v2_tray_03_weld" body1="v2_buffer_2_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="buffer_3_v2_tray_03_weld" body1="v2_buffer_3_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="furnace_layer_0_v2_tray_03_weld" body1="v2_furnace_layer_0_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="furnace_layer_1_v2_tray_03_weld" body1="v2_furnace_layer_1_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="furnace_layer_2_v2_tray_03_weld" body1="v2_furnace_layer_2_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="post_scan_v2_tray_03_weld" body1="v2_post_scan_anchor" body2="v2_tray_03" active="false"/>
+    <weld name="output_v2_tray_03_weld" body1="v2_output_anchor" body2="v2_tray_03" active="false"/>
+
+    <weld name="s1_v2_tray_04_weld" body1="v2_s1_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="s2a_v2_tray_04_weld" body1="v2_s2a_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="s2b_v2_tray_04_weld" body1="v2_s2b_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="install_a_v2_tray_04_weld" body1="v2_install_a_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="install_b_v2_tray_04_weld" body1="v2_install_b_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="merge_a_wait_v2_tray_04_weld" body1="v2_merge_a_wait_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="merge_b_wait_v2_tray_04_weld" body1="v2_merge_b_wait_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="merge_v2_tray_04_weld" body1="v2_merge_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="s4_v2_tray_04_weld" body1="v2_s4_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="buffer_1_v2_tray_04_weld" body1="v2_buffer_1_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="buffer_2_v2_tray_04_weld" body1="v2_buffer_2_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="buffer_3_v2_tray_04_weld" body1="v2_buffer_3_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="furnace_layer_0_v2_tray_04_weld" body1="v2_furnace_layer_0_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="furnace_layer_1_v2_tray_04_weld" body1="v2_furnace_layer_1_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="furnace_layer_2_v2_tray_04_weld" body1="v2_furnace_layer_2_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="post_scan_v2_tray_04_weld" body1="v2_post_scan_anchor" body2="v2_tray_04" active="false"/>
+    <weld name="output_v2_tray_04_weld" body1="v2_output_anchor" body2="v2_tray_04" active="false"/>
+
+    <weld name="s1_v2_tray_05_weld" body1="v2_s1_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="s2a_v2_tray_05_weld" body1="v2_s2a_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="s2b_v2_tray_05_weld" body1="v2_s2b_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="install_a_v2_tray_05_weld" body1="v2_install_a_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="install_b_v2_tray_05_weld" body1="v2_install_b_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="merge_a_wait_v2_tray_05_weld" body1="v2_merge_a_wait_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="merge_b_wait_v2_tray_05_weld" body1="v2_merge_b_wait_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="merge_v2_tray_05_weld" body1="v2_merge_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="s4_v2_tray_05_weld" body1="v2_s4_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="buffer_1_v2_tray_05_weld" body1="v2_buffer_1_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="buffer_2_v2_tray_05_weld" body1="v2_buffer_2_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="buffer_3_v2_tray_05_weld" body1="v2_buffer_3_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="furnace_layer_0_v2_tray_05_weld" body1="v2_furnace_layer_0_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="furnace_layer_1_v2_tray_05_weld" body1="v2_furnace_layer_1_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="furnace_layer_2_v2_tray_05_weld" body1="v2_furnace_layer_2_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="post_scan_v2_tray_05_weld" body1="v2_post_scan_anchor" body2="v2_tray_05" active="false"/>
+    <weld name="output_v2_tray_05_weld" body1="v2_output_anchor" body2="v2_tray_05" active="false"/>
+
+    <weld name="s1_v2_tray_06_weld" body1="v2_s1_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="s2a_v2_tray_06_weld" body1="v2_s2a_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="s2b_v2_tray_06_weld" body1="v2_s2b_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="install_a_v2_tray_06_weld" body1="v2_install_a_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="install_b_v2_tray_06_weld" body1="v2_install_b_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="merge_a_wait_v2_tray_06_weld" body1="v2_merge_a_wait_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="merge_b_wait_v2_tray_06_weld" body1="v2_merge_b_wait_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="merge_v2_tray_06_weld" body1="v2_merge_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="s4_v2_tray_06_weld" body1="v2_s4_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="buffer_1_v2_tray_06_weld" body1="v2_buffer_1_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="buffer_2_v2_tray_06_weld" body1="v2_buffer_2_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="buffer_3_v2_tray_06_weld" body1="v2_buffer_3_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="furnace_layer_0_v2_tray_06_weld" body1="v2_furnace_layer_0_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="furnace_layer_1_v2_tray_06_weld" body1="v2_furnace_layer_1_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="furnace_layer_2_v2_tray_06_weld" body1="v2_furnace_layer_2_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="post_scan_v2_tray_06_weld" body1="v2_post_scan_anchor" body2="v2_tray_06" active="false"/>
+    <weld name="output_v2_tray_06_weld" body1="v2_output_anchor" body2="v2_tray_06" active="false"/>
+  </equality>
+
+  <actuator>
+    <position name="v2_arm1_left_finger_actuator"
+              joint="v2_arm1_left_finger_joint"
+              kp="800" kv="40" ctrlrange="0 0.0202"/>
+    <position name="v2_arm1_right_finger_actuator"
+              joint="v2_arm1_right_finger_joint"
+              kp="800" kv="40" ctrlrange="0 0.0202"/>
+    <position name="v2_arm3_left_finger_actuator" joint="v2_arm3_left_finger_joint"
+              kp="800" kv="40" ctrlrange="0 0.0202"/>
+    <position name="v2_arm3_right_finger_actuator" joint="v2_arm3_right_finger_joint"
+              kp="800" kv="40" ctrlrange="0 0.0202"/>
+    <position name="v2_s1_s2a_actuator" joint="v2_s1_s2a_joint"
+              kp="1800" kv="140" ctrlrange="0 0.403"/>
+    <position name="v2_s2a_s2b_actuator" joint="v2_s2a_s2b_joint"
+              kp="1800" kv="140" ctrlrange="0 0.85"/>
+    <position name="v2_branch_a_actuator" joint="v2_branch_a_joint"
+              kp="1800" kv="140" ctrlrange="0 0.502494"/>
+    <position name="v2_branch_b_actuator" joint="v2_branch_b_joint"
+              kp="1800" kv="140" ctrlrange="0 0.474342"/>
+    <position name="v2_buffer_index_actuator" joint="v2_buffer_index_joint"
+              kp="2200" kv="180" ctrlrange="0 1.60"/>
+    <position name="v2_furnace_lift_actuator" joint="v2_furnace_lift_joint"
+              kp="5000" kv="320" ctrlrange="0 0.280"/>
+    <position name="v2_furnace_pusher_actuator" joint="v2_furnace_pusher_joint"
+              kp="2400" kv="190" ctrlrange="0 0.70"/>
+    <position name="v2_furnace_rear_lift_actuator"
+              joint="v2_furnace_rear_lift_joint"
+              kp="5000" kv="320" ctrlrange="0 0.280"/>
+    <position name="v2_furnace_rear_extractor_actuator"
+              joint="v2_furnace_rear_extractor_joint"
+              kp="2400" kv="190" ctrlrange="0 0.60"/>
+    <position name="v2_output_transfer_actuator" joint="v2_output_transfer_joint"
+              kp="2000" kv="160" ctrlrange="0 0.86"/>
+    <position name="v2_furnace_front_door_actuator" joint="v2_furnace_front_door_joint"
+              kp="1600" kv="130" ctrlrange="0 0.56"/>
+    <position name="v2_furnace_rear_door_actuator" joint="v2_furnace_rear_door_joint"
+              kp="1600" kv="130" ctrlrange="0 0.56"/>
+    <position name="v2_furnace_layer_0_lock_actuator" joint="v2_furnace_layer_0_lock_joint"
+              kp="500" kv="45" ctrlrange="0 0.030"/>
+    <position name="v2_furnace_layer_1_lock_actuator" joint="v2_furnace_layer_1_lock_joint"
+              kp="500" kv="45" ctrlrange="0 0.030"/>
+    <position name="v2_furnace_layer_2_lock_actuator" joint="v2_furnace_layer_2_lock_joint"
+              kp="500" kv="45" ctrlrange="0 0.030"/>
+  </actuator>
+
+  <contact>
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool"
+             body2="arm2_fr3_link7"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="arm3_fr3_link5"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="arm3_fr3_link6"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="arm3_fr3_link7"/>
+    <exclude body1="v2_arm3_left_finger" body2="arm3_fr3_link7"/>
+    <exclude body1="v2_arm3_right_finger" body2="arm3_fr3_link7"/>
+    <exclude body1="v2_arm3_camera_rig" body2="arm3_fr3_link6"/>
+    <exclude body1="v2_arm3_camera_rig" body2="arm3_fr3_link7"/>
+    <!-- Settled V2 payload geoms remain owned by the tray carrier. Pickup and
+         carry are represented by separate constrained proxy workpieces, so
+         tools must not collide with the already-settled visual pool. -->
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool" body2="v2_tray_01"/>
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool" body2="v2_tray_02"/>
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool" body2="v2_tray_03"/>
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool" body2="v2_tray_04"/>
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool" body2="v2_tray_05"/>
+    <exclude body1="v2_arm2_dual_brazing_dispenser_tool" body2="v2_tray_06"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="v2_tray_01"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="v2_tray_02"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="v2_tray_03"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="v2_tray_04"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="v2_tray_05"/>
+    <exclude body1="v2_arm3_hybrid_tool" body2="v2_tray_06"/>
+    <exclude body1="v2_through_furnace" body2="v2_furnace_front_door"/>
+    <exclude body1="v2_through_furnace" body2="v2_furnace_rear_door"/>
+    <exclude body1="v2_through_furnace" body2="v2_furnace_layer_0_lock"/>
+    <exclude body1="v2_through_furnace" body2="v2_furnace_layer_1_lock"/>
+    <exclude body1="v2_through_furnace" body2="v2_furnace_layer_2_lock"/>
+  </contact>
+</mujoco>

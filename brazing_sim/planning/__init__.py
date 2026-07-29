@@ -1,7 +1,13 @@
 """Task-graph planning primitives for the V2 manufacturing runtime."""
 
 from .task_graph import TaskGraph, TaskGraphError
-from .batch_planner import BatchCandidate, BatchPlanner, BatchReservation, are_units_batch_compatible
+from .batch_planner import (
+    BatchCandidate,
+    BatchPlanner,
+    BatchReservation,
+    are_process_plans_compatible,
+    are_units_batch_compatible,
+)
 from .task_graph_builder import ProcessPlanTaskGraphBuilder, build_task_graph
 from .task_models import ManufacturingTask, TaskStatus, TaskType
 from .motion_planner import (
@@ -31,5 +37,6 @@ __all__ = [
     "TaskStatus",
     "TaskType",
     "build_task_graph",
+    "are_process_plans_compatible",
     "are_units_batch_compatible",
 ]

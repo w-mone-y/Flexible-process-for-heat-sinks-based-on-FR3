@@ -1,0 +1,10 @@
+case,version,supported,completed,exit_code,simulation_seconds,wall_seconds,units,throughput_per_sim_hour,parallel_install_seconds,error
+single_a,v2,true,true,0,206.3,13.93,1,17.450315,0.0,
+single_a,v1,true,true,0,256.974,47.46,1,14.009199,,
+single_a,v1-early,true,false,2,333.63,95.45,1,,,unexpected contact furnace/furnace_roof <-> arm2_fr3_link3/arm2_fr3_link3_collision (-1.07 mm)
+three_a,v2,true,true,0,359.25,33.02,3,30.062630,61.35,
+three_a,v1,true,true,0,835.13,147.61,3,12.932118,,
+three_a,v1-early,false,false,,,,3,,,不支持多订单；且完整单 A 已安全停机
+mixed_abc,v2,true,true,0,345.25,32.39,3,31.281680,86.6,
+mixed_abc,v1,true,true,0,562.44,79.39,3,19.202048,,
+mixed_abc,v1-early,false,false,,,,3,,,仅支持 A，不支持 B/C 或多订单

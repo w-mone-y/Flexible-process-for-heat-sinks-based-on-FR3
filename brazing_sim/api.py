@@ -458,6 +458,15 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
             "inspection_2",
             "furnace_cycle",
             "rack_transfer",
+            "v2_base_loading",
+            "v2_dispensing",
+            "v2_material_inspection",
+            "v2_install_a",
+            "v2_install_b",
+            "v2_parallel_install",
+            "v2_merge_inspection",
+            "v2_furnace_batch",
+            "v2_post_braze_delivery",
         }
         if segment not in allowed:
             raise ValueError(f"segment must be one of {sorted(allowed)}")

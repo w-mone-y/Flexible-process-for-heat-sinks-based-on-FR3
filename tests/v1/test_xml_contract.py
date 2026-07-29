@@ -7,7 +7,7 @@ from xml.etree import ElementTree
 
 from brazing_sim.config import DISPENSER_CONFIG
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class BrazingXmlContractTests(unittest.TestCase):

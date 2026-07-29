@@ -18,6 +18,7 @@ from .manufacturing_config import (
     load_scheduler_config,
 )
 from .planning.task_graph import TaskGraph
+from .planning.batch_planner import are_process_plans_compatible
 from .planning.task_graph_builder import build_task_graph
 from .planning.task_models import ManufacturingTask, TaskStatus, TaskType
 from .planning.workcell_motion import WorkcellMotionPlanningService
@@ -61,6 +62,8 @@ class OrderQueueEntry:
     completed_at: float | None = None
     tray_assignments: dict[str, str] = field(default_factory=dict)
     rack_assignments: dict[str, int] = field(default_factory=dict)
+    admitted_unit_ids: set[str] = field(default_factory=set)
+    completed_unit_ids: set[str] = field(default_factory=set)
 
     @property
     def order_id(self) -> str:
@@ -81,6 +84,8 @@ class OrderQueueEntry:
             "completed_at": self.completed_at,
             "tray_assignments": dict(self.tray_assignments),
             "rack_assignments": dict(self.rack_assignments),
+            "admitted_unit_ids": sorted(self.admitted_unit_ids),
+            "completed_unit_ids": sorted(self.completed_unit_ids),
             "progress": 0.0,
         }
 
@@ -110,6 +115,36 @@ class PendingManualFault:
             "status": self.status,
             "fired_at": self.fired_at,
             "fault_id": self.fault_id,
+        }
+
+
+@dataclass(slots=True)
+class RuntimeFurnaceBatch:
+    """One physical furnace cycle shared by one or more compatible orders."""
+
+    batch_id: str
+    leader_task_id: str
+    member_task_ids: tuple[str, ...]
+    order_ids: tuple[str, ...]
+    unit_count: int
+    recipe: str
+    created_at: float
+    status: str = "SEALED"
+    started_at: float | None = None
+    completed_at: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "leader_task_id": self.leader_task_id,
+            "member_task_ids": list(self.member_task_ids),
+            "order_ids": list(self.order_ids),
+            "unit_count": self.unit_count,
+            "recipe": self.recipe,
+            "status": self.status,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
         }
 
 
@@ -193,6 +228,9 @@ class ManufacturingRuntime:
         # PICK and PLACE are separate UI/DAG milestones, but the physical
         # payload makes the pair non-preemptible on Arm1.
         self._arm1_payload_handoff: dict[str, str] | None = None
+        self.furnace_batches: dict[str, RuntimeFurnaceBatch] = {}
+        self._furnace_task_batches: dict[str, str] = {}
+        self._furnace_batch_sequence = 0
 
     @staticmethod
     def _normalize_scheduler_mode(value: str) -> str:
@@ -264,15 +302,10 @@ class ManufacturingRuntime:
         return [self.submit_plan(plan, now=now) for plan in plans]
 
     def _active_wip(self) -> int:
+        production_trays = set(sorted(self.tray_routes)[: self.max_wip_units])
         return sum(
-            entry.plan.quantity
-            for entry in self.orders.values()
-            if entry.status
-            in {
-                OrderRunStatus.RELEASED,
-                OrderRunStatus.RUNNING,
-                OrderRunStatus.MANUAL_REVIEW,
-            }
+            route.tray_id in production_trays and route.order_id is not None
+            for route in self.tray_routes.values()
         )
 
     def _record_parallelism(self, dt: float) -> None:
@@ -301,78 +334,83 @@ class ManufacturingRuntime:
             }
             for layer in entry.rack_assignments.values()
         }
+        # The fourth route is a UI-only spare. Only the first three tray IDs
+        # have complete MuJoCo product pools and may enter manufacturing.
+        production_trays = set(sorted(self.tray_routes)[: self.max_wip_units])
+        free_trays = sorted(
+            tray.tray_id
+            for tray in self.tray_routes.values()
+            if tray.tray_id in production_trays
+            and tray.owner is TrayOwner.EMPTY_BUFFER
+            and tray.order_id is None
+        )
         candidates = sorted(
-            (entry for entry in self.orders.values() if entry.status is OrderRunStatus.QUEUED),
-            key=lambda entry: (
-                -int(entry.urgent),
-                -entry.plan.order.priority,
-                entry.inserted_at,
-                entry.order_id,
+            (
+                (entry, assignment)
+                for entry in self.orders.values()
+                if entry.status
+                in {
+                    OrderRunStatus.QUEUED,
+                    OrderRunStatus.RELEASED,
+                    OrderRunStatus.RUNNING,
+                }
+                for assignment in entry.plan.rack_assignments
+                if f"{entry.order_id}_UNIT_{assignment.unit_index + 1:02d}" not in entry.admitted_unit_ids
+            ),
+            key=lambda item: (
+                -int(item[0].urgent),
+                -item[0].plan.order.priority,
+                item[0].inserted_at,
+                item[0].order_id,
+                item[1].unit_index,
             ),
         )
-        for entry in candidates:
-            # The fourth route is a visible spare/buffer pallet, whereas the
-            # current MuJoCo product pool contains three fully parameterized
-            # production trays. Never assign the display-only spare to a
-            # manufacturing task after a fault or manual-review transition.
-            production_trays = set(sorted(self.tray_routes)[: self.max_wip_units])
-            free_trays = sorted(
-                tray.tray_id
-                for tray in self.tray_routes.values()
-                if tray.tray_id in production_trays
-                and tray.owner is TrayOwner.EMPTY_BUFFER
-                and tray.order_id is None
-            )
-            if entry.plan.quantity > available or entry.plan.quantity > len(free_trays):
-                continue
-            planned_trays = [assignment.tray_id for assignment in entry.plan.rack_assignments]
-            assigned_trays = free_trays[: entry.plan.quantity]
-            tray_mapping = dict(zip(planned_trays, assigned_trays, strict=True))
-            entry.tray_assignments = dict(tray_mapping)
-            physical_layers: dict[str, int] = {}
-            for assignment, physical_tray in zip(
-                entry.plan.rack_assignments,
-                assigned_trays,
-                strict=True,
-            ):
-                preferred = int(assignment.layer_index)
-                if preferred not in used_rack_layers:
-                    selected = preferred
-                else:
-                    selected = next(layer for layer in range(3) if layer not in used_rack_layers)
-                physical_layers[physical_tray] = selected
-                used_rack_layers.add(selected)
-            entry.rack_assignments = physical_layers
+        for entry, assignment in candidates:
+            if available <= 0 or not free_trays:
+                break
+            unit_id = f"{entry.order_id}_UNIT_{assignment.unit_index + 1:02d}"
+            physical_tray = free_trays.pop(0)
+            preferred = int(assignment.layer_index)
+            if preferred not in used_rack_layers:
+                selected_layer = preferred
+            else:
+                selected_layer = next(layer for layer in range(3) if layer not in used_rack_layers)
+            used_rack_layers.add(selected_layer)
+            entry.tray_assignments[assignment.tray_id] = physical_tray
+            entry.rack_assignments[physical_tray] = selected_layer
+            entry.admitted_unit_ids.add(unit_id)
+
             for task_id in entry.graph_task_ids:
                 task = self.graph.get(task_id)
-                if task.tray_id in tray_mapping:
-                    task.tray_id = tray_mapping[task.tray_id]
-                if task.tray_id in physical_layers and "layer_index" in task.payload:
-                    layer = physical_layers[task.tray_id]
-                    task.payload["layer_index"] = layer
-                    task.payload["height_m"] = (0.0, 0.151, 0.302)[layer]
-            for assignment, physical_tray in zip(
-                entry.plan.rack_assignments,
-                assigned_trays,
-                strict=True,
-            ):
-                route = self.tray_routes[physical_tray]
-                route.order_id = entry.order_id
-                route.product_unit_id = f"{entry.order_id}_UNIT_{assignment.unit_index + 1:02d}"
-            entry.status = OrderRunStatus.RELEASED
-            entry.released_at = float(now)
-            available -= entry.plan.quantity
-            for task_id in entry.graph_task_ids:
-                task = self.graph.get(task_id)
+                if task.unit_id != unit_id:
+                    continue
+                task.tray_id = physical_tray
+                if "layer_index" in task.payload:
+                    task.payload["layer_index"] = selected_layer
+                    task.payload["height_m"] = (0.0, 0.151, 0.302)[selected_layer]
                 task.payload.pop("queue_held", None)
                 if task.status is TaskStatus.BLOCKED and task.failure_reason == "ORDER_QUEUED":
                     task.status = TaskStatus.PENDING
                     task.failure_reason = None
+
+            route = self.tray_routes[physical_tray]
+            route.order_id = entry.order_id
+            route.product_unit_id = unit_id
+            if entry.status is OrderRunStatus.QUEUED:
+                entry.status = OrderRunStatus.RELEASED
+            if entry.released_at is None:
+                entry.released_at = float(now)
+            available -= 1
             self.events.publish(
                 EventType.ORDER_RELEASED,
                 sim_time=now,
                 source="runtime",
-                payload={"order_id": entry.order_id, "queued": False},
+                payload={
+                    "order_id": entry.order_id,
+                    "unit_id": unit_id,
+                    "tray_id": physical_tray,
+                    "queued": False,
+                },
             )
         if refresh_ready:
             self._refresh_ready(now)
@@ -409,8 +447,209 @@ class ManufacturingRuntime:
                 )
         return ready
 
+    def _seal_furnace_batch(
+        self,
+        tasks: list[ManufacturingTask],
+        now: float,
+    ) -> RuntimeFurnaceBatch:
+        """Bind compatible logical furnace nodes to one physical cycle."""
+
+        ordered = sorted(
+            tasks,
+            key=lambda task: (
+                -task.priority,
+                float("inf") if task.ready_at is None else task.ready_at,
+                task.task_id,
+            ),
+        )
+        self._furnace_batch_sequence += 1
+        batch_id = f"FURNACE_BATCH_{self._furnace_batch_sequence:04d}"
+        leader = ordered[0]
+        order_ids = tuple(dict.fromkeys(task.order_id for task in ordered))
+        unit_count = sum(int(task.payload.get("batch_units", 1)) for task in ordered)
+        batch = RuntimeFurnaceBatch(
+            batch_id=batch_id,
+            leader_task_id=leader.task_id,
+            member_task_ids=tuple(task.task_id for task in ordered),
+            order_ids=order_ids,
+            unit_count=unit_count,
+            recipe=str(leader.payload.get("recipe", "")),
+            created_at=float(now),
+        )
+        self.furnace_batches[batch_id] = batch
+        for task in ordered:
+            self._furnace_task_batches[task.task_id] = batch_id
+            task.payload["furnace_batch_id"] = batch_id
+            task.payload["furnace_batch_leader"] = leader.task_id
+            task.payload["furnace_batch_members"] = list(batch.member_task_ids)
+
+        # A shared cycle releases every member at the same instant. Preserve
+        # the physical top-to-bottom rack unloading order across order
+        # boundaries, not merely within each original ProcessPlan.
+        unloads: list[ManufacturingTask] = []
+        for task in ordered:
+            unloads.extend(
+                self.graph.get(successor_id)
+                for successor_id in task.successors
+                if self.graph.get(successor_id).task_type is TaskType.UNLOAD_RACK_LAYER
+            )
+        unloads = sorted(
+            {task.task_id: task for task in unloads}.values(),
+            key=lambda task: (-int(task.payload.get("layer_index", 0)), task.task_id),
+        )
+        for previous, following in zip(unloads, unloads[1:]):
+            self.graph.add_dependency(previous.task_id, following.task_id)
+        return batch
+
+    def _prepare_furnace_batches(
+        self,
+        ready: list[ManufacturingTask],
+        now: float,
+    ) -> list[ManufacturingTask]:
+        """Return schedulable tasks while compatible furnace nodes wait/seal."""
+
+        ordinary = [task for task in ready if task.task_type is not TaskType.RUN_FURNACE]
+        furnace = [task for task in ready if task.task_type is TaskType.RUN_FURNACE]
+        schedulable: list[ManufacturingTask] = []
+        unassigned: list[ManufacturingTask] = []
+        for task in furnace:
+            batch_id = self._furnace_task_batches.get(task.task_id)
+            if batch_id is None:
+                unassigned.append(task)
+                continue
+            batch = self.furnace_batches[batch_id]
+            if task.task_id == batch.leader_task_id:
+                schedulable.append(task)
+
+        if unassigned:
+            candidates = sorted(
+                unassigned,
+                key=lambda task: (
+                    -task.priority,
+                    float("inf") if task.ready_at is None else task.ready_at,
+                    task.task_id,
+                ),
+            )
+            selected: list[ManufacturingTask] = []
+            selected_plans: list[ProcessPlan] = []
+            units = 0
+            maximum = self.config.batching.maximum_units
+            for task in candidates:
+                plan = self.orders[task.order_id].plan
+                task_units = int(task.payload.get("batch_units", 1))
+                if units + task_units > maximum:
+                    continue
+                if selected_plans and not are_process_plans_compatible((*selected_plans, plan)):
+                    continue
+                selected.append(task)
+                selected_plans.append(plan)
+                units += task_units
+                if units == maximum:
+                    break
+
+            oldest_ready = min(
+                (task.ready_at if task.ready_at is not None else float(now)) for task in selected
+            )
+            waited = max(0.0, float(now) - float(oldest_ready))
+            selected_ids = {task.task_id for task in selected}
+            future_compatible = any(
+                candidate.task_type is TaskType.RUN_FURNACE
+                and candidate.task_id not in selected_ids
+                and candidate.task_id not in self._furnace_task_batches
+                and not candidate.payload.get("queue_held")
+                and candidate.status
+                in {
+                    TaskStatus.PENDING,
+                    TaskStatus.READY,
+                    TaskStatus.RESERVED,
+                    TaskStatus.RUNNING,
+                }
+                and units + int(candidate.payload.get("batch_units", 1)) <= maximum
+                and are_process_plans_compatible((*selected_plans, self.orders[candidate.order_id].plan))
+                for candidate in self.graph
+            )
+            selected_order_ids = {task.order_id for task in selected}
+            same_order_future_admitted = any(
+                candidate.task_type is TaskType.RUN_FURNACE
+                and candidate.task_id not in selected_ids
+                and candidate.task_id not in self._furnace_task_batches
+                and candidate.order_id in selected_order_ids
+                and not candidate.payload.get("queue_held")
+                and candidate.status
+                in {
+                    TaskStatus.PENDING,
+                    TaskStatus.READY,
+                    TaskStatus.RESERVED,
+                    TaskStatus.RUNNING,
+                }
+                for candidate in self.graph
+            )
+            may_run_partial = (
+                self.config.batching.allow_partial_batch
+                and not same_order_future_admitted
+                and (not future_compatible or waited + 1e-9 >= self.config.batching.max_wait_time)
+            )
+            if selected and (units == maximum or may_run_partial):
+                batch = self._seal_furnace_batch(selected, now)
+                schedulable.append(self.graph.get(batch.leader_task_id))
+                selected_ids = set(batch.member_task_ids)
+                for task in candidates:
+                    if task.task_id not in selected_ids:
+                        task.payload["planning_blockers"] = ["等待下一兼容炉批"]
+            else:
+                for task in selected:
+                    task.payload["planning_blockers"] = [
+                        f"等待兼容炉批：{units}/{maximum}件，已等待{waited:.1f}s"
+                    ]
+                for task in candidates:
+                    if task not in selected:
+                        task.payload["planning_blockers"] = ["等待兼容炉批或当前炉批释放"]
+        return [*ordinary, *schedulable]
+
+    def _start_furnace_batch(self, task: ManufacturingTask, now: float) -> None:
+        batch_id = self._furnace_task_batches.get(task.task_id)
+        if batch_id is None:
+            return
+        batch = self.furnace_batches[batch_id]
+        if task.task_id == batch.leader_task_id:
+            batch.status = "RUNNING"
+            batch.started_at = float(now)
+
+    def _complete_furnace_batch(self, task: ManufacturingTask, now: float) -> None:
+        batch_id = self._furnace_task_batches.get(task.task_id)
+        if batch_id is None:
+            return
+        batch = self.furnace_batches[batch_id]
+        if task.task_id != batch.leader_task_id:
+            return
+        for member_id in batch.member_task_ids:
+            if member_id == task.task_id:
+                continue
+            member = self.graph.get(member_id)
+            if member.status is not TaskStatus.READY:
+                continue
+            member.payload["coalesced_physical_cycle"] = task.task_id
+            self.graph.mark_succeeded(member.task_id, now)
+            self.events.publish(
+                EventType.TASK_SUCCEEDED,
+                sim_time=now,
+                source=batch.batch_id,
+                payload={
+                    "task_id": member.task_id,
+                    "task_type": member.task_type.value,
+                    "metrics": {
+                        "shared_furnace_batch": batch.batch_id,
+                        "physical_cycle_task_id": task.task_id,
+                    },
+                },
+            )
+        batch.status = "COMPLETED"
+        batch.completed_at = float(now)
+
     def _complete_task(self, task: ManufacturingTask, metrics: dict[str, Any], now: float) -> None:
         self.graph.mark_succeeded(task.task_id, now)
+        if task.task_type is TaskType.RUN_FURNACE:
+            self._complete_furnace_batch(task, now)
         if task.task_type is TaskType.PICK_BASE_PLATE:
             self._arm1_payload_handoff = {"unit_id": task.unit_id, "payload": "base_plate"}
         elif task.task_type is TaskType.PICK_FIN:
@@ -494,6 +733,12 @@ class ManufacturingRuntime:
 
     def _fail_task(self, task: ManufacturingTask, code: str, metrics: dict[str, Any], now: float) -> None:
         self.graph.mark_failed(task.task_id, code, now)
+        if task.task_type is TaskType.RUN_FURNACE:
+            batch_id = self._furnace_task_batches.get(task.task_id)
+            if batch_id is not None:
+                batch = self.furnace_batches[batch_id]
+                if batch.leader_task_id == task.task_id:
+                    batch.status = "RECOVERING"
         self._abort_cell_state(task)
         if self.motion_planning is not None:
             self.motion_planning.release_task(task, retain_path=False)
@@ -528,6 +773,16 @@ class ManufacturingRuntime:
             source="recovery_policy",
             payload=plan.as_dict(),
         )
+
+    def _finish_recovered_furnace_batches(self, now: float) -> None:
+        """Release logical members after the shared interlock is recovered."""
+
+        for batch in self.furnace_batches.values():
+            if batch.status != "RECOVERING":
+                continue
+            leader = self.graph.get(batch.leader_task_id)
+            if leader.payload.get("recovered"):
+                self._complete_furnace_batch(leader, now)
 
     def _new_fault(
         self,
@@ -611,6 +866,12 @@ class ManufacturingRuntime:
                     self.resources.release(task.assigned_resource or "", task.task_id, now)
                     self.zones.release(task.task_id)
                 self.graph.mark_failed(task.task_id, fault.fault_type.value, now)
+                if task.task_type is TaskType.RUN_FURNACE:
+                    batch_id = self._furnace_task_batches.get(task.task_id)
+                    if batch_id is not None:
+                        batch = self.furnace_batches[batch_id]
+                        if batch.leader_task_id == task.task_id:
+                            batch.status = "RECOVERING"
             plan = self.recovery.plan(fault, self.graph, now)
             self.events.publish(
                 EventType.RECOVERY_PLANNED,
@@ -835,6 +1096,7 @@ class ManufacturingRuntime:
         if poll_executor:
             self.advance_active_skills(timestamp)
         self.recovery.update(self.graph, timestamp)
+        self._finish_recovered_furnace_batches(timestamp)
         for plan in self.recovery.plans.values():
             if plan.status.value == "SUCCEEDED":
                 fault = self.faults.get(plan.fault_id)
@@ -852,6 +1114,7 @@ class ManufacturingRuntime:
         ready = self._refresh_ready(timestamp)
         if self.flexible_cell:
             ready = [task for task in ready if self._cell_task_available(task)]
+        ready = self._prepare_furnace_batches(ready, timestamp)
         occupied = {zone for zone, lease in self.zones.snapshot().items() if lease is not None}
         assignments = self.scheduler.select_assignments(
             ready,
@@ -897,6 +1160,8 @@ class ManufacturingRuntime:
                 self._begin_cell_state(task, timestamp)
                 self.executor.start_task(task, assignment.resource_id, now=timestamp)
                 task.mark_running(timestamp)
+                if task.task_type is TaskType.RUN_FURNACE:
+                    self._start_furnace_batch(task, timestamp)
                 if task.station_id:
                     try:
                         workstation = self.workstations[WorkstationId(task.station_id)]
@@ -978,6 +1243,15 @@ class ManufacturingRuntime:
             station = self.workstations[WorkstationId.S1_BASE_LOADING]
             available = station.tray_id in {None, task.tray_id}
             reason = "S1仍有在制托盘"
+        elif task.task_type is TaskType.PICK_FIN:
+            # Keep the useful pickup/comb-install overlap, but never pre-grasp
+            # a fin while S3 (or its inbound slide) belongs to another pallet.
+            # A held fin makes Arm1 non-preemptible and can otherwise form a
+            # circular wait with the next order's base-loading task.
+            station = self.workstations[WorkstationId.S3_FIN_ASSEMBLY]
+            inbound = self.transfers[TransferId.S2B_S3]
+            available = station.tray_id in {None, task.tray_id} and inbound.tray_id in {None, task.tray_id}
+            reason = "S3正服务另一托盘，禁止提前夹持翅片"
         elif task.station_id:
             try:
                 station_id = WorkstationId(task.station_id)
@@ -1010,6 +1284,32 @@ class ManufacturingRuntime:
             if entry.status not in {OrderRunStatus.RELEASED, OrderRunStatus.RUNNING}:
                 continue
             tasks = [self.graph.get(task_id) for task_id in entry.graph_task_ids]
+            route_tasks = [
+                task
+                for task in tasks
+                if task.task_type in {TaskType.ROUTE_PASS, TaskType.ROUTE_REWORK, TaskType.ROUTE_SCRAP}
+                and task.status is TaskStatus.SUCCEEDED
+            ]
+            for route_task in route_tasks:
+                if route_task.unit_id in entry.completed_unit_ids:
+                    continue
+                entry.completed_unit_ids.add(route_task.unit_id)
+                tray_id = route_task.tray_id
+                route = self.tray_routes.get(str(tray_id))
+                if route is not None and route.order_id == entry.order_id:
+                    for workstation in self.workstations.values():
+                        if workstation.tray_id == route.tray_id:
+                            workstation.tray_id = None
+                    route.phase = TrayRoutePhase.EMPTY_BUFFER
+                    route.owner = TrayOwner.EMPTY_BUFFER
+                    route.station_id = None
+                    route.order_id = None
+                    route.product_unit_id = None
+                    route.mold_name = None
+                    route.comb_name = None
+                    route.press_locked = False
+                    route.last_transition_at = float(now)
+                    entry.rack_assignments.pop(route.tray_id, None)
             if any(task.status in {TaskStatus.RUNNING, TaskStatus.SUCCEEDED} for task in tasks):
                 entry.status = OrderRunStatus.RUNNING
             if all(task.status.terminal for task in tasks):
@@ -1023,10 +1323,9 @@ class ManufacturingRuntime:
                     entry.status = OrderRunStatus.COMPLETED
                 entry.completed_at = float(now)
                 if entry.status is OrderRunStatus.COMPLETED:
-                    # The finished product leaves through the output box and
-                    # its empty pallet returns to the four-pallet pool.  This
-                    # is the WIP release event that allows a queued normal or
-                    # urgent order to be admitted without resetting Viewer.
+                    # Normally each product unit releases its pallet as soon
+                    # as its finished-goods route succeeds. Keep this fallback
+                    # for legacy/custom graphs without an explicit route node.
                     for route in self.tray_routes.values():
                         if route.order_id != entry.order_id:
                             continue
@@ -1119,6 +1418,9 @@ class ManufacturingRuntime:
         self._max_parallel_arms = 0
         self._max_parallel_tasks = 0
         self._arm1_payload_handoff = None
+        self.furnace_batches.clear()
+        self._furnace_task_batches.clear()
+        self._furnace_batch_sequence = 0
         if self.motion_planning is not None:
             self.motion_planning.reset()
         self._reset_flexible_cell_state()
@@ -1440,6 +1742,10 @@ class ManufacturingRuntime:
                 [] if self.motion_planning is None else self.motion_planning.reservation_snapshots()
             ),
             "motion_blockers": ({} if self.motion_planning is None else dict(self.motion_planning.blockers)),
+            "furnace_batches": [
+                batch.as_dict()
+                for batch in sorted(self.furnace_batches.values(), key=lambda item: item.batch_id)
+            ],
             "gantt_events": [
                 {
                     "task_id": task.task_id,

@@ -27,7 +27,7 @@ from brazing_sim.flexible import (
 from brazing_sim.process import ProcessCoordinator
 from brazing_sim.scene import BrazingScene
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config"
 
 

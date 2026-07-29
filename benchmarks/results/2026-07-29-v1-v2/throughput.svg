@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500">
+  <rect width="960" height="500" rx="24" fill="#111827"/>
+  <text x="48" y="54" fill="#f9fafb" font-family="Arial,sans-serif" font-size="28" font-weight="700">多订单仿真吞吐（越高越好）</text>
+  <text x="48" y="84" fill="#9ca3af" font-family="Arial,sans-serif" font-size="15">按真实完工事件计算 · 单位：件 / 仿真小时</text>
+  <line x1="245" y1="120" x2="245" y2="420" stroke="#4b5563"/>
+  <g font-family="Arial,sans-serif" font-size="18" fill="#e5e7eb">
+    <text x="48" y="174">三件 A</text>
+    <text x="48" y="324">A/B/C 各一件</text>
+  </g>
+  <g>
+    <rect x="245" y="132" width="601" height="34" rx="8" fill="#14b8a6"/>
+    <rect x="245" y="178" width="259" height="34" rx="8" fill="#6b7280"/>
+    <rect x="245" y="282" width="626" height="34" rx="8" fill="#14b8a6"/>
+    <rect x="245" y="328" width="384" height="34" rx="8" fill="#6b7280"/>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="16" font-weight="700" fill="#f9fafb">
+    <text x="760" y="155">V2 30.06</text>
+    <text x="514" y="201">V1 12.93</text>
+    <text x="785" y="305">V2 31.28</text>
+    <text x="639" y="351">V1 19.20</text>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="18" fill="#5eead4">
+    <text x="245" y="245">↑ 132.5%</text>
+    <text x="245" y="395">↑ 62.9%</text>
+  </g>
+</svg>

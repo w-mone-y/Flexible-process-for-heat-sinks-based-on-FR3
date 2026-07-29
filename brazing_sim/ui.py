@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import sys
 from typing import Any, Iterable
@@ -11,6 +12,93 @@ from .fault_catalog import MANUAL_FAULT_CATALOG
 from .planning.task_models import task_detail_label_zh, task_status_label_zh, task_type_label_zh
 
 TASK_GRAPH_NODE_SIZE = (190.0, 72.0)
+PLANNING_TAB_TITLES = (
+    "运行总览",
+    "订单规划",
+    "任务图 / 调度",
+    "异步流水工位",
+    "实时甘特图",
+    "产品工程图规划",
+    "资源与区域",
+    "故障与恢复规划",
+    "批次与物流",
+    "指标与实验",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class UiSegmentAction:
+    label_zh: str
+    segment: str
+
+
+@dataclass(frozen=True, slots=True)
+class LineUiProfile:
+    profile_id: str
+    window_title: str
+    tab_titles: tuple[str, ...]
+    segment_actions: tuple[UiSegmentAction, ...]
+    station_titles: dict[str, str]
+
+
+_V1_UI_PROFILE = LineUiProfile(
+    profile_id="V1_STANDARD",
+    window_title="低压配电柜散热组件钎焊 MuJoCo 仿真",
+    tab_titles=PLANNING_TAB_TITLES,
+    segment_actions=(
+        UiSegmentAction("单独运行取放", "pick_place"),
+        UiSegmentAction("检测1", "inspection_1"),
+        UiSegmentAction("Arm2运动", "arm2_motion"),
+        UiSegmentAction("翅片安装", "fin_assembly"),
+        UiSegmentAction("检测2", "inspection_2"),
+        UiSegmentAction("压紧/进炉/返回", "furnace_cycle"),
+    ),
+    station_titles={
+        "S1_BASE_LOADING": "S1 基板装载",
+        "S2A_DISPENSING": "S2A 钎料涂覆",
+        "S2B_MATERIAL_INSPECTION": "S2B 材料检测",
+        "S3_FIN_ASSEMBLY": "S3 翅片装配/压紧",
+        "RACK_INFEED": "炉前料架入口",
+    },
+)
+
+_V2_UI_PROFILE = LineUiProfile(
+    profile_id="V2_DUAL_INSTALL",
+    window_title="V2 双安装支路柔性钎焊 MuJoCo 仿真",
+    tab_titles=PLANNING_TAB_TITLES,
+    segment_actions=(
+        UiSegmentAction("基板上料", "v2_base_loading"),
+        UiSegmentAction("钎料涂覆", "v2_dispensing"),
+        UiSegmentAction("焊料检测", "v2_material_inspection"),
+        UiSegmentAction("Arm1 安装支路 A", "v2_install_a"),
+        UiSegmentAction("Arm3 安装支路 B", "v2_install_b"),
+        UiSegmentAction("双支路并行安装", "v2_parallel_install"),
+        UiSegmentAction("Y 合流与焊前检测", "v2_merge_inspection"),
+        UiSegmentAction("三层炉批", "v2_furnace_batch"),
+        UiSegmentAction("炉后检测与交付", "v2_post_braze_delivery"),
+    ),
+    station_titles={
+        "S1_BASE_LOADING": "S1 基板上料",
+        "S2A_DISPENSING": "S2A 钎料涂覆",
+        "S2B_MATERIAL_INSPECTION": "S2B 焊料检测与分流",
+        "S3A_ARM1_INSTALL": "S3A Arm1 翅片安装",
+        "S3B_ARM3_INSTALL": "S3B Arm3 翅片安装",
+        "Y_MERGE_SHARED": "Y 形合流单占用区",
+        "S4_PRE_BRAZE_INSPECTION": "S4 共享焊前检测",
+        "FURNACE_BUFFER_1": "炉前缓存 1",
+        "FURNACE_BUFFER_2": "炉前缓存 2",
+        "FURNACE_BUFFER_3": "炉前缓存 3",
+    },
+)
+
+
+def line_ui_profile(profile_id: str | None) -> LineUiProfile:
+    """Return one immutable UI description without importing Qt."""
+
+    normalized = str(profile_id or "V1_STANDARD").strip().upper()
+    if normalized in {"V2", "V2_DUAL_INSTALL"}:
+        return _V2_UI_PROFILE
+    return _V1_UI_PROFILE
 
 
 def unique_order_id(preferred: str, unavailable: Iterable[str] = ()) -> str:
@@ -133,6 +221,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
         return 2
 
     base_url = _base_url(args_or_url)
+    selected_profile = line_ui_profile(getattr(args_or_url, "line_profile", None))
 
     class TemperaturePlot(QWidget):
         def __init__(self) -> None:
@@ -166,7 +255,11 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
     class CameraWindow(QWidget):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("Arm3 inspection camera")
+            self.setWindowTitle(
+                "V2 双检测相机（Arm3 / 焊后固定）"
+                if selected_profile.profile_id == "V2_DUAL_INSTALL"
+                else "Arm3 inspection camera"
+            )
             layout = QVBoxLayout(self)
             self.status = QLabel("camera starting")
             self.status.setAlignment(Qt.AlignCenter)
@@ -396,7 +489,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
     class ControlPanel(QWidget):
         def __init__(self) -> None:
             super().__init__()
-            self.setWindowTitle("低压配电柜散热组件钎焊 MuJoCo 仿真")
+            self.setWindowTitle(selected_profile.window_title)
             shell = QVBoxLayout(self)
             self.tabs = QTabWidget()
             shell.addWidget(self.tabs)
@@ -409,35 +502,42 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self._fault_target_signature: tuple[str, ...] = ()
             self._submitted_order_ids: set[str] = set()
             self._table_signatures: dict[int, tuple[tuple[str, ...], ...]] = {}
+            self.segment_buttons: dict[str, Any] = {}
 
             controls = QGroupBox("单段流程控制")
             row = QHBoxLayout(controls)
-            self._button(row, "单独运行取放", "/segment", {"segment": "pick_place"})
-            self._button(row, "检测1", "/segment", {"segment": "inspection_1"})
-            self._button(row, "Arm2运动", "/segment", {"segment": "arm2_motion"})
-            self._button(row, "翅片安装", "/segment", {"segment": "fin_assembly"})
-            self._button(row, "检测2", "/segment", {"segment": "inspection_2"})
-            self._button(row, "压紧/进炉/返回", "/segment", {"segment": "furnace_cycle"})
+            for action in selected_profile.segment_actions:
+                button = self._button(
+                    row,
+                    action.label_zh,
+                    "/segment",
+                    {"segment": action.segment},
+                )
+                self.segment_buttons[action.segment] = button
+                if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                    button.setEnabled(False)
+                    button.setToolTip("等待对应 V2 物理 actor 接通")
             self._button(row, "Stop", "/stop", {})
             self._button(row, "Continue", "/continue", {})
             self._button(row, "Reset", "/reset", {})
             root.addWidget(controls)
 
-            batch_controls = QGroupBox("三层炉内料架")
-            batch_row = QHBoxLayout(batch_controls)
-            self._button(
-                batch_row,
-                "运行三层批次",
-                "/batch",
-                {"preset": "A", "layers": 3},
-            )
-            self._button(
-                batch_row,
-                "单独运行直线入炉",
-                "/segment",
-                {"segment": "rack_transfer"},
-            )
-            root.addWidget(batch_controls)
+            if selected_profile.profile_id == "V1_STANDARD":
+                batch_controls = QGroupBox("三层炉内料架")
+                batch_row = QHBoxLayout(batch_controls)
+                self._button(
+                    batch_row,
+                    "运行三层批次",
+                    "/batch",
+                    {"preset": "A", "layers": 3},
+                )
+                self._button(
+                    batch_row,
+                    "单独运行直线入炉",
+                    "/segment",
+                    {"segment": "rack_transfer"},
+                )
+                root.addWidget(batch_controls)
 
             speed_controls = QGroupBox("仿真速度")
             speed_row = QHBoxLayout(speed_controls)
@@ -517,6 +617,10 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.order_mode_input = QComboBox()
             self.order_mode_input.addItem("预设产品", "preset")
             self.order_mode_input.addItem("自定义产品", "custom")
+            if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                custom_item = self.order_mode_input.model().item(1)
+                custom_item.setEnabled(False)
+                custom_item.setToolTip("V2 当前只执行已经过实体工装验证的 A/B/C 产品")
             self.preset_input = QComboBox()
             self.preset_input.addItems(["A", "B", "C"])
             self.quantity_input = QSpinBox()
@@ -633,17 +737,19 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             task_filters.addWidget(QLabel("工位筛选"))
             self.task_station_filter = QComboBox()
             self.task_station_filter.addItem("全部工位", "")
-            self.task_station_filter.addItem("S1 基板装载", "S1_BASE_LOADING")
-            self.task_station_filter.addItem("S2A 钎料涂覆", "S2A_DISPENSING")
-            self.task_station_filter.addItem("S2B 材料检测", "S2B_MATERIAL_INSPECTION")
-            self.task_station_filter.addItem("S3 翅片装配", "S3_FIN_ASSEMBLY")
-            self.task_station_filter.addItem("炉前料架入口", "RACK_INFEED")
+            for station_id, title in selected_profile.station_titles.items():
+                self.task_station_filter.addItem(title, station_id)
             task_filters.addWidget(self.task_station_filter)
             task_filters.addWidget(QLabel("托盘筛选"))
             self.task_tray_filter = QComboBox()
             self.task_tray_filter.addItem("全部托盘", "")
-            for index in range(1, 5):
-                self.task_tray_filter.addItem(f"托盘{index}", f"tray_{index:02d}")
+            tray_count = 6 if selected_profile.profile_id == "V2_DUAL_INSTALL" else 4
+            tray_prefix = "V2_TRAY" if selected_profile.profile_id == "V2_DUAL_INSTALL" else "tray"
+            for index in range(1, tray_count + 1):
+                self.task_tray_filter.addItem(
+                    f"托盘{index}",
+                    f"{tray_prefix}_{index:02d}",
+                )
             task_filters.addWidget(self.task_tray_filter)
             task_filters.addStretch(1)
             self.task_station_filter.currentIndexChanged.connect(self._refresh_task_graph)
@@ -660,24 +766,33 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
 
             pipeline_page = QWidget()
             pipeline_root = QVBoxLayout(pipeline_page)
-            pipeline_overview = QGroupBox("浅U型异步流水工位")
+            pipeline_title = (
+                "V2 双安装支路异步流水工位"
+                if selected_profile.profile_id == "V2_DUAL_INSTALL"
+                else "浅U型异步流水工位"
+            )
+            pipeline_overview = QGroupBox(pipeline_title)
             pipeline_grid = QGridLayout(pipeline_overview)
             self.async_station_labels = {}
-            station_titles = (
-                ("S1_BASE_LOADING", "S1 基板装载"),
-                ("S2A_DISPENSING", "S2A 钎料涂覆"),
-                ("S2B_MATERIAL_INSPECTION", "S2B 材料检测"),
-                ("S3_FIN_ASSEMBLY", "S3 翅片装配/压紧"),
-                ("RACK_INFEED", "炉前料架入口"),
-            )
-            for index, (station_id, title) in enumerate(station_titles):
+            for index, (station_id, title) in enumerate(selected_profile.station_titles.items()):
                 label = QLabel(f"{title}：空闲")
                 label.setWordWrap(True)
                 self.async_station_labels[station_id] = label
                 pipeline_grid.addWidget(label, index // 2, index % 2)
-            self.async_line_status = QLabel("单向流：S1 → S2A → S2B → S3 → 料架 | WIP 0/3")
+            initial_route = (
+                "单向流：S1 → S2A → S2B → S3A/S3B → Y合流 → S4 → 三层炉 | WIP 0/6"
+                if selected_profile.profile_id == "V2_DUAL_INSTALL"
+                else "单向流：S1 → S2A → S2B → S3 → 料架 | WIP 0/3"
+            )
+            self.async_line_status = QLabel(initial_route)
             self.async_line_status.setWordWrap(True)
-            pipeline_grid.addWidget(self.async_line_status, 3, 0, 1, 2)
+            pipeline_grid.addWidget(
+                self.async_line_status,
+                (len(selected_profile.station_titles) + 1) // 2,
+                0,
+                1,
+                2,
+            )
             pipeline_root.addWidget(pipeline_overview)
             self.transfer_table = QTableWidget(0, 7)
             self.transfer_table.setHorizontalHeaderLabels(
@@ -819,6 +934,9 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.fault_injection_result.setWordWrap(True)
             injection_root.addWidget(self.fault_injection_result)
             recovery_root.addWidget(injection_group)
+            if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                injection_group.setEnabled(False)
+                injection_group.setToolTip("V2 故障物理 actor 接通后开放手动注入")
 
             self.manual_fault_table = QTableWidget(0, 6)
             self.manual_fault_table.setHorizontalHeaderLabels(
@@ -843,9 +961,13 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             ):
                 button = QPushButton(title)
                 button.clicked.connect(lambda _=False, value=action: self.recovery_action(value))
+                if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                    button.setEnabled(False)
                 recovery_actions.addWidget(button)
             replan = QPushButton("手动重规划")
             replan.clicked.connect(lambda: self.post("/scheduler/replan", {"reason": "qt_operator"}))
+            if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                replan.setEnabled(False)
             recovery_actions.addWidget(replan)
             recovery_root.addLayout(recovery_actions)
             self.tabs.addTab(recovery_page, "故障与恢复规划")
@@ -1159,10 +1281,11 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 for column, value in enumerate(row):
                     table.setItem(row_index, column, QTableWidgetItem(str(value)))
 
-        def _button(self, layout: Any, text: str, path: str, payload: dict[str, Any]) -> None:
+        def _button(self, layout: Any, text: str, path: str, payload: dict[str, Any]) -> Any:
             button = QPushButton(text)
             button.clicked.connect(lambda _=False, p=path, body=payload: self.post(p, body))
             layout.addWidget(button)
+            return button
 
         def post(self, path: str, payload: dict[str, Any]) -> None:
             try:
@@ -1176,6 +1299,18 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             try:
                 state = get_json(base_url + "/state", timeout=0.5)
                 self.latest_state = state
+                capabilities = state.get("ui_capabilities", {})
+                segment_capabilities = (
+                    capabilities.get("segments", {}) if isinstance(capabilities, dict) else {}
+                )
+                for segment, button in self.segment_buttons.items():
+                    enabled = (
+                        bool(segment_capabilities.get(segment, False))
+                        if selected_profile.profile_id == "V2_DUAL_INSTALL"
+                        else bool(segment_capabilities.get(segment, True))
+                    )
+                    button.setEnabled(enabled)
+                    button.setToolTip("" if enabled else "对应物理工序尚未接通，禁止形式化演示")
                 self._refresh_fault_targets(state)
                 self.order.setText(f"order: {state.get('order_id') or '-'}")
                 paused = " (PAUSED)" if state.get("paused", False) else ""
@@ -1209,9 +1344,20 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 )
                 for name, label in self.arms.items():
                     arm = state.get("arms", {}).get(name, {})
+                    physical_detail = ""
+                    if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                        waypoint_count = int(arm.get("waypoint_count", 0))
+                        waypoint_index = int(arm.get("waypoint_index", 0))
+                        target = str(arm.get("target_zh") or "")
+                        if target:
+                            physical_detail = (
+                                f" | {target}"
+                                f"{f' [{waypoint_index}/{waypoint_count}]' if waypoint_count else ''}"
+                            )
                     label.setText(
                         f"{name}: {arm.get('status', 'idle')}  "
                         f"{arm.get('task_type', '')} {arm.get('task_id', '')}"
+                        f"{physical_detail}"
                     )
                 batch = state.get("batch", {})
                 rack = state.get("rack", {})
@@ -1251,13 +1397,24 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                         overlap_text = " | concurrent axis return"
                     else:
                         overlap_text = ""
+                    mechanism_text = ""
+                    if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                        segment_count = int(transfer.get("segment_count", 1))
+                        segment_index = int(transfer.get("segment_index", 1))
+                        mechanism_text = (
+                            f" | 运输分段: {segment_index}/{segment_count}"
+                            f" | 升降: {1000.0 * float(transfer.get('lift_height_m', 0.0)):.0f} mm"
+                            f" | 前推叉: {1000.0 * float(transfer.get('pusher_position_m', 0.0)):.0f} mm"
+                            f" | 后抽叉: "
+                            f"{1000.0 * float(transfer.get('rear_extractor_position_m', 0.0)):.0f} mm"
+                        )
                     self.transfer_status.setText(
                         f"transfer: {transfer.get('phase', 'IDLE')} | "
                         f"step: {transfer.get('step') or '-'} | "
                         f"tray: {transfer.get('unit_id') or '-'} | "
                         f"入炉传送: {100.0 * float(transfer.get('conveyor_progress', 0.0)):.0f}% | "
                         f"lock: {1000.0 * float(transfer.get('lock_position_m', 0.0)):.0f} mm"
-                        f"{overlap_text}"
+                        f"{mechanism_text}{overlap_text}"
                     )
                     self.logistics_transfer.setText(self.transfer_status.text())
                 self.logistics_furnace.setText(self.furnace.text())
@@ -1331,17 +1488,11 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 self._fill_table(self.scheduler_decisions, decision_rows[:80])
 
                 workstations = state.get("workstations", {})
-                station_titles = {
-                    "S1_BASE_LOADING": "S1 基板装载",
-                    "S2A_DISPENSING": "S2A 钎料涂覆",
-                    "S2B_MATERIAL_INSPECTION": "S2B 材料检测",
-                    "S3_FIN_ASSEMBLY": "S3 翅片装配/压紧",
-                    "RACK_INFEED": "炉前料架入口",
-                }
                 for station_id, label in self.async_station_labels.items():
                     item = workstations.get(station_id, {})
                     label.setText(
-                        f"{station_titles[station_id]}：{item.get('tray_id') or '空'} | "
+                        f"{selected_profile.station_titles[station_id]}："
+                        f"{item.get('tray_id') or '空'} | "
                         f"任务 {item.get('occupied_by') or '无'} | "
                         f"允许移载 {'是' if item.get('safe_for_transfer', True) else '否'}"
                     )
@@ -1354,11 +1505,17 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 mode_title = {
                     "VERIFIED_PHYSICAL_QUEUE": "分段同源真实工艺",
                     "MULTI_PALLET_RUNTIME": "多托盘并行生产",
+                    "V2_DUAL_INSTALL": "V2 双安装支路",
                 }.get(router_mode, "标准物理流程")
+                route_text = (
+                    "S1 → S2A → S2B → S3A/S3B → Y合流 → S4 → 三层贯通炉"
+                    if selected_profile.profile_id == "V2_DUAL_INSTALL"
+                    else "S1 → S2A → S2B → S3 → 料架"
+                )
                 parallelism = async_line.get("parallelism", {})
                 active_arms = "/".join(parallelism.get("active_arms", [])) or "无"
                 self.async_line_status.setText(
-                    f"执行模式：{mode_title} | 单向流：S1 → S2A → S2B → S3 → 料架 | "
+                    f"执行模式：{mode_title} | 单向流：{route_text} | "
                     f"WIP {int(async_line.get('active_wip', 0))}/"
                     f"{int(async_line.get('wip_limit', 3))} | "
                     f"当前并行臂 {active_arms}（{int(parallelism.get('current_parallel_arms', 0))}台）| "

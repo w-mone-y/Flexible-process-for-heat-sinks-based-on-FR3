@@ -892,46 +892,54 @@ class ProcessPlanTaskGraphBuilder:
         if self.flexible_cell:
             self._decorate_async_line(graph, plan)
         batch_id = plan.order.order_id
-        batch_ready = self._make(
-            task_id=f"{batch_id}_BATCH_READY",
-            task_type=TaskType.BATCH_READY,
-            plan=plan,
-            unit_id=f"{batch_id}_BATCH",
-            tray_id=None,
-            predecessors=lock_tasks,
-            resources=("FURNACE",),
-            zones=("ZONE_FURNACE_LOADING",),
-        )
-        graph.add_task(batch_ready)
-        furnace = self._make(
-            task_id=f"{batch_id}_RUN_FURNACE",
-            task_type=TaskType.RUN_FURNACE,
-            plan=plan,
-            unit_id=f"{batch_id}_BATCH",
-            tray_id=None,
-            predecessors=(batch_ready.task_id,),
-            resources=("FURNACE",),
-            zones=("ZONE_FURNACE_LOADING",),
-            payload={"recipe": plan.recipe.name, "duration_s": plan.recipe.to_domain().process_seconds},
-        )
-        graph.add_task(furnace)
+        furnace_by_unit: dict[int, ManufacturingTask] = {}
+        single_unit = len(plan.rack_assignments) == 1
+        for assignment, lock_task_id in zip(plan.rack_assignments, lock_tasks, strict=True):
+            unit_id = f"{batch_id}_UNIT_{assignment.unit_index + 1:02d}"
+            prefix = f"{batch_id}" if single_unit else f"{batch_id}_U{assignment.unit_index + 1:02d}"
+            batch_ready = self._make(
+                task_id=f"{prefix}_BATCH_READY",
+                task_type=TaskType.BATCH_READY,
+                plan=plan,
+                unit_id=unit_id,
+                tray_id=assignment.tray_id,
+                predecessors=(lock_task_id,),
+                resources=("FURNACE",),
+                zones=("ZONE_FURNACE_LOADING",),
+                payload={"batch_units": 1},
+            )
+            graph.add_task(batch_ready)
+            furnace = self._make(
+                task_id=f"{prefix}_RUN_FURNACE",
+                task_type=TaskType.RUN_FURNACE,
+                plan=plan,
+                unit_id=unit_id,
+                tray_id=assignment.tray_id,
+                predecessors=(batch_ready.task_id,),
+                resources=("FURNACE",),
+                zones=("ZONE_FURNACE_LOADING",),
+                payload={
+                    "recipe": plan.recipe.name,
+                    "duration_s": plan.recipe.to_domain().process_seconds,
+                    "batch_units": 1,
+                },
+            )
+            graph.add_task(furnace)
+            furnace_by_unit[assignment.unit_index] = furnace
 
         post_inspection_zones = (
             ("ZONE_OUTFEED", "ZONE_S3_OUTPUT_INTERARM") if self.flexible_cell else ("ZONE_OUTFEED",)
         )
-        previous_unload: str | None = None
         for assignment in sorted(plan.rack_assignments, key=lambda item: item.layer_index, reverse=True):
             unit_id = f"{plan.order.order_id}_UNIT_{assignment.unit_index + 1:02d}"
-            predecessors = [furnace.task_id]
-            if previous_unload is not None:
-                predecessors.append(previous_unload)
+            furnace = furnace_by_unit[assignment.unit_index]
             unload = self._make(
                 task_id=_task_id(plan.order.order_id, assignment.unit_index, "UNLOAD_RACK"),
                 task_type=TaskType.UNLOAD_RACK_LAYER,
                 plan=plan,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
-                predecessors=predecessors,
+                predecessors=(furnace.task_id,),
                 resources=("ELEVATOR", "TRANSFER_FORK"),
                 zones=("ZONE_RACK_FRONT", "ZONE_ELEVATOR_TRANSFER"),
                 retry_limit=1,
@@ -1021,7 +1029,6 @@ class ProcessPlanTaskGraphBuilder:
                     payload={"condition": disposition},
                 )
                 graph.add_task(route)
-            previous_unload = unload.task_id
         if self.flexible_cell:
             # The simplified furnace layout has one physical straight-belt
             # carriage.  Legacy task names (elevator/fork/rack lock) remain in

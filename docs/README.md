@@ -6,6 +6,8 @@
 
 - [项目目录说明](architecture/项目目录说明.md)
 - [视觉模型与资产说明](architecture/视觉模型与资产说明.md)
+- [V2 双安装支路规格](specs/v2-dual-install-line.md)
+- [V1/V2 实测效率报告](../benchmarks/results/2026-07-29-v1-v2/comparison.md)
 - [Arm2 在整体流程中的任务](process/Arm2%20在整体流程中的任务.md)
 
 ## 研究材料

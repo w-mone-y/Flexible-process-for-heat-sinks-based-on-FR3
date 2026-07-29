@@ -9,7 +9,7 @@ from brazing_sim.config import create_product_state, make_order_spec
 from brazing_sim.fault_catalog import MANUAL_FAULT_CATALOG
 from brazing_sim.fault_visuals import PhysicalFaultVisualizer
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture()

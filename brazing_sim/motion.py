@@ -782,6 +782,57 @@ class ArmController:
         finally:
             self._restore_kinematic_state(saved_state)
 
+    def solve_pose_chain(
+        self,
+        targets: Iterable[Pose],
+        *,
+        tcp: bool = False,
+        seed: ArrayLike | None = None,
+        max_iterations: int = 600,
+        step_s: float = 0.03,
+        locked_joints: Mapping[int, float] | None = None,
+        position_tolerance_m: float | None = None,
+        orientation_tolerance_rad: float | None = None,
+        full_orientation: bool = False,
+    ) -> tuple[ReachabilityResult, ...]:
+        """Solve an ordered pose chain with one MuJoCo state save/restore.
+
+        Consecutive Cartesian samples naturally warm-start one another.  This
+        is equivalent to repeated :meth:`solve_ik` calls but avoids copying
+        and forwarding the complete model state at every 1.5--3 mm process
+        sample, which is important for synchronous viewer planning.
+        """
+
+        saved_state = self._save_kinematic_state()
+        results: list[ReachabilityResult] = []
+        current_seed = (
+            np.asarray(self.data.qpos[self.qpos_ids], dtype=float).copy()
+            if seed is None
+            else np.asarray(seed, dtype=float).copy()
+        )
+        if current_seed.shape != (7,):
+            raise ValueError("IK seed must have seven joints")
+        try:
+            for target in targets:
+                result = self._solve_ik_inplace(
+                    target,
+                    tcp=tcp,
+                    seed=current_seed,
+                    max_iterations=max_iterations,
+                    step_s=step_s,
+                    locked_joints=locked_joints,
+                    position_tolerance_m=position_tolerance_m,
+                    orientation_tolerance_rad=orientation_tolerance_rad,
+                    full_orientation=full_orientation,
+                )
+                results.append(result)
+                if not result.reachable:
+                    break
+                current_seed = result.joint_positions
+            return tuple(results)
+        finally:
+            self._restore_kinematic_state(saved_state)
+
     def validate_trajectory(
         self,
         trajectory: PolylineTrajectory,

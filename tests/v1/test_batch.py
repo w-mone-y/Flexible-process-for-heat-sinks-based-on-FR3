@@ -27,7 +27,7 @@ from brazing_sim.planning.task_models import TaskType as RuntimeTaskType
 from brazing_sim.process import ActorResult, ProcessCoordinator
 from brazing_sim.scene import BrazingScene
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _coordinators(*, fast: bool) -> tuple[BrazingScene, ProcessCoordinator, BatchCoordinator]:

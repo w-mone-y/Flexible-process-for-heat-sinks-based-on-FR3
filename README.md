@@ -12,13 +12,14 @@
   <img alt="Simulation speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B">
 </p>
 
-<img src="docs/images/readme/line_overview.png" alt="FR3 柔性钎焊产线 MuJoCo 总览" width="860">
+<img src="docs/images/readme/v2_overview.png" alt="V2 双安装支路 FR3 柔性钎焊产线 MuJoCo 总览" width="1000">
 
 <p>
   <a href="#-30-秒看懂这个项目">项目亮点</a> ·
   <a href="#-快速开始">快速开始</a> ·
   <a href="#-柔性订单">柔性订单</a> ·
   <a href="#-多订单协同">多订单协同</a> ·
+  <a href="#-v2-v1-实测效率对比">效率对比</a> ·
   <a href="#-故障注入与自动恢复">故障恢复</a> ·
   <a href="#-软件架构">软件架构</a>
 </p>
@@ -37,7 +38,7 @@
 |:---:|---|---|
 | 🦾 **Arm1** | 基板上料、翅片抓取与安装 | 吸盘/夹爪换刀、渐进夹紧、逐片插入梳齿槽 |
 | 🦾 **Arm2** | 钎料预涂与局部补涂 | 双喷嘴蛇形涂覆、逐条生成黄色钎料线 |
-| 📷 **Arm3** | 材料、翅片和焊后检测 | 腕部相机对准、扫描、缺陷判定与复检 |
+| 📷 **Arm3** | 检测优先，空闲时参与 B 线翅片安装 | 侧置相机扫描、窄夹爪抓取、逐片安装与复检 |
 
 系统不只“播放动画”，还同时维护任务 DAG、资源占用、区域锁、工件真值、返工次数、
 炉门互锁、托盘所有权和 KPI。故障会真实改变 MuJoCo 中的几何或设备状态，检测之后才会
@@ -50,7 +51,7 @@
 - 🔀 **多订单异步流水**：最多三张托盘在制，不同机械臂可在不同工位并行。
 - 🧠 **任务图动态调度**：`ProcessPlan → Task DAG → Scheduler → Skills`。
 - 🛠️ **可见故障与恢复**：漏涂、偏位、设备离线、输送超时、炉门互锁等。
-- 🔥 **完整炉体闭环**：装炉、10 秒热循环、出炉检测、成品出口和空托盘返回。
+- 🔥 **完整炉体闭环**：三层前门装炉、30 秒演示热循环、后门卸载、检测与交付。
 - 🖥️ **规划控制台**：订单、任务图、工程示意、资源、故障、物流与实验指标。
 - ⚡ **0.25×～32× 倍速**：只改变仿真推进速度，不改变任务依赖与质量结果。
 
@@ -64,28 +65,38 @@ flowchart LR
     S2A --> S2B["S2B 材料检测<br/>Arm3"]
     S2B -->|漏涂| R1["🔧 局部补涂"]
     R1 --> S2B
-    S2B -->|通过| S3["S3 梳齿引导装配<br/>Arm1 + 夹爪"]
-    S3 --> I2["📷 翅片检测"]
+    S2B -->|通过| D{"🧠 最早完工分流"}
+    D --> S3A["S3A 梳齿引导装配<br/>Arm1 + 夹爪"]
+    D --> S3B["S3B 梳齿引导装配<br/>Arm3 + 复合末端"]
+    S3A --> M["🔀 单占用合流"]
+    S3B --> M
+    M --> I2["📷 共享焊前检测"]
     I2 -->|偏位| R2["🔧 重抓 / 重装"]
     R2 --> I2
     I2 -->|通过| L["🔒 双短压梁锁紧"]
-    L --> F["🔥 入炉 / 10 秒热循环"]
+    L --> F["🔥 三层贯通炉 / 30 秒演示周期"]
     F --> PI["📷 焊后检测"]
-    PI --> D["📤 成品出口"]
+    PI --> OUT["📤 成品出口"]
 ```
 
-当前主线采用浅 U 形异步布局：
+V2 采用从左向右的双安装支路布局；稳定 V1 仍保留浅 U 形单安装支路：
 
 ```text
-S1 基板装载 (-0.48, 0.00)
-    → S2A 钎料涂覆 (-0.30, 0.40)
-    → S2B 材料检测 ( 0.30, 0.40)
-    → S3 翅片装配/压紧 (0.48, 0.00)
-    → 料架入口 (1.00, 0.00)
-    → 炉体 → 焊后检测 → 成品出口
+S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
+                                  ├→ S3A Arm1 安装 ┐
+                                  └→ S3B Arm3 安装 ┴→ S4 共享检测
+                                                     → 三位炉前缓存
+                                                     → 三层贯通炉
+                                                     → 固定焊后检测
+                                                     → 成品出口
 ```
 
 ## 🎬 真实仿真画面
+
+| 稳定 V1 单安装线 | V2 双安装线 |
+|:---:|:---:|
+| ![V1 浅 U 形柔性线](docs/images/readme/line_overview.png) | ![V2 双安装支路与贯通炉](docs/images/readme/v2_overview.png) |
+| 完整故障恢复、物理夹具和旧入口兼容基线 | Arm1/Arm3 并行安装、单占用合流和前装后卸三层炉 |
 
 | Arm2 逐条涂覆 | Arm1 逐片安装 |
 |:---:|:---:|
@@ -135,7 +146,25 @@ mjpython brazing_line.py --order C
 mjpython brazing_line.py --batch A
 ```
 
-### 3. YAML 柔性订单
+### 3. V2 双安装支路 Phase 1
+
+V2 使用独立入口和独立 MJCF，不覆盖 V1。它提供六托盘、Arm1/Arm3 双翅片
+安装支路、Y 形合流、三层贯通炉（前门装载、后门卸载）以及相同的十页签 Qt
+控制台。
+
+```bash
+# Viewer 空载启动，再从 UI 加入 A/B/C 普通或紧急订单
+mjpython brazing_line_v2.py
+
+# Headless 运行混合三订单
+python brazing_line_v2.py --headless --orders A,B,C --fast
+```
+
+> V2 当前是 Phase 1 物理门控预演版：机器人动作、抓取、TCP 到位、载具
+> 运输和炉体流程均参与门控；自定义产品、V2 单段 actor 与物理故障 actor 留待
+> Phase 2。完整边界见 [V2 规格](docs/specs/v2-dual-install-line.md)。
+
+### 4. YAML 柔性订单
 
 ```bash
 # 只加载、生成和校验计划，不启动 MuJoCo
@@ -198,17 +227,17 @@ config/scheduler.yaml
 
 ## 🔀 多订单协同
 
-物理场景预留三张在制托盘和一张备用托盘，WIP 上限为 3。超出的订单继续留在虚拟队列，
-前一张托盘释放后再进入产线。
+稳定 V1 使用三张在制托盘；V2 预分配六张托盘，允许“炉内最多三件 + 上游下一批
+最多三件”。超出物理 WIP 的订单留在虚拟队列，托盘完成虚拟回流后再释放。
 
 ```mermaid
 flowchart TB
     Q["订单队列<br/>普通 + 紧急"] --> G["每张托盘独立 Task DAG"]
     G --> SCH["动态优先级调度器<br/>每 tick 最多派发 3 个任务"]
-    SCH --> A1["Arm1<br/>S1 / S3"]
+    SCH --> A1["Arm1<br/>S1 / S3A"]
     SCH --> A2["Arm2<br/>S2A"]
-    SCH --> A3["Arm3<br/>S2B / S3 / 焊后"]
-    SCH --> LOG["四段独立输送 + 炉体物流"]
+    SCH --> A3["Arm3<br/>S2B / S3B / S4"]
+    SCH --> LOG["双支路滑轨 + 单占用合流 + 炉体物流"]
     A1 --> EVT["事件与真实指标"]
     A2 --> EVT
     A3 --> EVT
@@ -217,12 +246,37 @@ flowchart TB
     REC --> G
 ```
 
-- 四段 slide actuator 分别驱动 `S1→S2A→S2B→S3→料架入口`。
+- V2 在 S2B 后按预计最早完工时间分配 Arm1-A 或 Arm3-B 安装支路。
 - 托盘所有权按“源工位 → 输送段 → 目标工位”原子交接，禁止一托多属。
-- 不同机械臂可在互不冲突的工位同时运行。
-- S3 对 Arm1 和 Arm3 实行严格互斥，公共区域使用独立区域锁。
+- Arm1 与 Arm3 可在两张托盘上同时逐片安装；Arm3 检测优先，已经夹住的单片不可抢占。
+- 两条平面路线在 S4 前实施单占用合流，后到托盘在支路等待位停车。
 - 紧急订单不会打断正在进行的抓取、涂覆或输送，只竞争下一次资源释放。
 - 动态调度冲突会保持 READY 并等待，不会因为暂时无路可走就直接进入 ERROR。
+
+## 📈 V2 / V1 实测效率对比
+
+2026-07-29 在同一台 macOS 工作站以 headless **完整运动模式**实测；未使用 `--fast`。
+仿真 makespan 来自真实完工事件，墙钟来自进程端到端耗时。
+
+| 场景 | V2 makespan | 正式 V1 | V2 改善 | V2 并行安装重叠 |
+|---|---:|---:|---:|---:|
+| 单件 A | 206.30 s | 256.97 s | **↓ 19.7%** | 0.00 s |
+| 三件 A / 单炉批 | 359.25 s | 835.13 s | **↓ 57.0%** | 61.35 s |
+| A/B/C 各一件 | 345.25 s | 562.44 s | **↓ 38.6%** | 86.60 s |
+
+| 完工时间 | 多订单吞吐 |
+|:---:|:---:|
+| ![V2 与 V1 makespan 对比](benchmarks/results/2026-07-29-v1-v2/makespan.svg) | ![V2 与 V1 吞吐对比](benchmarks/results/2026-07-29-v1-v2/throughput.svg) |
+
+- 三件 A 的仿真吞吐由 **12.93 件/h** 提高到 **30.06 件/h**，提升 **132.5%**。
+- 混合 A/B/C 的吞吐由 **19.20 件/h** 提高到 **31.28 件/h**，提升 **62.9%**。
+- 早期 V1 只支持 A，完整单 A 在 333.63 s 触发炉体/Arm2 非预期接触并安全停机，
+  因此不把快进时间包装成有效完工成绩。
+
+> V2 仍是 `CONTROL_PLANE_REHEARSAL` Phase 1，以上数据证明调度、可见运输、动画门控
+> 和双安装支路的效率收益，不代表真实工厂节拍，也不等同于 Phase 2 全 TCP/抓取验收。
+
+查看[完整报告、原始 JSON/CSV 与复现说明](benchmarks/results/2026-07-29-v1-v2/comparison.md)。
 
 ## 🛠️ 故障注入与自动恢复
 
@@ -277,6 +331,7 @@ JSONL / CSV / KPI / Qt / HTTP API
 
 ```text
 brazing_line.py               标准版兼容启动器
+brazing_line_v2.py            双安装支路 V2 启动器
 brazing_line_cinematic.py     精细版兼容启动器
 run_flexible_order.py         YAML 订单兼容启动器
 scenes/production/            标准版与精细版 MuJoCo 场景
@@ -290,6 +345,7 @@ brazing_sim/
 ├── planning/                 ManufacturingTask 与 TaskGraph
 ├── scheduling/               固定/动态调度、资源和区域锁
 ├── execution/                技能注册、actor 适配和超时监测
+├── dual_line/                V2 拓扑、运行时、场景投影与机器人动作
 ├── recovery/                 故障模型、恢复策略和在线重规划
 ├── experiments/              事件指标与 fixed/dynamic 对比
 ├── motion.py                 FR3 控制、IK 与平滑轨迹
@@ -299,6 +355,11 @@ brazing_sim/
 ├── batch_transfer.py         入炉、料架、出炉和成品交付
 ├── paths.py                  项目目录和主场景权威路径
 └── api.py / ui.py            HTTP、终端与 Qt 控制台
+benchmarks/                   V1/V2 可复现效率对照与精选结果
+tests/
+├── shared/                   跨版本领域测试
+├── v1/                       标准线、柔性订单和旧入口回归
+└── v2/                       双安装线、场景、调度与 UI 回归
 ```
 
 更完整的中文职责说明见：
@@ -384,11 +445,13 @@ mjpython brazing_line_cinematic.py --batch A
 ```bash
 make check
 make test
+make test-v1
 make test-headless
 make test-batch
 make test-flexible
 make test-v2
 make test-cinematic
+make benchmark-help
 ```
 
 测试覆盖严格 YAML、A/B/C 几何、12/24 对象池、动态喷嘴、梳齿选型、Arm1 抓取安装、
