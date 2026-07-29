@@ -168,6 +168,7 @@ class DualLineSceneAdapter:
                 "v2_furnace_pusher_actuator",
                 "v2_furnace_rear_lift_actuator",
                 "v2_furnace_rear_extractor_actuator",
+                "v2_finished_output_gate_actuator",
                 "v2_furnace_layer_0_lock_actuator",
                 "v2_furnace_layer_1_lock_actuator",
                 "v2_furnace_layer_2_lock_actuator",
@@ -182,6 +183,7 @@ class DualLineSceneAdapter:
                 "v2_furnace_pusher_joint",
                 "v2_furnace_rear_lift_joint",
                 "v2_furnace_rear_extractor_joint",
+                "v2_finished_output_gate_joint",
             )
         }
         self._route_actuators = {
@@ -707,6 +709,9 @@ class DualLineSceneAdapter:
         self.data.ctrl[self._actuators["v2_furnace_rear_door_actuator"]] = (
             0.56 if runtime.furnace.state.rear_door_open else 0.0
         )
+        self.data.ctrl[self._actuators["v2_finished_output_gate_actuator"]] = (
+            0.50 if runtime.output_gate_open else 0.0
+        )
         for layer in runtime.furnace.state.layers:
             actuator = self._actuators[f"v2_furnace_layer_{layer.index}_lock_actuator"]
             self.data.ctrl[actuator] = 0.03 if layer.locked else 0.0
@@ -1187,6 +1192,12 @@ class DualLineSceneAdapter:
             )
         if kind == "FURNACE_REAR_OPEN":
             return bool(self.data.qpos[self._mechanism_qpos["v2_furnace_rear_door_joint"]] >= 0.54)
+        if kind == "FURNACE_REAR_CLOSE":
+            return bool(self.data.qpos[self._mechanism_qpos["v2_furnace_rear_door_joint"]] <= 0.01)
+        if kind == "OUTPUT_GATE_OPEN":
+            return bool(self.data.qpos[self._mechanism_qpos["v2_finished_output_gate_joint"]] >= 0.48)
+        if kind == "OUTPUT_GATE_CLOSE":
+            return bool(self.data.qpos[self._mechanism_qpos["v2_finished_output_gate_joint"]] <= 0.02)
         runtime = self._bound_runtime
         if runtime is None:
             return False

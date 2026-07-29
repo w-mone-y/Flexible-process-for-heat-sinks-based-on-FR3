@@ -785,13 +785,29 @@
       <site name="v2_finished_output_dock" size="0.010" rgba="1 0.8 0.1 0.9"/>
     </body>
     <body name="v2_finished_output_box" pos="4.62 0 0">
-      <geom class="structure" size="0.25 0.34 0.025" pos="0 0 0.15" material="v2_frame_mat"/>
-      <geom class="structure" size="0.025 0.34 0.28" pos="0.23 0 0.43" material="v2_frame_mat"/>
-      <geom class="structure" size="0.25 0.025 0.28" pos="0 0.315 0.43" material="v2_frame_mat"/>
-      <geom class="structure" size="0.25 0.025 0.28" pos="0 -0.315 0.43" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_finished_output_box_floor" type="box"
+            size="0.30 0.34 0.025" pos="0 0 0.15" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_finished_output_box_back" type="box"
+            size="0.025 0.34 0.29" pos="0.275 0 0.44" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_finished_output_box_left_wall" type="box"
+            size="0.30 0.025 0.29" pos="0 0.315 0.44" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_finished_output_box_right_wall" type="box"
+            size="0.30 0.025 0.29" pos="0 -0.315 0.44" material="v2_frame_mat"/>
+      <geom class="visual" name="v2_finished_output_box_roof" type="box"
+            size="0.30 0.34 0.025" pos="0 0 0.73" material="v2_frame_mat"/>
       <geom class="visual" name="v2_finished_output_sign" type="mesh"
-            mesh="v2_output_sign_mesh" pos="-0.255 0 0.610"
+            mesh="v2_output_sign_mesh" pos="-0.305 0 0.675"
             euler="0 0 1.57079632679" material="v2_output_sign_mat"/>
+    </body>
+    <body name="v2_finished_output_gate" pos="4.32 0 0.15" gravcomp="1">
+      <joint name="v2_finished_output_gate_joint" type="slide" axis="0 0 1"
+             range="0 0.50" damping="110"/>
+      <inertial pos="0 0 0.23" mass="10" diaginertia="0.22 0.22 0.07"/>
+      <geom class="visual" name="v2_finished_output_gate_panel" type="box"
+            size="0.025 0.34 0.23" pos="0 0 0.23" material="v2_safety_mat"
+            rgba="0.95 0.66 0.06 1"/>
+      <geom class="visual" name="v2_finished_output_gate_bottom_edge" type="box"
+            size="0.030 0.345 0.018" pos="0 0 0.018" material="v2_belt_mat"/>
     </body>
 
     <!-- Static ownership anchors. Equality activation is controlled by V2
@@ -1045,6 +1061,9 @@
               kp="2400" kv="190" ctrlrange="0 0.60"/>
     <position name="v2_output_transfer_actuator" joint="v2_output_transfer_joint"
               kp="2000" kv="160" ctrlrange="0 0.86"/>
+    <position name="v2_finished_output_gate_actuator"
+              joint="v2_finished_output_gate_joint"
+              kp="1800" kv="145" ctrlrange="0 0.50"/>
     <position name="v2_furnace_front_door_actuator" joint="v2_furnace_front_door_joint"
               kp="1600" kv="130" ctrlrange="0 0.56"/>
     <position name="v2_furnace_rear_door_actuator" joint="v2_furnace_rear_door_joint"

@@ -270,11 +270,24 @@ class ThroughBatchFurnace:
         tray_id = layer.tray_id
         layer.tray_id = None
         layer.locked = False
-        if not any(value.tray_id is not None for value in self.state.layers):
-            self.state.rear_door_open = False
-            self.state.phase = FurnacePhase.COMPLETE
-            self.state.complete = True
         return tray_id
+
+    def close_rear(self, *, now: float) -> None:
+        """Close the rear door only after every physical unload has settled.
+
+        ``unload_rear`` releases logical rack ownership when an extractor
+        starts moving.  Door closure is deliberately separate so the runtime
+        cannot close the panel while the final tray is still crossing it.
+        """
+
+        self._check_monotonic(now)
+        if not self.state.rear_door_open or self.state.phase is not FurnacePhase.UNLOADING:
+            raise RuntimeError("rear door may close only during rear unloading")
+        if any(layer.tray_id is not None for layer in self.state.layers):
+            raise RuntimeError("all furnace layers must be empty before closing the rear door")
+        self.state.rear_door_open = False
+        self.state.phase = FurnacePhase.COMPLETE
+        self.state.complete = True
 
     def should_release_partial_batch(
         self,

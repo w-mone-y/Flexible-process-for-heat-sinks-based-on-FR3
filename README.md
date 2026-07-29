@@ -12,7 +12,7 @@
   <img alt="Simulation speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B">
 </p>
 
-<img src="docs/images/readme/v2_overview.png" alt="V2 双安装支路 FR3 柔性钎焊产线 MuJoCo 总览" width="1000">
+<img src="docs/images/readme/v2_current_overview.png" alt="修复后的 V2 双安装支路 FR3 柔性钎焊产线 MuJoCo 实际运行总览" width="1000">
 
 <p>
   <a href="#-30-秒看懂这个项目">项目亮点</a> ·
@@ -95,20 +95,40 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 
 | 稳定 V1 单安装线 | V2 双安装线 |
 |:---:|:---:|
-| ![V1 浅 U 形柔性线](docs/images/readme/line_overview.png) | ![V2 双安装支路与贯通炉](docs/images/readme/v2_overview.png) |
+| ![V1 浅 U 形柔性线](docs/images/readme/line_overview.png) | ![修复后的 V2 双安装支路与贯通炉](docs/images/readme/v2_current_overview.png) |
 | 完整故障恢复、物理夹具和旧入口兼容基线 | Arm1/Arm3 并行安装、单占用合流和前装后卸三层炉 |
 
-| Arm2 逐条涂覆 | Arm1 逐片安装 |
-|:---:|:---:|
-| ![Arm2 钎料涂覆](docs/images/readme/material_application.png) | ![Arm1 翅片安装](docs/images/readme/fin_assembly.png) |
-| 黄色钎料线跟随喷嘴的实际运动逐渐生成 | 翅片由夹爪送入前后梳齿槽并保持姿态 |
+### 1. Arm2 逐条涂覆
 
-| 炉内热循环 | 成品出口交付 |
+| V1 稳定基线 | V2 双安装线 |
 |:---:|:---:|
-| ![散热片炉内钎焊](docs/images/readme/furnace_cycle.png) | ![散热片进入成品出口](docs/images/readme/finished_delivery.png) |
-| 托盘、模具与产品作为整体进出炉体 | 出口门完全打开后整托盘进入，空托盘原路返回 |
+| ![V1 Arm2 钎料涂覆](docs/images/readme/material_application.png) | ![V2 Arm2 钎料涂覆](docs/images/readme/v2_dispensing_current.png) |
+| 双喷嘴沿蛇形路径逐条生成黄色钎料线 | 复用 V1 的连续直线涂覆逻辑，并允许下一张托盘并行流动 |
 
-> 截图来自项目实际 MuJoCo 流程，不是概念效果图。
+### 2. 梳齿引导翅片安装
+
+| V1 单安装工位 | V2 双安装支路 |
+|:---:|:---:|
+| ![V1 Arm1 翅片安装](docs/images/readme/fin_assembly.png) | ![V2 Arm1 与 Arm3 并行翅片安装](docs/images/readme/v2_parallel_install_current.png) |
+| Arm1 逐片送入前后悬空梳齿槽 | Arm1 与 Arm3 在两张独立托盘上同时逐片安装 |
+
+### 3. 三层炉批热循环
+
+| V1 三层炉 | V2 前进后出贯通炉 |
+|:---:|:---:|
+| ![V1 散热片炉内钎焊](docs/images/readme/furnace_cycle.png) | ![V2 三层贯通炉热循环](docs/images/readme/v2_furnace_batch_current.png) |
+| 三层料架锁定后执行一次批次热循环 | 托盘逐件从前门装入，三层满载后关门执行兼容炉批 |
+
+### 4. 成品出口交付
+
+| V1 黄色升降门出口 | V2 封闭式黄色升降门出口 |
+|:---:|:---:|
+| ![V1 散热片进入成品出口](docs/images/readme/finished_delivery.png) | ![V2 托盘进入封闭成品出口](docs/images/readme/v2_post_braze_output_current.png) |
+| 门完全打开后整托盘进入，随后关门并隐藏产品 | 后门退完全部托盘才关闭；黄色门打开后托盘进入封闭箱体 |
+
+> 所有图片均来自项目实际 MuJoCo 流程，不是概念效果图。V2 图片来自修复后的
+> 同一组三件 A 实际运行：后门遵循“完全打开 → 三张托盘逐层退架 → 最后一张
+> 完全离炉 → 关闭”，成品出口遵循“黄色门打开 → 托盘进入 → 关门 → 虚拟回流”。
 
 ## 🚀 快速开始
 

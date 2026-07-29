@@ -6,6 +6,7 @@ from brazing_sim.dual_line import (
     BatchRecipe,
     DualInstallDispatcher,
     DualLineTopology,
+    FurnacePhase,
     InstallBranch,
     InstallRequest,
     InstallResourceState,
@@ -158,6 +159,11 @@ def test_furnace_requires_locked_layers_and_uses_front_then_rear_door() -> None:
     furnace.open_rear(now=33.2)
     assert furnace.unload_rear(now=33.3) == "V2_TRAY_02"
     assert furnace.unload_rear(now=33.4) == "V2_TRAY_01"
+    assert furnace.state.rear_door_open
+    assert furnace.state.phase is FurnacePhase.UNLOADING
+    assert not furnace.state.complete
+    furnace.close_rear(now=33.5)
+    assert not furnace.state.rear_door_open
     assert furnace.state.complete
 
 

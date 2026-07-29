@@ -127,6 +127,48 @@ def test_v2_loads_each_arriving_tray_top_down_before_the_batch_is_full() -> None
     assert thermal_start > max(load_completions)
 
 
+def test_v2_rear_door_stays_open_until_the_last_physical_unload_finishes() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="REAR_DOOR", quantity=3)
+
+    last_unload_started = False
+    for _ in range(5_000):
+        runtime.tick(0.05)
+        transfer = runtime.operations.get("FURNACE_TRANSFER")
+        occupied = [layer for layer in runtime.furnace.state.layers if layer.tray_id is not None]
+        if transfer is not None and transfer.kind == "FURNACE_UNLOAD_TRAY" and not occupied:
+            last_unload_started = True
+            assert runtime.furnace.state.rear_door_open
+            assert runtime.furnace.state.phase is FurnacePhase.UNLOADING
+            assert not runtime.furnace.state.complete
+            break
+
+    assert last_unload_started
+
+
+def test_v2_output_gate_wraps_each_delivery_and_closes_before_completion() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="OUTPUT_GATE")
+    snapshot = runtime.run_until_complete(max_sim_time=180.0, dt=0.05)
+
+    events = snapshot["events"]
+    opened = next(index for index, event in enumerate(events) if event["type"] == "OUTPUT_GATE_OPENED")
+    output_handoff = next(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "TRAY_HANDOFF" and event["target"] == "OUTPUT"
+    )
+    delivery_complete = next(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "OPERATION_COMPLETED" and event["kind"] == "OUTPUT_DELIVERY"
+    )
+    closed = next(index for index, event in enumerate(events) if event["type"] == "OUTPUT_GATE_CLOSED")
+    unit_complete = next(index for index, event in enumerate(events) if event["type"] == "UNIT_COMPLETED")
+    assert opened < output_handoff < delivery_complete < closed < unit_complete
+    assert snapshot["output"]["gate_open"] is False
+
+
 def test_v2_pause_continue_and_reset_preserve_then_release_ownership() -> None:
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("C", order_id="PAUSE_TEST")

@@ -213,6 +213,8 @@ class DualLineRuntime:
         self._furnace_load_position = 0
         self._loading_batch_started_at = 0.0
         self._rear_door_ready = False
+        self._output_gate_open = False
+        self._output_gate_ready = False
         self.completed_batches: list[dict[str, Any]] = []
         self.install_branch_counts = {branch: 0 for branch in InstallBranch}
         self.scheduled_parallel_install_seconds = 0.0
@@ -224,6 +226,12 @@ class DualLineRuntime:
         """Bind physical readiness feedback, or restore logical-only mode."""
 
         self._execution_gate = gate
+
+    @property
+    def output_gate_open(self) -> bool:
+        """Desired physical state of the finished-output gate."""
+
+        return self._output_gate_open
 
     @property
     def complete(self) -> bool:
@@ -541,10 +549,26 @@ class DualLineRuntime:
             self._set_stage(unit, UnitStage.WAITING_BUFFER)
         elif operation.kind == "POST_BRAZE_INSPECTION":
             self._set_stage(unit, UnitStage.WAITING_OUTPUT)
+        elif operation.kind == "OUTPUT_GATE_OPEN":
+            self._output_gate_ready = True
+            self._event("OUTPUT_GATE_OPENED", unit_id=unit.unit_id)
         elif operation.kind == "OUTPUT_DELIVERY":
             assert unit.tray_id is not None
             self.flow.mark_product_removed(unit.tray_id, now=self.sim_time)
             self._set_stage(unit, UnitStage.PRODUCT_REMOVED)
+            self._output_gate_open = False
+            self._output_gate_ready = False
+            self._start(
+                "OUTPUT_GATE",
+                unit,
+                "OUTPUT_GATE_CLOSE",
+                self.durations.furnace_door,
+            )
+        elif operation.kind == "OUTPUT_GATE_CLOSE":
+            assert unit.tray_id is not None
+            self._event("OUTPUT_GATE_CLOSED", unit_id=unit.unit_id)
+            self.flow.start_virtual_return(unit.tray_id, now=self.sim_time)
+            self._set_stage(unit, UnitStage.VIRTUAL_RETURN)
         elif operation.kind == "VIRTUAL_RETURN":
             assert unit.tray_id is not None
             self.flow.complete_virtual_return(unit.tray_id, now=self.sim_time)
@@ -572,7 +596,17 @@ class DualLineRuntime:
                 "POST_BRAZE_INSPECTION",
                 self.durations.post_braze_inspection,
             )
-            if self.furnace.state.complete and not self._batch_recorded:
+            if not any(layer.tray_id is not None for layer in self.furnace.state.layers):
+                self.furnace.close_rear(now=self.sim_time)
+                self._start(
+                    "FURNACE_DOOR",
+                    unit,
+                    "FURNACE_REAR_CLOSE",
+                    self.durations.furnace_door,
+                )
+        elif operation.kind == "FURNACE_REAR_CLOSE":
+            self._event("FURNACE_REAR_DOOR_CLOSED")
+            if not self._batch_recorded:
                 record = {
                     "batch_id": f"V2_BATCH_{self._batch_sequence:03d}",
                     "unit_ids": list(self._active_batch_units),
@@ -738,6 +772,8 @@ class DualLineRuntime:
             if changed:
                 break
         for unit in self._waiting_units(UnitStage.WAITING_OUTPUT):
+            if not self._output_gate_ready:
+                continue
             if (
                 self._tray_ready(unit)
                 and self._owner_free(TrayOwner.OUTPUT)
@@ -844,6 +880,24 @@ class DualLineRuntime:
                     self.durations.output_delivery,
                 )
                 changed = True
+        if "OUTPUT_GATE" not in self.operations and not self._output_gate_open:
+            waiting_output = [
+                unit
+                for unit in self._waiting_units(UnitStage.WAITING_OUTPUT)
+                if self._tray_ready(unit)
+                and self._owner_free(TrayOwner.OUTPUT)
+                and self._target_available(TrayOwner.OUTPUT)
+            ]
+            if waiting_output:
+                self._output_gate_open = True
+                self._output_gate_ready = False
+                self._start(
+                    "OUTPUT_GATE",
+                    waiting_output[0],
+                    "OUTPUT_GATE_OPEN",
+                    self.durations.furnace_door,
+                )
+                changed = True
         for unit in self._waiting_units(UnitStage.VIRTUAL_RETURN):
             resource = f"RETURN:{unit.unit_id}"
             if resource not in self.operations:
@@ -854,11 +908,6 @@ class DualLineRuntime:
                     self.durations.virtual_return,
                 )
                 changed = True
-        for unit in self._waiting_units(UnitStage.PRODUCT_REMOVED):
-            assert unit.tray_id is not None
-            self.flow.start_virtual_return(unit.tray_id, now=self.sim_time)
-            self._set_stage(unit, UnitStage.VIRTUAL_RETURN)
-            changed = True
         return changed
 
     def _units_outside_furnace_queue(self) -> list[V2UnitState]:
@@ -1142,6 +1191,8 @@ class DualLineRuntime:
         self._furnace_load_position = 0
         self._loading_batch_started_at = 0.0
         self._rear_door_ready = False
+        self._output_gate_open = False
+        self._output_gate_ready = False
         self.completed_batches.clear()
         self.install_branch_counts = {branch: 0 for branch in InstallBranch}
         self.scheduled_parallel_install_seconds = 0.0
@@ -1194,6 +1245,10 @@ class DualLineRuntime:
                 **self.furnace.as_dict(),
                 "completed_batches": len(self.completed_batches),
                 "last_batch": last_batch,
+            },
+            "output": {
+                "gate_open": self._output_gate_open,
+                "gate_ready": self._output_gate_ready,
             },
             "metrics": {
                 "upstream_work_during_brazing_s": round(self.upstream_work_during_brazing_s, 6),

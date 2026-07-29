@@ -130,6 +130,27 @@ def test_v2_through_furnace_has_two_doors_three_locks_and_rear_camera(model) -> 
     model.site("v2_finished_output_dock")
 
 
+def test_v2_finished_output_matches_the_v1_opaque_yellow_gate_contract(model) -> None:
+    model.body("v2_finished_output_box")
+    model.body("v2_finished_output_gate")
+    model.joint("v2_finished_output_gate_joint")
+    model.actuator("v2_finished_output_gate_actuator")
+    for geom_name in (
+        "v2_finished_output_box_floor",
+        "v2_finished_output_box_back",
+        "v2_finished_output_box_left_wall",
+        "v2_finished_output_box_right_wall",
+        "v2_finished_output_box_roof",
+    ):
+        model.geom(geom_name)
+    gate = model.geom("v2_finished_output_gate_panel")
+    assert gate.rgba[0] >= 0.80
+    assert gate.rgba[1] >= 0.50
+    assert gate.rgba[2] <= 0.20
+    with pytest.raises(KeyError):
+        model.geom("v2_finished_output_window")
+
+
 def test_v2_furnace_transfer_has_visible_lift_front_pusher_and_rear_extractor(model) -> None:
     for body_name in (
         "v2_furnace_lift",
