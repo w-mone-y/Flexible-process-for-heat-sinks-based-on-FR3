@@ -766,31 +766,45 @@
              range="0 0.280" damping="180"/>
       <inertial pos="0 0 0" mass="12.0" diaginertia="0.20 0.22 0.18"/>
       <geom class="visual" name="v2_furnace_rear_lift_platform" type="box"
-            size="0.24 0.18 0.018" material="v2_frame_mat"/>
+            size="0.24 0.18 0.018" pos="0 0 -0.034"
+            material="v2_frame_mat"/>
       <body name="v2_furnace_rear_extractor">
         <joint name="v2_furnace_rear_extractor_joint" type="slide"
                axis="-1 0 0" range="0 0.60" damping="150"/>
         <inertial pos="0 0 0" mass="3.0" diaginertia="0.04 0.05 0.06"/>
         <geom class="visual" name="v2_furnace_rear_extractor_crossbar"
-              type="box" size="0.025 0.15 0.035" pos="0.20 0 0.035"
+              type="box" size="0.025 0.15 0.035" pos="0.20 0 -0.052"
               material="v2_frame_mat"/>
         <geom class="visual" name="v2_furnace_rear_extractor_fork_left"
-              type="box" size="0.22 0.025 0.012" pos="0 0.105 0"
+              type="box" size="0.22 0.025 0.012" pos="0 0.105 -0.029"
               material="v2_safety_mat"/>
         <geom class="visual" name="v2_furnace_rear_extractor_fork_right"
-              type="box" size="0.22 0.025 0.012" pos="0 -0.105 0"
+              type="box" size="0.22 0.025 0.012" pos="0 -0.105 -0.029"
               material="v2_safety_mat"/>
       </body>
     </body>
 
     <!-- Rear-only unloading, fixed scan gantry, then finished output. -->
     <geom class="visual" name="v2_output_belt" type="box"
-          size="0.55 0.19 0.018" pos="4.12 0 0.190" material="v2_belt_mat"/>
+          size="0.205 0.19 0.018" pos="3.775 0 0.190" material="v2_belt_mat"/>
+    <geom class="visual" name="v2_output_belt_to_box" type="box"
+          size="0.390 0.19 0.018" pos="4.810 0 0.190" material="v2_belt_mat"/>
     <body name="v2_output_carriage" pos="3.78 0 0.225">
       <joint name="v2_output_transfer_joint" type="slide" axis="1 0 0"
-             range="0 0.86" damping="120"/>
+             range="0 1.14" damping="120"/>
       <inertial pos="0 0 0" mass="2.5" diaginertia="0.03 0.04 0.05"/>
-      <geom class="visual" type="box" size="0.20 0.14 0.010" material="v2_safety_mat"/>
+      <geom class="visual" name="v2_output_carriage_geom" type="box"
+            size="0.20 0.14 0.010" pos="0 0 -0.028"
+            material="v2_safety_mat"/>
+    </body>
+    <body name="v2_post_braze_table" pos="4.20 0 0">
+      <geom class="structure" name="v2_post_braze_table_top"
+            size="0.221 0.18 0.025" pos="0 0 0.185"
+            material="v2_inspect_mat"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="-0.171 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="0.171 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="-0.171 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="0.171 0.13 0.08"/>
     </body>
     <body name="v2_post_braze_gantry" pos="4.20 0 0">
       <geom class="structure" size="0.035 0.035 0.38" pos="0 0.30 0.38"/>
@@ -803,10 +817,10 @@
       <site name="v2_post_braze_gantry_dock" pos="0 0 0.225" size="0.008"
             rgba="0.2 1 0.4 0.8"/>
     </body>
-    <body name="v2_finished_output_anchor" pos="4.64 0 0.225">
+    <body name="v2_finished_output_anchor" pos="4.92 0 0.225">
       <site name="v2_finished_output_dock" size="0.010" rgba="1 0.8 0.1 0.9"/>
     </body>
-    <body name="v2_finished_output_box" pos="4.62 0 0">
+    <body name="v2_finished_output_box" pos="4.90 0 0">
       <geom class="visual" name="v2_finished_output_box_floor" type="box"
             size="0.30 0.34 0.025" pos="0 0 0.15" material="v2_frame_mat"/>
       <geom class="visual" name="v2_finished_output_box_back" type="box"
@@ -821,7 +835,7 @@
             mesh="v2_output_sign_mesh" pos="-0.305 0 0.675"
             euler="0 0 1.57079632679" material="v2_output_sign_mat"/>
     </body>
-    <body name="v2_finished_output_gate" pos="4.32 0 0.15" gravcomp="1">
+    <body name="v2_finished_output_gate" pos="4.60 0 0.15" gravcomp="1">
       <joint name="v2_finished_output_gate_joint" type="slide" axis="0 0 1"
              range="0 0.50" damping="110"/>
       <inertial pos="0 0 0.23" mass="10" diaginertia="0.22 0.22 0.07"/>
@@ -844,7 +858,7 @@
     <body name="v2_merge_anchor" pos="1.40 0 0.225"/>
     <body name="v2_s4_anchor" pos="1.40 0 0.225"/>
     <body name="v2_post_scan_anchor" pos="4.20 0 0.225"/>
-    <body name="v2_output_anchor" pos="4.64 0 0.225"/>
+    <body name="v2_output_anchor" pos="4.92 0 0.225"/>
 
     <!-- Six trays start in a collision-free invisible-side buffer. Runtime
          visibility/collision projection activates only trays with orders. -->
@@ -1082,7 +1096,7 @@
               joint="v2_furnace_rear_extractor_joint"
               kp="2400" kv="190" ctrlrange="0 0.60"/>
     <position name="v2_output_transfer_actuator" joint="v2_output_transfer_joint"
-              kp="2000" kv="160" ctrlrange="0 0.86"/>
+              kp="2000" kv="160" ctrlrange="0 1.14"/>
     <position name="v2_finished_output_gate_actuator"
               joint="v2_finished_output_gate_joint"
               kp="1800" kv="145" ctrlrange="0 0.50"/>

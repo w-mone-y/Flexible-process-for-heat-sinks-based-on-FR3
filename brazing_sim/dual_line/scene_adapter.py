@@ -784,7 +784,7 @@ class DualLineSceneAdapter:
             ),
             (TrayOwner.POST_SCAN, TrayOwner.OUTPUT): (
                 "v2_output_transfer_actuator",
-                0.860,
+                1.140,
             ),
         }
         now = float(self.data.time)

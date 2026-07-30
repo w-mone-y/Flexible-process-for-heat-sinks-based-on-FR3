@@ -38,6 +38,7 @@ def test_v2_table_supports_do_not_protrude_through_worktops(model) -> None:
         "v2_fin_table_b",
         "v2_station_s3b",
         "v2_station_s4",
+        "v2_post_braze_table",
     ):
         body_id = int(model.body(body_name).id)
         box_geoms = [
@@ -201,6 +202,81 @@ def test_v2_furnace_transfer_has_visible_lift_front_pusher_and_rear_extractor(mo
     ):
         model.joint(f"{mechanism}_joint")
         model.actuator(f"{mechanism}_actuator")
+
+
+def test_v2_post_braze_scan_has_a_full_flat_support_table(model) -> None:
+    """The complete pallet must rest on a dedicated unobstructed scan deck."""
+
+    import mujoco
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    table = model.geom("v2_post_braze_table_top")
+    tray = model.geom("v2_tray_01_geom")
+    dock = np.asarray(data.site("v2_post_braze_gantry_dock").xpos, dtype=float)
+    table_center = np.asarray(data.geom_xpos[table.id], dtype=float)
+    camera = np.asarray(data.camera("v2_post_braze_camera").xpos, dtype=float)
+
+    np.testing.assert_allclose(table_center[:2], dock[:2], atol=1.0e-9)
+    np.testing.assert_allclose(camera[:2], dock[:2], atol=1.0e-9)
+    assert float(table.size[0] - tray.size[0]) >= 0.02
+    assert float(table.size[1] - tray.size[1]) >= 0.02
+    table_top = float(table_center[2] + table.size[2])
+    tray_bottom = float(dock[2] + tray.pos[2] - tray.size[2])
+    assert 0.0005 <= tray_bottom - table_top <= 0.005
+
+
+def test_v2_finished_output_gate_clears_the_complete_post_scan_pallet(model) -> None:
+    """The closed yellow gate must sit beyond, never through, the scan pallet."""
+
+    import mujoco
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    scan_x = float(data.site("v2_post_braze_gantry_dock").xpos[0])
+    output_x = float(data.site("v2_finished_output_dock").xpos[0])
+    tray_half_x = float(model.geom("v2_tray_01_geom").size[0])
+    gate = model.geom("v2_finished_output_gate_panel")
+    gate_center_x = float(data.geom_xpos[gate.id, 0])
+    gate_half_x = float(gate.size[0])
+
+    scan_to_gate_clearance = gate_center_x - gate_half_x - (scan_x + tray_half_x)
+    assert scan_to_gate_clearance >= 0.15
+    assert output_x - tray_half_x - (gate_center_x + gate_half_x) >= 0.05
+
+    box = model.body("v2_finished_output_box")
+    floor = model.geom("v2_finished_output_box_floor")
+    np.testing.assert_allclose(
+        gate_center_x,
+        float(box.pos[0] - floor.size[0]),
+        atol=1.0e-9,
+    )
+
+
+def test_v2_rear_unload_mechanism_and_output_carriage_stay_below_the_tray(model) -> None:
+    """Supports may carry the pallet but must never render through its product."""
+
+    import mujoco
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    tray = model.geom("v2_tray_01_geom")
+    tray_bottom_z = 0.225 + float(tray.pos[2]) - float(tray.size[2])
+    for geom_name in (
+        "v2_furnace_rear_lift_platform",
+        "v2_furnace_rear_extractor_crossbar",
+        "v2_furnace_rear_extractor_fork_left",
+        "v2_furnace_rear_extractor_fork_right",
+        "v2_output_carriage_geom",
+    ):
+        geom = model.geom(geom_name)
+        top = float(data.geom_xpos[geom.id, 2] + geom.size[2])
+        assert top <= tray_bottom_z - 0.001, geom_name
+
+    output_joint = model.joint("v2_output_transfer_joint")
+    output_actuator = model.actuator("v2_output_transfer_actuator")
+    assert float(output_joint.range[1]) == pytest.approx(1.14)
+    assert float(output_actuator.ctrlrange[1]) == pytest.approx(1.14)
 
 
 def test_v2_front_lift_and_pusher_are_clear_of_the_closed_furnace_door(model) -> None:
@@ -775,6 +851,7 @@ def test_v2_visible_workcell_surfaces_never_share_an_overlapping_render_plane(mo
         "v2_station_s4",
         "v2_fin_table_a",
         "v2_fin_table_b",
+        "v2_post_braze_table",
     }
     for geom_id in range(model.ngeom):
         if model.geom_type[geom_id] != mujoco.mjtGeom.mjGEOM_BOX:

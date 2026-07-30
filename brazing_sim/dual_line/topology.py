@@ -59,7 +59,7 @@ class DualLineTopology:
             Station("FURNACE_LAYER_2", "炉内顶层", (3.45, 0.00, 0.505)),
             Station("FURNACE_REAR", "贯通炉后门", (3.78, 0.00, 0.225)),
             Station("POST_BRAZE_SCAN", "固定焊后视觉门架", (4.20, 0.00, 0.225)),
-            Station("FINISHED_OUTPUT", "成品出口", (4.64, 0.00, 0.225)),
+            Station("FINISHED_OUTPUT", "成品出口", (4.92, 0.00, 0.225)),
         )
         edges = {
             "S1_BASE_LOADING": ("S2A_DISPENSING",),

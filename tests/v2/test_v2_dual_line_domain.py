@@ -31,6 +31,8 @@ def test_dual_line_topology_has_two_install_branches_and_one_forward_flow() -> N
     assert topology.successors("MERGE_A_WAIT") == ("Y_MERGE_SHARED",)
     assert topology.successors("MERGE_B_WAIT") == ("Y_MERGE_SHARED",)
     assert topology.successors("Y_MERGE_SHARED") == ("S4_PRE_BRAZE_INSPECTION",)
+    assert topology.station("POST_BRAZE_SCAN").world_xyz[:2] == (4.20, 0.00)
+    assert topology.station("FINISHED_OUTPUT").world_xyz[:2] == (4.92, 0.00)
     assert topology.route("S1_BASE_LOADING", "FINISHED_OUTPUT")[0] == "S1_BASE_LOADING"
     assert topology.route("S1_BASE_LOADING", "FINISHED_OUTPUT")[-1] == "FINISHED_OUTPUT"
     assert topology.validate() == ()

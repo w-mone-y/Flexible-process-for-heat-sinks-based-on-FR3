@@ -182,8 +182,8 @@ def main() -> int:
                     application,
                     "v2_post_braze_output_current.png",
                     _camera(
-                        lookat=(4.28, 0.00, 0.34),
-                        distance=1.95,
+                        lookat=(4.52, 0.00, 0.34),
+                        distance=2.20,
                         azimuth=300,
                         elevation=-22,
                     ),
