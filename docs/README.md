@@ -2,6 +2,19 @@
 
 项目文档分为“当前有效说明”和“历史追溯材料”。首次阅读请优先查看当前说明。
 
+> [← 返回项目首页](../README.md) ·
+> [快速开始](../README.md#quick-start) ·
+> [源码导航](../README.md#documentation)
+
+## 按读者选择
+
+| 读者 | 推荐路线 |
+|---|---|
+| 第一次使用 | [项目首页](../README.md) → [快速开始](../README.md#quick-start) → [版本选择](../README.md#version-choice) |
+| 准备二次开发 | [项目目录说明](architecture/项目目录说明.md) → [领域上下文](../CONTEXT.md) → [V2 规格](specs/v2-dual-install-line.md) |
+| 关注实验数据 | [V1/V2 实测效率报告](../benchmarks/results/2026-07-29-v1-v2/comparison.md) → [`benchmarks/`](../benchmarks/) |
+| 修改 MuJoCo 场景 | [视觉模型与资产说明](architecture/视觉模型与资产说明.md) → [V1 XML](../scenes/production/brazing_line.xml) / [V2 XML](../scenes/production/brazing_line_v2.xml) |
+
 ## 当前有效说明
 
 - [项目目录说明](architecture/项目目录说明.md)

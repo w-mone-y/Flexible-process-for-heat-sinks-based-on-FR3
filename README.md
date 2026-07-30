@@ -1,3 +1,5 @@
+<a id="top"></a>
+
 <div align="center">
 
 # 🔥 FR3 多机械臂柔性钎焊产线仿真
@@ -5,28 +7,43 @@
 **用三台 Franka Research 3，在 MuJoCo 中完成散热片从订单到交付的完整制造闭环**
 
 <p>
-  <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white">
-  <img alt="MuJoCo 3.1+" src="https://img.shields.io/badge/MuJoCo-3.1%2B-00599C">
-  <img alt="FR3 x3" src="https://img.shields.io/badge/FR3-3%20Robots-7B61FF">
-  <img alt="Flexible orders" src="https://img.shields.io/badge/Orders-A%20%2F%20B%20%2F%20C-00A67E">
-  <img alt="Simulation speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B">
+  <a href="pyproject.toml"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white"></a>
+  <a href="https://mujoco.org/"><img alt="MuJoCo 3.1+" src="https://img.shields.io/badge/MuJoCo-3.1%2B-00599C"></a>
+  <a href="assets/robots/fr3/README.md"><img alt="FR3 x3" src="https://img.shields.io/badge/FR3-3%20Robots-7B61FF"></a>
+  <a href="config/products/"><img alt="Flexible orders" src="https://img.shields.io/badge/Orders-A%20%2F%20B%20%2F%20C-00A67E"></a>
+  <a href="tests/v1/test_simulation_speed.py"><img alt="Simulation speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-See%20LICENSE-4B5563"></a>
 </p>
 
 <img src="docs/images/readme/v2_current_overview.png" alt="修复后的 V2 双安装支路 FR3 柔性钎焊产线 MuJoCo 实际运行总览" width="1000">
 
 <p>
-  <a href="#-30-秒看懂这个项目">项目亮点</a> ·
-  <a href="#-快速开始">快速开始</a> ·
-  <a href="#-柔性订单">柔性订单</a> ·
-  <a href="#-多订单协同">多订单协同</a> ·
-  <a href="#-v2-v1-实测效率对比">效率对比</a> ·
-  <a href="#-故障注入与自动恢复">故障恢复</a> ·
-  <a href="#-软件架构">软件架构</a>
+  <a href="#quick-start"><strong>快速体验</strong></a> ·
+  <a href="#version-choice">版本选择</a> ·
+  <a href="#screenshots">真实画面</a> ·
+  <a href="#benchmark">效率数据</a> ·
+  <a href="#documentation">文档地图</a> ·
+  <a href="#quality">测试验证</a>
 </p>
 
 </div>
 
 ---
+
+## 🧭 从这里开始
+
+| 你现在想做什么？ | 最短入口 |
+|---|---|
+| ▶️ **第一次运行项目** | [三步启动 Viewer](#quick-start) |
+| 🔀 **体验多订单双支路 V2** | [选择 V2 并运行 A/B/C](#version-choice) |
+| 🎬 **先看真实仿真效果** | [V1 / V2 实际画面对照](#screenshots) |
+| 📈 **查看效率是否真的提升** | [V1 / V2 实测数据](#benchmark) |
+| 🧠 **理解调度、任务图与恢复** | [多订单协同](#multi-order) · [软件架构](#architecture) |
+| 🧩 **准备修改场景或代码** | [文档与源码导航](#documentation) · [项目目录说明](docs/architecture/项目目录说明.md) |
+| ✅ **验证修改没有破坏流程** | [测试与质量门槛](#quality) |
+
+> **只想最快看到效果？** 安装依赖后运行 `mjpython brazing_line_v2.py`，再从 Qt
+> 控制台加入 A/B/C 普通订单即可。
 
 ## 👀 30 秒看懂这个项目
 
@@ -91,12 +108,17 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
                                                      → 成品出口
 ```
 
+<a id="screenshots"></a>
+
 ## 🎬 真实仿真画面
 
 | 稳定 V1 单安装线 | V2 双安装线 |
 |:---:|:---:|
 | ![V1 浅 U 形柔性线](docs/images/readme/line_overview.png) | ![修复后的 V2 双安装支路与贯通炉](docs/images/readme/v2_current_overview.png) |
 | 完整故障恢复、物理夹具和旧入口兼容基线 | Arm1/Arm3 并行安装、单占用合流和前装后卸三层炉 |
+
+<details>
+<summary><strong>展开查看 4 组关键工序的 V1 / V2 实际画面对照</strong></summary>
 
 ### 1. Arm2 逐条涂覆
 
@@ -130,7 +152,27 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 > 同一组三件 A 实际运行：后门遵循“完全打开 → 三张托盘逐层退架 → 最后一张
 > 完全离炉 → 关闭”，成品出口遵循“黄色门打开 → 托盘进入 → 关门 → 虚拟回流”。
 
+</details>
+
+<p align="right"><a href="#top">回到顶部 ↑</a></p>
+
+<a id="quick-start"></a>
+
 ## 🚀 快速开始
+
+下面的命令均从仓库根目录执行。第一次使用建议先运行 V2 Viewer；需要完整故障恢复时再
+切换稳定 V1。
+
+<a id="version-choice"></a>
+
+### 0. 先选择适合你的版本
+
+| 入口 | 适合场景 | 一条命令 |
+|---|---|---|
+| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | `mjpython brazing_line_v2.py` |
+| **V1 稳定线** | 完整故障注入、自动恢复、单段演示和旧入口兼容 | `mjpython brazing_line.py` |
+| **精细视觉版** | 截图、录屏和展示 | `mjpython brazing_line_cinematic.py --order A` |
+| **YAML 柔性订单** | 配置驱动、自定义计划、dry-run 和调度实验 | `python run_flexible_order.py --order config/orders/order_001.yaml --dry-run` |
 
 ### 1. 环境要求
 
@@ -140,18 +182,21 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 - PySide6（可选，用于 Qt 规划控制台）
 - macOS 图形模式建议使用 `mjpython`
 
+### 2. 三步启动
+
 ```bash
+# 1. 克隆并进入仓库
 git clone https://github.com/w-mone-y/Flexible-process-for-heat-sinks-based-on-FR3.git
 cd Flexible-process-for-heat-sinks-based-on-FR3
 
-# 安装运行依赖
-make install
-
-# 安装 UI、测试和格式化依赖
+# 2. 安装运行时、Qt UI 和开发依赖
 make install-dev
+
+# 3. 启动推荐的 V2 Viewer + Qt 控制台
+mjpython brazing_line_v2.py
 ```
 
-### 2. 启动交互式产线
+### 3. 启动稳定 V1
 
 ```bash
 # 打开 MuJoCo Viewer 与 Qt 控制台，再从 UI 加入订单
@@ -166,7 +211,7 @@ mjpython brazing_line.py --order C
 mjpython brazing_line.py --batch A
 ```
 
-### 3. V2 双安装支路 Phase 1
+### 4. V2 双安装支路 Phase 1
 
 V2 使用独立入口和独立 MJCF，不覆盖 V1。它提供六托盘、Arm1/Arm3 双翅片
 安装支路、Y 形合流、三层贯通炉（前门装载、后门卸载）以及相同的十页签 Qt
@@ -184,7 +229,7 @@ python brazing_line_v2.py --headless --orders A,B,C --fast
 > 运输和炉体流程均参与门控；自定义产品、V2 单段 actor 与物理故障 actor 留待
 > Phase 2。完整边界见 [V2 规格](docs/specs/v2-dual-install-line.md)。
 
-### 4. YAML 柔性订单
+### 5. YAML 柔性订单
 
 ```bash
 # 只加载、生成和校验计划，不启动 MuJoCo
@@ -221,6 +266,40 @@ mjpython brazing_line.py
 
 </details>
 
+<p align="right"><a href="#top">回到顶部 ↑</a></p>
+
+<a id="documentation"></a>
+
+## 📚 文档与源码导航
+
+### 按目标阅读
+
+| 我想了解…… | 推荐入口 |
+|---|---|
+| 项目能做什么、如何运行 | [README 首页](README.md) · [文档总导航](docs/README.md) |
+| V1、V2 有什么区别 | [V2 双安装线规格](docs/specs/v2-dual-install-line.md) · [V1/V2 实测报告](benchmarks/results/2026-07-29-v1-v2/comparison.md) |
+| 文件应该去哪里找 | [项目目录说明](docs/architecture/项目目录说明.md) |
+| 场景、网格和中文铭牌如何组织 | [视觉模型与资产说明](docs/architecture/视觉模型与资产说明.md) |
+| Arm2 在完整工艺中的职责 | [Arm2 工艺说明](docs/process/Arm2%20在整体流程中的任务.md) |
+| 项目的核心领域术语与不变量 | [领域上下文](CONTEXT.md) · [架构决策记录](docs/adr/) |
+
+### 关键实现入口
+
+| 模块 | 可点击源码 | 主要职责 |
+|---|---|---|
+| 路径管理 | [`brazing_sim/paths.py`](brazing_sim/paths.py) | 根目录、配置、场景、资产和输出路径 |
+| 制造运行时 | [`manufacturing_runtime.py`](brazing_sim/manufacturing_runtime.py) | 订单队列、任务图、调度、事件和恢复 |
+| 任务图构建 | [`task_graph_builder.py`](brazing_sim/planning/task_graph_builder.py) | 将产品工艺转换为依赖 DAG |
+| V2 异步运行时 | [`dual_line/runtime.py`](brazing_sim/dual_line/runtime.py) | 双支路、六托盘、炉批与成品交付 |
+| 物理技能 | [`async_line_skills.py`](brazing_sim/execution/async_line_skills.py) | Arm1/2/3 和工位动作适配 |
+| MuJoCo 场景 | [`V1 XML`](scenes/production/brazing_line.xml) · [`V2 XML`](scenes/production/brazing_line_v2.xml) | 设备、机器人、托盘、约束与执行器 |
+| 回归测试 | [`tests/`](tests/) | V1、V2、领域模型、场景和完整流程验证 |
+
+> 新贡献者建议按[项目目录说明中的推荐阅读顺序](docs/architecture/项目目录说明.md#推荐阅读顺序)
+> 阅读；其中每一项现在都可以直接点击跳转。
+
+<p align="right"><a href="#top">回到顶部 ↑</a></p>
+
 ## 📦 柔性订单
 
 | 产品 | 基板尺寸 | 翅片 | 节距 | 梳齿模块 | 钎料路径 | 压紧力 |
@@ -244,6 +323,8 @@ config/scheduler.yaml
 加载器采用严格校验。缺字段、未知字段、错误类型、负数、路径越界、超过 12 片翅片 /
 24 条路径容量，或没有可用料架层，都会在机械臂运动前给出“文件 + 字段路径 + 原因”，
 不会带着错误配置进入仿真。
+
+<a id="multi-order"></a>
 
 ## 🔀 多订单协同
 
@@ -272,6 +353,8 @@ flowchart TB
 - 两条平面路线在 S4 前实施单占用合流，后到托盘在支路等待位停车。
 - 紧急订单不会打断正在进行的抓取、涂覆或输送，只竞争下一次资源释放。
 - 动态调度冲突会保持 READY 并等待，不会因为暂时无路可走就直接进入 ERROR。
+
+<a id="benchmark"></a>
 
 ## 📈 V2 / V1 实测效率对比
 
@@ -331,6 +414,8 @@ Qt 的“故障与恢复规划”页可以直接选择中文故障、目标和�
 控制台还保留单独运行取放、检测 1、Arm2 涂覆、翅片安装、检测 2、直线入炉，
 以及暂停、继续、复位、加速 ×2 和减速 ÷2。
 
+<a id="architecture"></a>
+
 ## 🧠 软件架构
 
 ```text
@@ -348,6 +433,9 @@ SkillRegistry → Arm1 / Arm2 / Arm3 / 输送 / 炉体 actor
   ↓
 JSONL / CSV / KPI / Qt / HTTP API
 ```
+
+<details>
+<summary><strong>展开查看项目目录与模块职责</strong></summary>
 
 ```text
 brazing_line.py               标准版兼容启动器
@@ -381,6 +469,8 @@ tests/
 ├── v1/                       标准线、柔性订单和旧入口回归
 └── v2/                       双安装线、场景、调度与 UI 回归
 ```
+
+</details>
 
 更完整的中文职责说明见：
 
@@ -460,6 +550,8 @@ mjpython brazing_line_cinematic.py --batch A
 
 </details>
 
+<a id="quality"></a>
+
 ## ✅ 测试与质量门槛
 
 ```bash
@@ -489,6 +581,8 @@ headless 完整闭环和旧入口回归。
 | `score ≥ 0.90` | ✅ `PASS` |
 | `0.75 ≤ score < 0.90` | 🛠️ `REWORK_REQUIRED` |
 | `score < 0.75` 或严重越界 | ❌ `SCRAPPED` |
+
+<p align="right"><a href="#top">回到顶部 ↑</a></p>
 
 ## 📌 项目边界
 
