@@ -428,10 +428,10 @@
     <body name="v2_station_s1" pos="-0.55 0.35 0">
       <geom class="structure" name="v2_station_s1_top" size="0.24 0.16 0.025"
             pos="0 0 0.185" material="v2_s1_mat"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 0.13 0.08"/>
       <geom class="visual" name="v2_s1_station_sign" type="mesh"
             mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
             material="v2_s1_sign_mat"/>
@@ -440,10 +440,10 @@
     <body name="v2_station_s2a" pos="-0.35 0 0">
       <geom class="structure" name="v2_station_s2a_top" size="0.24 0.18 0.025"
             pos="0 0 0.185" material="v2_s2_mat"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 0.13 0.08"/>
       <geom class="visual" name="v2_s2a_station_sign" type="mesh"
             mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
             material="v2_s2a_sign_mat"/>
@@ -452,10 +452,10 @@
     <body name="v2_station_s2b" pos="0.50 0 0">
       <geom class="structure" name="v2_station_s2b_top" size="0.22 0.18 0.025"
             pos="0 0 0.185" material="v2_inspect_mat"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="-0.17 -0.13 0.08"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="0.17 -0.13 0.08"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="-0.17 0.13 0.08"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="0.17 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="-0.17 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="0.17 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="-0.17 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="0.17 0.13 0.08"/>
       <geom class="visual" name="v2_s2b_station_sign" type="mesh"
             mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
             material="v2_s2b_sign_mat"/>
@@ -466,10 +466,10 @@
     <body name="v2_fin_table_a" pos="0.45 1.05 0">
       <geom class="structure" size="0.22 0.14 0.025" pos="0 0 0.225"
             material="v2_install_a_mat"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="-0.17 -0.09 0.10"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="0.17 -0.09 0.10"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="-0.17 0.09 0.10"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="0.17 0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="-0.17 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="0.17 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="-0.17 0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="0.17 0.09 0.10"/>
       <frame pos="0 0 0.250">
         <attach model="v2_fin_supply_asset" body="magazine"
                 prefix="v2_fin_a_"/>
@@ -479,10 +479,10 @@
     <body name="v2_station_s3a" pos="0.55 0.50 0">
       <geom class="structure" size="0.24 0.18 0.025" pos="0 0 0.185"
             material="v2_install_a_mat"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 0.13 0.08"/>
       <geom class="visual" name="v2_s3a_station_sign" type="mesh"
             mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
             material="v2_s3_sign_mat"/>
@@ -492,10 +492,10 @@
       <geom class="structure" name="v2_fin_table_b_top"
             size="0.18 0.14 0.025" pos="0 0 0.225"
             material="v2_install_b_mat"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="-0.14 -0.09 0.10"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="0.14 -0.09 0.10"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="-0.14 0.09 0.10"/>
-      <geom class="structure" size="0.025 0.025 0.20" pos="0.14 0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="-0.14 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="0.14 -0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="-0.14 0.09 0.10"/>
+      <geom class="structure" size="0.025 0.025 0.10" pos="0.14 0.09 0.10"/>
       <frame pos="0 0 0.250">
         <attach model="v2_fin_supply_asset" body="magazine"
                 prefix="v2_fin_b_"/>
@@ -505,10 +505,10 @@
     <body name="v2_station_s3b" pos="0.35 -0.45 0">
       <geom class="structure" size="0.24 0.18 0.025" pos="0 0 0.185"
             material="v2_install_b_mat"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="-0.19 0.13 0.08"/>
-      <geom class="structure" size="0.03 0.03 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.03 0.03 0.08" pos="0.19 0.13 0.08"/>
       <geom class="visual" name="v2_s3b_station_sign" type="mesh"
             mesh="v2_station_sign_mesh" pos="0 0.190 0.115"
             euler="0 0 3.14159265359" material="v2_s3_sign_mat"/>
@@ -570,10 +570,10 @@
       <geom class="structure" name="v2_station_s4_top"
             size="0.24 0.18 0.025" pos="0 0 0.185"
             material="v2_inspect_mat"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="-0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="0.19 -0.13 0.08"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="-0.19 0.13 0.08"/>
-      <geom class="structure" size="0.025 0.025 0.16" pos="0.19 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="-0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="0.19 -0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="-0.19 0.13 0.08"/>
+      <geom class="structure" size="0.025 0.025 0.08" pos="0.19 0.13 0.08"/>
       <geom class="visual" name="v2_s4_station_sign" type="mesh"
             mesh="v2_station_sign_mesh" pos="0 -0.190 0.115"
             material="v2_post_sign_mat"/>

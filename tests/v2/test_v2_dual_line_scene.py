@@ -24,6 +24,40 @@ def test_v2_scene_compiles_as_an_independent_model(model) -> None:
     assert model.opt.timestep == pytest.approx(0.002)
 
 
+def test_v2_table_supports_do_not_protrude_through_worktops(model) -> None:
+    """The four structural legs must end below, not above, every tabletop."""
+
+    import mujoco
+
+    for body_name in (
+        "v2_station_s1",
+        "v2_station_s2a",
+        "v2_station_s2b",
+        "v2_fin_table_a",
+        "v2_station_s3a",
+        "v2_fin_table_b",
+        "v2_station_s3b",
+        "v2_station_s4",
+    ):
+        body_id = int(model.body(body_name).id)
+        box_geoms = [
+            geom_id
+            for geom_id in range(model.ngeom)
+            if int(model.geom_bodyid[geom_id]) == body_id
+            and int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_BOX)
+        ]
+        tabletop = max(
+            box_geoms,
+            key=lambda geom_id: float(model.geom_size[geom_id, 0] * model.geom_size[geom_id, 1]),
+        )
+        supports = [geom_id for geom_id in box_geoms if geom_id != tabletop]
+        assert len(supports) == 4, body_name
+        tabletop_bottom = float(model.geom_pos[tabletop, 2] - model.geom_size[tabletop, 2])
+        for support in supports:
+            support_top = float(model.geom_pos[support, 2] + model.geom_size[support, 2])
+            assert support_top <= tabletop_bottom + 1.0e-9, body_name
+
+
 def test_v2_scene_exports_three_robots_and_arm3_hybrid_tool(model) -> None:
     for arm in ("arm1", "arm2", "arm3"):
         model.body(f"{arm}_base")
