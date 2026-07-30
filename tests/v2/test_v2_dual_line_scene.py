@@ -385,9 +385,9 @@ def test_v2_arm3_cell_matches_the_marked_south_magazine_layout(model) -> None:
     # between the two tabletop footprints.
     assert float(install[1] - magazine[1]) >= 0.39
 
-    # The B-line wait lies beyond the complete Arm3 cell and approaches the
-    # relocated shared table from the east.  Runtime waypoints supply the
-    # south dog-leg; a direct install→wait chord is intentionally not used.
+    # The B-line wait lies beyond the complete Arm3 cell. Runtime waypoints
+    # supply the south dog-leg; only the final wait→S4 segment runs directly
+    # into the shared table centre.
     assert float(merge_wait[0] - arm3[0]) >= 0.55
     assert float(arm3[1] - merge_wait[1]) >= 0.65
     assert 0.10 <= float(merge_wait[0] - merge[0]) <= 0.20
@@ -473,7 +473,7 @@ def test_v2_s3_s4_routes_remain_on_the_station_transport_plane(model) -> None:
         station_height,
     )
 
-    segment_counts = {"a": 2, "b": 5}
+    segment_counts = {"a": 2, "b": 4}
     for branch, count in segment_counts.items():
         for side in ("left", "right"):
             for index in range(1, count + 1):
@@ -483,7 +483,7 @@ def test_v2_s3_s4_routes_remain_on_the_station_transport_plane(model) -> None:
 
     for side in ("left", "right"):
         with pytest.raises(KeyError):
-            model.geom(f"v2_install_b_s4_rail_{side}_06")
+            model.geom(f"v2_install_b_s4_rail_{side}_05")
 
     for name in (
         "v2_s3a_overpass_lift_left",
@@ -652,7 +652,9 @@ def test_v2_key_process_equipment_has_visible_chinese_station_plaques(model) -> 
         "v2_s1_station_sign",
         "v2_s2a_station_sign",
         "v2_s2b_station_sign",
+        "v2_fin_a_station_sign",
         "v2_s3a_station_sign",
+        "v2_fin_b_station_sign",
         "v2_s3b_station_sign",
         "v2_s4_station_sign",
         "v2_furnace_station_sign",
@@ -660,6 +662,94 @@ def test_v2_key_process_equipment_has_visible_chinese_station_plaques(model) -> 
         "v2_finished_output_sign",
     ):
         model.geom(geom_name)
+
+
+def test_v2_each_table_has_a_distinct_correctly_named_prominent_plaque(model) -> None:
+    """Every worktable needs its own truthful sign above an outside edge."""
+
+    tables = (
+        ("v2_station_s1_top", "v2_s1_station_sign"),
+        ("v2_station_s2a_top", "v2_s2a_station_sign"),
+        ("v2_station_s2b_top", "v2_s2b_station_sign"),
+        ("v2_fin_table_a_top", "v2_fin_a_station_sign"),
+        ("v2_station_s3a_top", "v2_s3a_station_sign"),
+        ("v2_fin_table_b_top", "v2_fin_b_station_sign"),
+        ("v2_station_s3b_top", "v2_s3b_station_sign"),
+        ("v2_station_s4_top", "v2_s4_station_sign"),
+    )
+    material_ids: set[int] = set()
+    for tabletop_name, plaque_name in tables:
+        tabletop = model.geom(tabletop_name)
+        plaque = model.geom(plaque_name)
+        assert float(plaque.pos[2]) > float(tabletop.pos[2] + tabletop.size[2])
+        assert abs(float(plaque.pos[0])) > float(tabletop.size[0]) or abs(float(plaque.pos[1])) > float(
+            tabletop.size[1]
+        )
+        material_ids.add(int(plaque.matid[0]))
+    assert len(material_ids) == len(tables)
+
+    root = ElementTree.parse(V2_XML).getroot()
+    textures = {
+        node.attrib["name"]: node.attrib["file"]
+        for node in root.findall("./asset/texture")
+        if "file" in node.attrib
+    }
+    assert {
+        textures["v2_s1_sign_tex"],
+        textures["v2_s2a_sign_tex"],
+        textures["v2_s2b_sign_tex"],
+        textures["v2_fin_a_sign_tex"],
+        textures["v2_s3a_sign_tex"],
+        textures["v2_fin_b_sign_tex"],
+        textures["v2_s3b_sign_tex"],
+        textures["v2_s4_sign_tex"],
+    } == {
+        "assets/signs/v2_s1_base_loading_sign.png",
+        "assets/signs/v2_s2a_dispensing_sign.png",
+        "assets/signs/v2_s2b_coating_inspection_sign.png",
+        "assets/signs/v2_fin_a_supply_sign.png",
+        "assets/signs/v2_s3a_install_sign.png",
+        "assets/signs/v2_fin_b_supply_sign.png",
+        "assets/signs/v2_s3b_install_sign.png",
+        "assets/signs/v2_s4_pre_braze_inspection_sign.png",
+    }
+
+
+def test_v2_s1_s2a_has_a_visible_aisle_and_full_length_slide_rail(model) -> None:
+    """The first two tabletops must not hide almost the whole slide rail."""
+
+    s1 = np.asarray(model.body("v2_station_s1").pos[:2], dtype=float)
+    s2a = np.asarray(model.body("v2_station_s2a").pos[:2], dtype=float)
+    s1_top = model.geom("v2_station_s1_top")
+    s2a_top = model.geom("v2_station_s2a_top")
+    visible_y_gap = abs(float(s1[1] - s2a[1])) - float(
+        s1_top.size[1] + s2a_top.size[1],
+    )
+    assert visible_y_gap >= 0.10
+    assert float(np.linalg.norm(s2a - s1)) >= 0.49
+    for side in ("left", "right"):
+        rail = model.geom(f"v2_s1_s2a_rail_{side}")
+        assert 2.0 * float(rail.size[1]) >= 0.49
+
+
+def test_v2_branch_b_visible_rails_enter_the_exact_s4_centre(model) -> None:
+    """The right-hand route must not stop at an offset east-side spur."""
+
+    import mujoco
+
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    s4 = np.asarray(data.site("v2_station_s4_dock").xpos, dtype=float)
+    closest_endpoints: list[np.ndarray] = []
+    for side in ("left", "right"):
+        rail = model.geom(f"v2_install_b_s4_rail_{side}_04")
+        rotation = np.asarray(data.geom_xmat[rail.id], dtype=float).reshape(3, 3)
+        axis = rotation[:, 2]
+        center = np.asarray(data.geom_xpos[rail.id], dtype=float)
+        half_length = float(rail.size[1])
+        endpoints = (center - axis * half_length, center + axis * half_length)
+        closest_endpoints.append(min(endpoints, key=lambda point: float(np.linalg.norm(point - s4))))
+    np.testing.assert_allclose(np.mean(closest_endpoints, axis=0), s4 + (0.0, 0.0, -0.027))
 
 
 def test_v2_two_installation_branches_each_show_twelve_raw_fins(model) -> None:
@@ -878,7 +968,7 @@ def test_v2_robot_layout_reaches_every_authored_process_target_with_margin() -> 
             (
                 arm2,
                 arm2.solve_ik(
-                    Pose((-0.35, 0.0, 0.32), top_down_reversed),
+                    Pose((-0.35, -0.10, 0.32), top_down_reversed),
                     tcp=True,
                     full_orientation=True,
                     max_iterations=1_000,

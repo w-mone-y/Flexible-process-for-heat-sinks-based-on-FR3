@@ -40,7 +40,7 @@ class DualLineTopology:
     def standard(cls) -> "DualLineTopology":
         stations = (
             Station("S1_BASE_LOADING", "S1 基板上料", (-0.55, 0.35, 0.225)),
-            Station("S2A_DISPENSING", "S2A 钎料涂覆", (-0.35, 0.00, 0.225)),
+            Station("S2A_DISPENSING", "S2A 钎料涂覆", (-0.35, -0.10, 0.225)),
             Station("S2B_MATERIAL_INSPECTION", "S2B 焊料检测与分流", (0.50, 0.00, 0.225)),
             Station("S3A_ARM1_INSTALL", "S3A Arm1 翅片安装", (0.55, 0.50, 0.225)),
             Station("FIN_TABLE_A", "A线翅片料台", (0.45, 1.05, 0.265)),

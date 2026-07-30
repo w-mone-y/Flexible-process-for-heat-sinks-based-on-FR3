@@ -67,10 +67,7 @@ def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
             source_owner=TrayOwner.MERGE_B_WAIT,
             target_owner=TrayOwner.MERGE,
         ),
-        (
-            (1.55, 0.00, 0.225),
-            (1.40, 0.00, 0.225),
-        ),
+        (merge,),
         atol=1.0e-9,
     )
 

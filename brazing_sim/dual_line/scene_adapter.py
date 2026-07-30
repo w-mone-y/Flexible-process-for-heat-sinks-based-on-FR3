@@ -27,7 +27,6 @@ _V1_COMB_LONGITUDINAL_CLEARANCE_M = 0.008
 _V1_COMB_LATERAL_CLEARANCE_M = 0.010
 _BRANCH_B_WEST_CLEAR_X_M = 0.05
 _BRANCH_B_SOUTH_CLEAR_Y_M = -1.22
-_BRANCH_B_EAST_CLEAR_X_M = 1.55
 
 
 @dataclass(slots=True)
@@ -574,11 +573,11 @@ class DualLineSceneAdapter:
         Both S3 branches remain on the station transport plane.  The A branch
         passes north of S2B.  The denser B branch first clears the S2B west
         edge, then follows the south perimeter around the Arm3 cell before
-        entering the relocated S4 from its short east-side approach.  Moving
-        the inspection table toward the furnace removes the former north-side
-        return loop and its visible reverse motion.  These waypoints use the
-        complete 400-by-280 mm pallet envelope; they are not centreline-only
-        shortcuts.
+        running directly from its southeast wait into the relocated S4 centre.
+        Moving the inspection table toward the furnace removes the former
+        north-side return loop and its visible reverse motion.  These waypoints
+        use the complete 400-by-280 mm pallet envelope; they are not
+        centreline-only shortcuts.
         """
 
         branch_stations = {TrayOwner.INSTALL_A, TrayOwner.INSTALL_B}
@@ -606,18 +605,6 @@ class DualLineSceneAdapter:
                 )
             return (final_target.copy(),)
         if source_owner in branch_waits and target_owner is TrayOwner.MERGE:
-            if source_owner is TrayOwner.MERGE_B_WAIT:
-                return (
-                    np.asarray(
-                        [
-                            _BRANCH_B_EAST_CLEAR_X_M,
-                            float(final_target[1]),
-                            float(final_target[2]),
-                        ],
-                        dtype=float,
-                    ),
-                    final_target.copy(),
-                )
             return (final_target.copy(),)
         if target_owner is TrayOwner.FURNACE:
             front_lift_low = np.asarray([2.75, 0.0, 0.225])
@@ -784,8 +771,8 @@ class DualLineSceneAdapter:
         for actuator_id in self._route_actuators.values():
             self.data.ctrl[actuator_id] = 0.0
         routes = {
-            (TrayOwner.S1, TrayOwner.S2A): ("v2_s1_s2a_actuator", 0.403),
-            (TrayOwner.S2A, TrayOwner.S2B): ("v2_s2a_s2b_actuator", 0.850),
+            (TrayOwner.S1, TrayOwner.S2A): ("v2_s1_s2a_actuator", 0.492443),
+            (TrayOwner.S2A, TrayOwner.S2B): ("v2_s2a_s2b_actuator", 0.855862),
             (TrayOwner.S2B, TrayOwner.INSTALL_A): ("v2_branch_a_actuator", 0.502494),
             (TrayOwner.S2B, TrayOwner.INSTALL_B): ("v2_branch_b_actuator", 0.474342),
             (TrayOwner.S4, TrayOwner.BUFFER_1): ("v2_buffer_index_actuator", 0.450),

@@ -21,6 +21,7 @@ def test_dual_line_topology_has_two_install_branches_and_one_forward_flow() -> N
     topology = DualLineTopology.standard()
 
     assert topology.station("S1_BASE_LOADING").world_xyz[:2] == (-0.55, 0.35)
+    assert topology.station("S2A_DISPENSING").world_xyz[:2] == (-0.35, -0.10)
     assert topology.successors("S2B_MATERIAL_INSPECTION") == (
         "S3A_ARM1_INSTALL",
         "S3B_ARM3_INSTALL",
