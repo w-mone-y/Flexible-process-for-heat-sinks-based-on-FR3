@@ -22,6 +22,12 @@ _OWNER_TO_STATION = {
     "BUFFER_3": "FURNACE_BUFFER_3",
     "POST_SCAN": "POST_BRAZE_SCAN",
     "OUTPUT": "FINISHED_OUTPUT",
+    # Furnace-side owners were missing, which left the zone-lock view empty for
+    # any tray inside or entering the furnace.
+    "FURNACE_FRONT": "FURNACE_FRONT",
+    "FURNACE": "FURNACE",
+    "FURNACE_REAR": "FURNACE_REAR",
+    "VIRTUAL_RETURN": "VIRTUAL_RETURN",
 }
 
 _FURNACE_TEMPERATURE_C = {
@@ -63,12 +69,110 @@ _STAGE_ORDER = (
     "COMPLETE",
 )
 _STAGE_RANK = {stage: index for index, stage in enumerate(_STAGE_ORDER)}
+
+# Chinese labels for V2 operation kinds, used by the gantt and task views.
+_OPERATION_LABELS_ZH = {
+    "BASE_LOADING": "基板上料",
+    "DISPENSING": "钎料涂覆",
+    "MATERIAL_INSPECTION": "焊料检测",
+    "INSTALL_FIN": "安装翅片",
+    "MERGING": "Y形合流",
+    "PRE_BRAZE_INSPECTION": "焊前检测",
+    "FURNACE_FRONT_OPEN": "打开炉前门",
+    "FURNACE_FRONT_CLOSE": "关闭炉前门",
+    "FURNACE_REAR_OPEN": "打开炉后门",
+    "FURNACE_REAR_CLOSE": "关闭炉后门",
+    "FURNACE_LOAD_TRAY": "托盘入炉",
+    "FURNACE_UNLOAD_TRAY": "托盘出炉",
+    "POST_BRAZE_INSPECTION": "焊后检测",
+    "OUTPUT_GATE_OPEN": "打开成品门",
+    "OUTPUT_GATE_CLOSE": "关闭成品门",
+    "OUTPUT_DELIVERY": "成品交付",
+    "VIRTUAL_RETURN": "空托盘虚拟回流",
+}
+
+# Comb module and clamping force per preset, mirroring config/products/*.yaml.
+# Reported so the fixture row shows the order's real工装 instead of a placeholder.
+_PRESET_FIXTURE = {
+    "A": ("comb_insert_20mm", 20.0),
+    "B": ("comb_insert_30mm", 18.0),
+    "C": ("comb_insert_15mm", 22.0),
+}
+
+# Stages during which the tray's comb is fitted and the press is engaged.
+_COMB_INSTALLED_FROM = "WAITING_INSTALL"
+_PRESS_ENGAGED_FROM = "WAITING_S4"
+_PRESS_RELEASED_FROM = "POST_BRAZE_INSPECTION"
+
+
+def _peak_parallel_arms(events: list[Mapping[str, Any]]) -> int:
+    """Highest number of arms simultaneously busy, from the event log."""
+
+    active: set[str] = set()
+    peak = 0
+    for event in events:
+        resource = str(event.get("resource", ""))
+        if not resource.startswith("ARM"):
+            continue
+        if event.get("type") == "OPERATION_STARTED":
+            active.add(resource)
+            peak = max(peak, len(active))
+        elif event.get("type") in {"OPERATION_COMPLETED", "OPERATION_CANCELLED"}:
+            active.discard(resource)
+    return peak
+
+
+def _fixture_view(active: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Fixture state derived from the active unit's preset and stage."""
+
+    if active is None:
+        return {
+            "status": "空闲（无在制产品）",
+            "active_comb_module": None,
+            "press_state": "IDLE",
+            "clamping_force_n": 0.0,
+        }
+    preset = str(active.get("preset", ""))
+    comb, force = _PRESET_FIXTURE.get(preset, (None, 0.0))
+    rank = _STAGE_RANK.get(str(active.get("stage", "")), 0)
+    fitted = rank >= _STAGE_RANK[_COMB_INSTALLED_FROM]
+    engaged = _STAGE_RANK[_PRESS_ENGAGED_FROM] <= rank < _STAGE_RANK[_PRESS_RELEASED_FROM]
+    return {
+        "status": (f"{preset} 型工装已装夹" if fitted else f"{preset} 型工装待装夹"),
+        "active_comb_module": comb if fitted else None,
+        "press_state": "ENGAGED" if engaged else "IDLE",
+        "clamping_force_n": force if engaged else 0.0,
+    }
+
+
+# Which station each V2 resource works at, for gantt grouping.
+_RESOURCE_STATIONS = {
+    "ARM1": "S1_BASE_LOADING",
+    "ARM2": "S2A_DISPENSING",
+    "ARM3": "S2B_MATERIAL_INSPECTION",
+    "MERGE": "Y_MERGE_SHARED",
+    "FURNACE_DOOR": "FURNACE",
+    "FURNACE_TRANSFER": "FURNACE",
+    "POST_CAMERA": "POST_BRAZE_SCAN",
+    "OUTPUT": "FINISHED_OUTPUT",
+    "OUTPUT_GATE": "FINISHED_OUTPUT",
+}
 _STATUS_ZH = {
     "PENDING": "等待前置任务",
     "READY": "已就绪",
     "RUNNING": "执行中",
     "SUCCEEDED": "已完成",
 }
+_PHYSICAL_FAULT_STATUS_ZH = {
+    "MANIFESTED": "缺陷已形成，等待相机检测",
+    "DETECTED": "相机已检出，等待返工",
+    "REPAIRED": "返工完成，等待复检",
+    "RECOVERED": "复检通过",
+}
+
+
+def physical_fault_status_label_zh(status: str) -> str:
+    return _PHYSICAL_FAULT_STATUS_ZH.get(str(status), str(status))
 
 
 @dataclass(slots=True)
@@ -160,12 +264,19 @@ class V2StatePresenter:
         cls,
         units: list[dict[str, Any]],
         operations: Mapping[str, Any],
+        physical_faults: list[Mapping[str, Any]] | None = None,
+        events: list[Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
+        completed_operations = {
+            (str(event.get("unit_id", "")), str(event.get("kind", "")))
+            for event in events or []
+            if event.get("type") == "OPERATION_COMPLETED"
+        }
         active_operations = {
             (
                 str(operation.get("unit_id", "")),
                 str(operation.get("kind", "")),
-            ): resource
+            ): (resource, operation)
             for resource, operation in operations.items()
             if isinstance(operation, Mapping)
         }
@@ -194,12 +305,33 @@ class V2StatePresenter:
             ) -> None:
                 nonlocal previous
                 task_id = f"{unit_id}:{suffix}"
-                running_resource = active_operations.get((unit_id, running_kind))
+                active_operation = active_operations.get((unit_id, running_kind))
+                running_resource = None if active_operation is None else active_operation[0]
+                operation_state = {} if active_operation is None else active_operation[1]
                 status = cls._task_status(
-                    completed=completed,
+                    completed=(
+                        completed
+                        or (task_type != "INSTALL_FIN" and (unit_id, running_kind) in completed_operations)
+                    ),
                     running=running_resource is not None,
                     ready=ready,
                 )
+                progress = (
+                    1.0
+                    if status == "SUCCEEDED"
+                    else float(operation_state.get("progress", 0.0)) if status == "RUNNING" else 0.0
+                )
+                started_at = operation_state.get("started_at") if status == "RUNNING" else None
+                updated_at = (
+                    float(operation_state.get("started_at", 0.0))
+                    + float(operation_state.get("duration_s", 0.0))
+                    - float(operation_state.get("remaining_s", 0.0))
+                    if status == "RUNNING"
+                    else None
+                )
+                base_detail = detail or f"{tray_id or '待分配托盘'} · {station_id}"
+                if status == "RUNNING":
+                    base_detail = f"{base_detail} · 执行进度 {progress * 100.0:.0f}%"
                 tasks.append(
                     {
                         "task_id": task_id,
@@ -208,7 +340,7 @@ class V2StatePresenter:
                         "task_type": task_type,
                         "operation_kind": running_kind,
                         "display_name_zh": title,
-                        "display_detail_zh": detail or f"{tray_id or '待分配托盘'} · {station_id}",
+                        "display_detail_zh": base_detail,
                         "status": status,
                         "status_zh": _STATUS_ZH[status],
                         "predecessors": [] if previous is None else [previous],
@@ -218,6 +350,15 @@ class V2StatePresenter:
                         "station_id": station_id,
                         "required_zones": [station_id],
                         "failure_reason": "",
+                        "progress": progress,
+                        "started_at": started_at,
+                        "updated_at": updated_at,
+                        "expected_end_at": (
+                            None
+                            if started_at is None
+                            else float(started_at) + float(operation_state.get("duration_s", 0.0))
+                        ),
+                        "recovery": bool(operation_state.get("recovery", False)),
                     }
                 )
                 previous = task_id
@@ -353,12 +494,189 @@ class V2StatePresenter:
                 ready=rank >= _STAGE_RANK["WAITING_OUTPUT"],
                 resource="OUTPUT",
             )
+            for defect in physical_faults or []:
+                if str(defect.get("unit_id", "")) != unit_id:
+                    continue
+                defect_status = str(defect.get("status", "MANIFESTED"))
+                fault_type = str(defect.get("fault_type", ""))
+                target = str(defect.get("target", ""))
+                if fault_type.startswith("BRAZING_"):
+                    title = f"返工补涂并复检：{target or '焊料路径'}"
+                    station_id = "S2A_DISPENSING"
+                    resource = "ARM2"
+                    predecessor = f"{unit_id}:material_inspection"
+                else:
+                    title = f"返工重装并复检：{target or '翅片'}"
+                    station_id = install_station
+                    resource = install_resource
+                    predecessor = f"{unit_id}:pre_braze"
+                recovery_operation = next(
+                    (
+                        operation
+                        for _resource, operation in active_operations.values()
+                        if str(operation.get("unit_id", "")) == unit_id
+                        and bool(operation.get("recovery", False))
+                    ),
+                    None,
+                )
+                if defect_status == "RECOVERED":
+                    status = "SUCCEEDED"
+                elif recovery_operation is not None or defect_status == "REPAIRED":
+                    status = "RUNNING"
+                elif defect_status == "DETECTED":
+                    status = "READY"
+                else:
+                    status = "PENDING"
+                progress = (
+                    1.0 if status == "SUCCEEDED" else float((recovery_operation or {}).get("progress", 0.0))
+                )
+                tasks.append(
+                    {
+                        "task_id": f"{unit_id}:recovery:{defect.get('defect_id', target)}",
+                        "unit_id": unit_id,
+                        "tray_id": tray_id,
+                        "task_type": "RECOVERY_REWORK",
+                        "operation_kind": (recovery_operation or {}).get("kind", ""),
+                        "display_name_zh": title,
+                        "display_detail_zh": (
+                            f"{physical_fault_status_label_zh(defect_status)} · "
+                            f"{station_id} · {progress * 100.0:.0f}%"
+                        ),
+                        "status": status,
+                        "status_zh": _STATUS_ZH[status],
+                        "predecessors": [predecessor],
+                        "assigned_resource": resource if status in {"RUNNING", "SUCCEEDED"} else None,
+                        "eligible_resources": [resource],
+                        "station_id": station_id,
+                        "required_zones": [station_id],
+                        "failure_reason": "",
+                        "progress": progress,
+                        "started_at": (recovery_operation or {}).get("started_at"),
+                        "updated_at": None,
+                        "expected_end_at": None,
+                        "recovery": True,
+                    }
+                )
         return tasks
+
+    @staticmethod
+    def _gantt_events(events: list[Mapping[str, Any]], now: float) -> list[dict[str, Any]]:
+        """Project operation events onto the shared gantt contract.
+
+        V2 emits ``OPERATION_STARTED`` / ``OPERATION_COMPLETED`` with resource,
+        unit and kind, which is everything the gantt table needs.  Nothing ever
+        converted them, so the tab rendered permanently empty.
+        """
+
+        rows: dict[tuple[str, str, float], dict[str, Any]] = {}
+        open_rows: dict[tuple[str, str], tuple[str, str, float]] = {}
+        for event in events:
+            kind = str(event.get("kind", ""))
+            resource = str(event.get("resource", ""))
+            unit_id = str(event.get("unit_id", ""))
+            if not kind or not resource:
+                continue
+            event_type = event.get("type")
+            if event_type == "OPERATION_STARTED":
+                key = (resource, unit_id, float(event.get("time", 0.0)))
+                open_rows[(resource, unit_id)] = key
+                rows[key] = {
+                    "task_id": f"{unit_id}:{kind}",
+                    "display_name_zh": _OPERATION_LABELS_ZH.get(kind, kind),
+                    "task_type": kind,
+                    "station_id": _RESOURCE_STATIONS.get(resource, resource),
+                    "tray_id": event.get("tray_id"),
+                    "status": "RUNNING",
+                    "planned_duration": 0.0,
+                    "actual_start": float(event.get("time", 0.0)),
+                    "actual_end": None,
+                    "waiting": 0.0,
+                    "blockers": [],
+                }
+            elif event_type == "OPERATION_COMPLETED":
+                key = open_rows.pop((resource, unit_id), None)
+                row = None if key is None else rows.get(key)
+                if row is None:
+                    continue
+                end = float(event.get("time", 0.0))
+                row["actual_end"] = end
+                row["status"] = "SUCCEEDED"
+                row["planned_duration"] = max(0.0, end - float(row["actual_start"]))
+            elif event_type == "OPERATION_CANCELLED":
+                key = open_rows.pop((resource, unit_id), None)
+                row = None if key is None else rows.get(key)
+                if row is None:
+                    continue
+                row["status"] = "CANCELLED"
+                row["actual_end"] = float(event.get("time", 0.0))
+                row["blockers"] = [str(event.get("reason", "已取消"))]
+        # Operations still running have no end yet; report elapsed so far.
+        for key, row in rows.items():
+            if row["actual_end"] is None:
+                row["planned_duration"] = max(0.0, now - float(row["actual_start"]))
+        return [rows[key] for key in sorted(rows, key=lambda item: (item[2], item[0]))]
+
+    @staticmethod
+    def _experiment_metrics(
+        snapshot: Mapping[str, Any],
+        events: list[Mapping[str, Any]],
+        units: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Compute the KPI keys the metrics tab reads.
+
+        The console asks for ``makespan``, ``throughput_per_sim_second``,
+        ``average_robot_utilization`` and ``recovery_rate``.  V2 produced none of
+        them, so that tab showed four permanent zeros.
+        """
+
+        now = float(snapshot.get("sim_time", 0.0))
+        completed = [unit for unit in units if unit.get("stage") == "COMPLETE"]
+        finish_times = [
+            float(unit["completed_at"]) for unit in completed if unit.get("completed_at") is not None
+        ]
+        makespan = max(finish_times) if finish_times else now
+        busy: dict[str, float] = {}
+        started: dict[tuple[str, str], float] = {}
+        for event in events:
+            resource = str(event.get("resource", ""))
+            unit_id = str(event.get("unit_id", ""))
+            if not resource:
+                continue
+            if event.get("type") == "OPERATION_STARTED":
+                started[(resource, unit_id)] = float(event.get("time", 0.0))
+            elif event.get("type") in {"OPERATION_COMPLETED", "OPERATION_CANCELLED"}:
+                begin = started.pop((resource, unit_id), None)
+                if begin is not None:
+                    busy[resource] = busy.get(resource, 0.0) + max(0.0, float(event.get("time", 0.0)) - begin)
+        for (resource, _unit), begin in started.items():
+            busy[resource] = busy.get(resource, 0.0) + max(0.0, now - begin)
+        arms = ("ARM1", "ARM2", "ARM3")
+        utilization = {
+            resource: (0.0 if makespan <= 0 else busy.get(resource, 0.0) / makespan) for resource in arms
+        }
+        faults = list(snapshot.get("faults_v2", ()))
+        recovered = sum(1 for record in faults if record.get("recovered"))
+        return {
+            **dict(snapshot.get("metrics", {})),
+            "makespan": makespan,
+            "completed_units": len(completed),
+            "throughput_per_sim_second": (0.0 if makespan <= 0 else len(completed) / makespan),
+            "robot_busy_seconds": dict(sorted(busy.items())),
+            "robot_utilization": utilization,
+            "average_robot_utilization": (
+                sum(utilization.values()) / len(utilization) if utilization else 0.0
+            ),
+            "fault_count": len(faults),
+            "recovered_fault_count": recovered,
+            "recovery_rate": 0.0 if not faults else recovered / len(faults),
+        }
 
     @staticmethod
     def _resources(
         operations: Mapping[str, Any],
         tasks: list[dict[str, Any]],
+        isolated: Mapping[str, Any] | None = None,
+        faults: list[dict[str, Any]] | None = None,
     ) -> dict[str, dict[str, Any]]:
         tasks_by_operation = {
             (
@@ -377,17 +695,30 @@ class V2StatePresenter:
             "POST_CAMERA": "固定焊后相机",
             "OUTPUT": "成品出口输送",
         }
+        isolated = dict(isolated or {})
+        # Which fault isolated each resource, so the console can name the cause
+        # rather than just showing a red row.
+        fault_codes: dict[str, str] = {}
+        for record in faults or []:
+            if record.get("recovered"):
+                continue
+            details = record.get("details") or {}
+            target = str(details.get("target") or record.get("source") or "").upper()
+            if target:
+                fault_codes.setdefault(target, str(record.get("fault_type", "")))
         result: dict[str, dict[str, Any]] = {}
         for resource, tool in tools.items():
             operation = operations.get(resource)
             unit_id = "" if operation is None else str(operation.get("unit_id", ""))
             kind = "" if operation is None else str(operation.get("kind", ""))
+            faulted = resource in isolated
             result[resource] = {
                 "resource_type": "ROBOT" if resource.startswith("ARM") else "EQUIPMENT",
-                "status": "BUSY" if operation is not None else "IDLE",
+                "status": ("FAULTED" if faulted else "BUSY" if operation is not None else "IDLE"),
                 "current_task_id": tasks_by_operation.get((unit_id, kind)),
                 "current_tool": tool,
-                "fault_code": None,
+                "fault_code": fault_codes.get(resource) if faulted else None,
+                "recover_at": isolated.get(resource) if faulted else None,
                 "occupied_zones": [],
             }
         return result
@@ -403,6 +734,7 @@ class V2StatePresenter:
         units = [dict(unit) for unit in snapshot.get("units", ())]
         trays = [dict(tray) for tray in snapshot.get("trays", ())]
         operations = dict(snapshot.get("operations", {}))
+        all_events = [event for event in snapshot.get("events", ()) if isinstance(event, Mapping)]
         active = self._active_unit(units)
         paused = bool(snapshot.get("paused", False))
         complete = bool(snapshot.get("complete", False))
@@ -418,8 +750,18 @@ class V2StatePresenter:
         furnace = dict(snapshot.get("furnace", {}))
         furnace_phase = str(furnace.get("phase", "IDLE"))
         arm_states = self._arm_states(operations)
-        tasks = self._tasks(units, operations)
-        resources_v2 = self._resources(operations, tasks)
+        tasks = self._tasks(
+            units,
+            operations,
+            list(snapshot.get("physical_faults", [])),
+            all_events,
+        )
+        resources_v2 = self._resources(
+            operations,
+            tasks,
+            isolated=snapshot.get("isolated_resources", {}),
+            faults=list(snapshot.get("faults_v2", [])),
+        )
         profile = line_ui_profile(self.line_profile)
         segment_capabilities = {action.segment: False for action in profile.segment_actions}
         rack_layers = list(furnace.get("layers", ()))
@@ -438,7 +780,7 @@ class V2StatePresenter:
         }
         workstations = self._workstations(dict(snapshot.get("topology", {})), trays)
         base_snapshot = dict(snapshot)
-        all_events = list(base_snapshot.pop("events", ()))
+        base_snapshot.pop("events", None)
         assignment_events = [
             event
             for event in all_events
@@ -498,7 +840,9 @@ class V2StatePresenter:
                 "parallelism": {
                     "active_arms": [name for name, item in arm_states.items() if item["status"] == "running"],
                     "current_parallel_arms": sum(item["status"] == "running" for item in arm_states.values()),
-                    "max_parallel_arms": 0,
+                    # Historical peak, reconstructed from the operation event log
+                    # (the runtime keeps no such counter).
+                    "max_parallel_arms": _peak_parallel_arms(all_events),
                     "multi_arm_overlap_s": snapshot.get("scheduled_parallel_install_seconds", 0.0),
                 },
             },
@@ -537,12 +881,9 @@ class V2StatePresenter:
                 "temperature_c": _FURNACE_TEMPERATURE_C.get(furnace_phase, 25.0),
                 "door_open": bool(furnace.get("front_door_open") or furnace.get("rear_door_open")),
             },
-            "fixture": {
-                "status": "待接入 V2 物理夹具",
-                "active_comb_module": None,
-                "press_state": "IDLE",
-                "clamping_force_n": 0.0,
-            },
+            # The comb module follows the active unit's preset, which is real
+            # information even though V2 has no force-controlled press actor yet.
+            "fixture": _fixture_view(active),
             "fins": (
                 {
                     f"fin_{index:02d}": {
@@ -603,22 +944,46 @@ class V2StatePresenter:
             },
             "tasks": tasks,
             "resources_v2": resources_v2,
-            "zone_locks": {},
-            "faults_v2": [],
-            "recoveries": [],
-            "manual_fault_requests": [],
-            "experiment_metrics": dict(snapshot.get("metrics", {})),
+            # V2 enforces exclusivity through single tray ownership rather than a
+            # separate lock manager, so the occupied station *is* the held zone.
+            "zone_locks": {
+                station: {
+                    "holder": tray.get("unit_id") or tray.get("tray_id"),
+                    "tray_id": tray.get("tray_id"),
+                    "acquired_at": None,
+                }
+                for tray in trays
+                for station in (_OWNER_TO_STATION.get(str(tray.get("owner"))),)
+                if station is not None
+            },
+            # Disturbance flexibility: real fault/recovery state, no longer stubs.
+            "faults_v2": list(snapshot.get("faults_v2", [])),
+            "recoveries": list(snapshot.get("recoveries", [])),
+            "manual_fault_requests": list(snapshot.get("manual_fault_requests", [])),
+            "isolated_resources": dict(snapshot.get("isolated_resources", {})),
+            "unavailable_rack_layers": list(snapshot.get("unavailable_rack_layers", [])),
+            "experiment_metrics": self._experiment_metrics(snapshot, all_events, units),
             "motion_plans": [],
             "space_time_reservations": [],
             "motion_blockers": {},
-            "gantt_events": [],
+            "gantt_events": self._gantt_events(all_events, float(snapshot.get("sim_time", 0.0))),
             "ui_capabilities": {
                 "segments": segment_capabilities,
                 "orders": True,
                 "custom_orders": False,
                 "pause_continue_reset": True,
                 "speed": True,
-                "fault_injection": False,
+                "fault_injection": True,
+                "flexibility_actions": {
+                    "product_mix": True,
+                    "resource_parallel": True,
+                    "batch_three": True,
+                    "urgent_insert": True,
+                    "fault_loop": True,
+                    "and_or_runtime": False,
+                    "physical_changeover": False,
+                    "optimization_scheduler": False,
+                },
             },
         }
 

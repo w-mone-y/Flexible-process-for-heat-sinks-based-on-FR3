@@ -60,6 +60,7 @@ test-flexible:
 	$(PYTHON) run_flexible_order.py --order config/orders/order_001.yaml --dry-run
 	$(PYTHON) run_flexible_order.py --order config/orders/order_002.yaml --dry-run
 	$(PYTHON) run_flexible_order.py --order config/orders/order_003.yaml --dry-run
+	$(PYTHON) run_flexible_order.py --order config/orders/order_004.yaml --dry-run
 
 test-v2:
 	$(PYTHON) -m pytest tests/v2

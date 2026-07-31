@@ -327,9 +327,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "motion_plans": state.get("motion_plans", []),
                     "reservations": state.get("space_time_reservations", []),
                 },
+                # Deliberately not added to ``views``: the report reloads config
+                # and compiles a routing, which is far too much work to run on
+                # every /state poll.  See the explicit branch below.
             }
             if path in views:
                 self._send_json(views[path])
+            elif path == "/flexibility":
+                self._send_json(flexibility_view(state))
             else:
                 self._send_json({"ok": False, "error": "not found"}, 404)
 
@@ -348,7 +353,58 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, 400)
 
 
+def _capability_summary(graph: Any) -> dict[str, Any]:
+    """Summarise capability coverage and flexibility of a compiled task graph.
+
+    ``flexible_task_count`` is the number of nodes with more than one eligible
+    resource, i.e. the size of the scheduler's actual decision space.  Before
+    steps A/B this was zero for every plan.
+    """
+
+    capability_tasks = 0
+    flexible_tasks = 0
+    alternative_tasks = 0
+    capabilities: dict[str, int] = {}
+    for task in graph:
+        capability = task.payload.get("capability")
+        if not capability:
+            continue
+        capability_tasks += 1
+        capabilities[str(capability)] = capabilities.get(str(capability), 0) + 1
+        if len(task.eligible_resources) > 1:
+            flexible_tasks += 1
+        if task.payload.get("capability_alternatives"):
+            alternative_tasks += 1
+    return {
+        "total_task_count": len(graph),
+        "capability_task_count": capability_tasks,
+        "flexible_task_count": flexible_tasks,
+        "alternative_route_task_count": alternative_tasks,
+        "capabilities": dict(sorted(capabilities.items())),
+    }
+
+
+def flexibility_view(state: Mapping[str, Any]) -> dict[str, Any]:
+    """Six-dimension flexibility report, computed lazily for ``/flexibility``."""
+
+    from .flexibility_report import flexibility_report
+
+    return flexibility_report(state)
+
+
 def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    if path == "/flexibility/demo":
+        demo = str(payload.get("demo", "")).strip().lower()
+        allowed = {
+            "product_mix",
+            "resource_parallel",
+            "batch_three",
+            "urgent_insert",
+            "fault_loop",
+        }
+        if demo not in allowed:
+            raise ValueError(f"flexibility demo must be one of {sorted(allowed)}")
+        return {"type": "flexibility_demo", "demo": demo}
     if path == "/faults/inject":
         from .fault_catalog import validate_manual_fault_payload
 
@@ -399,6 +455,9 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
         summary = plan.summary()
         preview_graph = build_task_graph(plan, flexible_cell=True)
         summary["estimated_task_count"] = len(preview_graph)
+        # Step A/B visibility: how much of the plan is flexible rather than
+        # single-resource bound, straight from the capability-derived graph.
+        summary["capability_summary"] = _capability_summary(preview_graph)
         command = {
             "type": "order_plan" if path.endswith("/plan") else "order_insert",
             "order_id": order_id,
@@ -425,7 +484,7 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
         result = {"type": f"resource_{action}", "resource_id": parts[1].upper()}
         if action == "fault":
             result["fault_code"] = str(payload.get("fault_code", "OPERATOR_FAULT"))
-            result["duration"] = payload.get("duration")
+            result["duration_s"] = payload.get("duration_s", payload.get("duration"))
         return result
     if path.startswith("/recoveries/") and path.endswith("/action"):
         parts = [part for part in path.split("/") if part]

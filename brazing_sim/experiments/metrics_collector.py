@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from ..changeover.metrics import changeover_seconds_from_graph, collect_changeover_kpi
 from ..events import EventType, SystemEvent
 from ..manufacturing_runtime import ManufacturingRuntime, OrderRunStatus
 from ..planning.task_models import TaskStatus
@@ -59,7 +60,20 @@ class MetricsCollector:
             for resource_id, resource in resources.items()
             if resource.resource_type == "ROBOT"
         }
+        # Step D: changeover KPIs.  ``changeover_ratio_vs_baseline`` is one of the
+        # three metrics the competition names explicitly.  Measured from the task
+        # graph as well as the runtime log so the two can be cross-checked.
+        graph_seconds, graph_tasks = changeover_seconds_from_graph(runtime.graph)
+        changeover = collect_changeover_kpi(
+            getattr(runtime, "changeover_log", ()),
+            runtime.teaching_baseline,
+            productive_seconds=sum(busy.values()),
+        ).as_dict()
+        changeover["changeover_task_count"] = graph_tasks
+        changeover["changeover_seconds_from_graph"] = graph_seconds
         return {
+            **changeover,
+            "installed_fixture": runtime.installed_fixture.as_dict(),
             "makespan": makespan,
             "throughput_per_sim_second": 0.0 if makespan <= 0 else completed_units / makespan,
             "completed_units": completed_units,

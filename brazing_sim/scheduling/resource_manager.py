@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+from ..flexible.capability_models import ResourceCapability
 
 
 class ResourceStatus(str, Enum):
@@ -32,6 +34,11 @@ class ResourceState:
     reserved_at: float | None = None
     busy_since: float | None = None
     last_state_change: float = 0.0
+    # Step A/B additions.  ``capabilities`` keeps its legacy meaning (a TaskType
+    # allow-list) so V1/V2 dispatch is unchanged; the two fields below carry the
+    # capability-ontology view used for delayed binding.
+    process_capabilities: dict[str, ResourceCapability] = field(default_factory=dict)
+    tool_classes: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.resource_id = str(self.resource_id).upper()
@@ -40,6 +47,10 @@ class ResourceState:
         self.available_tools = {str(item) for item in self.available_tools}
         self.capabilities = {str(item).upper() for item in self.capabilities}
         self.occupied_zones = {str(item).upper() for item in self.occupied_zones}
+        self.process_capabilities = {
+            str(key).upper(): value for key, value in dict(self.process_capabilities).items()
+        }
+        self.tool_classes = {str(key): str(value).upper() for key, value in dict(self.tool_classes).items()}
 
     @property
     def available(self) -> bool:
@@ -52,6 +63,60 @@ class ResourceState:
             return True
         return required_tool == self.current_tool or required_tool in self.available_tools
 
+    # ------------------------------------------------------------------ step B
+    def has_capability(self, capability: str) -> bool:
+        """True when this resource declares the named process capability."""
+
+        return str(capability).upper() in self.process_capabilities
+
+    def capability(self, capability: str) -> ResourceCapability | None:
+        return self.process_capabilities.get(str(capability).upper())
+
+    def tools_for_class(self, tool_class: str) -> tuple[str, ...]:
+        """Physical tools of this resource belonging to ``tool_class``."""
+
+        wanted = str(tool_class).upper()
+        return tuple(sorted(tool for tool, value in self.tool_classes.items() if value == wanted))
+
+    def provides_tool_class(self, tool_class: str | None) -> bool:
+        """True when a tool of the requested class is mounted or mountable."""
+
+        if tool_class is None:
+            return True
+        candidates = self.tools_for_class(tool_class)
+        if not candidates:
+            return False
+        return any(tool == self.current_tool or tool in self.available_tools for tool in candidates)
+
+    def speed_factor_for(self, capability: str) -> float:
+        spec = self.capability(capability)
+        return 1.0 if spec is None else float(spec.speed_factor)
+
+    def accepts_capability(
+        self,
+        capability: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        tool_class: str | None = None,
+    ) -> tuple[bool, str]:
+        """Capability-level eligibility check used for delayed binding.
+
+        Returns ``(ok, reason)`` where ``reason`` is a Chinese explanation the UI
+        can show verbatim when a candidate is rejected.
+        """
+
+        name = str(capability).upper()
+        spec = self.process_capabilities.get(name)
+        if spec is None:
+            return False, f"资源 {self.resource_id} 未声明能力 {name}"
+        if not self.provides_tool_class(tool_class):
+            return False, f"资源 {self.resource_id} 没有 {tool_class} 类工具"
+        if params:
+            ok, reason = spec.accepts(params)
+            if not ok:
+                return False, f"资源 {self.resource_id}：{reason}"
+        return True, ""
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "resource_id": self.resource_id,
@@ -61,6 +126,10 @@ class ResourceState:
             "current_tool": self.current_tool,
             "available_tools": sorted(self.available_tools),
             "capabilities": sorted(self.capabilities),
+            "process_capabilities": {
+                key: value.as_dict() for key, value in sorted(self.process_capabilities.items())
+            },
+            "tool_classes": dict(sorted(self.tool_classes.items())),
             "occupied_zones": sorted(self.occupied_zones),
             "estimated_available_time": self.estimated_available_time,
             "fault_code": self.fault_code,

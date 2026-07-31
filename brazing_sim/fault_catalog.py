@@ -45,7 +45,7 @@ _DEFINITIONS = (
         "钎料局部漏涂",
         "物理质量故障",
         "path",
-        "指定黄色焊缝会真实断成两段并露出中间空缺，Arm2补齐后恢复连续。",
+        "指定黄色焊道的局部末段会真实缺失；相机检出后保留全部已涂焊道，Arm2只补该缺口并复检。",
         physical_fault="brazing_gap",
         runtime_fault="BRAZING_MISSING",
     ),
@@ -54,7 +54,7 @@ _DEFINITIONS = (
         "钎料轨迹偏移",
         "物理质量故障",
         "path",
-        "黄色实际焊缝横向偏移，同时显示红色标准参考线；补涂后重新重合。",
+        "目标黄色焊道会真实横向偏移；相机检出后仅纠正该焊道，其他排布保持不变并重新复检。",
         physical_fault="brazing_deviation",
         runtime_fault="BRAZING_PATH_DEVIATION",
     ),
@@ -63,8 +63,9 @@ _DEFINITIONS = (
         "炉温曲线异常",
         "物理质量故障",
         "furnace",
-        "下一热循环的热区、加热管和控制屏异常变色；可恢复判返工，严重判报废。",
+        "下一热循环的热区异常变色；焊后相机检出后隔离产品并转人工工艺评审，不自动二次过炉。",
         physical_fault="furnace_profile",
+        runtime_fault="FURNACE_PROFILE",
     ),
     ManualFaultDefinition(
         "FIN_PICK_FAILED",
@@ -144,7 +145,7 @@ _DEFINITIONS = (
         "current_task",
         "关联机构立即停止并变红，接触位置显示闪烁红球；默认需要人工确认。",
         runtime_fault="CONTACT_SAFETY_STOP",
-        supports_duration=True,
+        supports_duration=False,
     ),
     ManualFaultDefinition(
         "TRAY_STATE_INCONSISTENT",
@@ -153,7 +154,7 @@ _DEFINITIONS = (
         "current_task",
         "托盘变为紫红色并出现偏移半透明重影，停止物流并转入人工归属检查。",
         runtime_fault="TRAY_STATE_INCONSISTENT",
-        supports_duration=True,
+        supports_duration=False,
     ),
 )
 
@@ -174,8 +175,11 @@ def validate_manual_fault_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"{definition.label_zh} requires a target")
     if definition.target_kind == "fin" and not target.startswith("fin_"):
         raise ValueError("fin target must be fin_XX")
-    if definition.target_kind == "path" and not target.startswith("slot_"):
-        raise ValueError("path target must be slot_XX_left/right")
+    # V1 names brazing paths ``slot_02_left``; V2 names them ``path_02``.  Both
+    # are legitimate identifiers for the same kind of target, so accept either
+    # rather than rejecting every path fault raised from the V2 console.
+    if definition.target_kind == "path" and not target.startswith(("slot_", "path_")):
+        raise ValueError("path target must be slot_XX_left/right or path_XX")
     if definition.target_kind == "arm":
         target = target.upper()
         if target not in {"ARM1", "ARM2", "ARM3"}:
@@ -188,8 +192,11 @@ def validate_manual_fault_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     severity = str(payload.get("severity", "recoverable")).strip().lower()
     if severity not in {"recoverable", "severe"}:
         raise ValueError("severity must be recoverable or severe")
-    auto_recover = bool(payload.get("auto_recover", True))
+    safety_fault = fault_type in {"CONTACT_SAFETY_STOP", "TRAY_STATE_INCONSISTENT"}
+    auto_recover = False if safety_fault else bool(payload.get("auto_recover", True))
     duration = payload.get("duration_s", 8.0 if definition.supports_duration else None)
+    if safety_fault:
+        duration = None
     if duration is not None:
         duration = float(duration)
         if not 0.5 <= duration <= 600.0:

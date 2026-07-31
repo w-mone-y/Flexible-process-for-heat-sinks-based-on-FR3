@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import queue
@@ -26,6 +26,8 @@ class V2ControlSurface:
     runtime: DualLineRuntime
     simulation_speed: float = 1.0
     running: bool = True
+    # Order fields the last submission could not honour, surfaced to the console.
+    ignored_order_fields: list[str] = field(default_factory=list)
 
     MINIMUM_SPEED = 0.25
     MAXIMUM_SPEED = 32.0
@@ -51,6 +53,19 @@ class V2ControlSurface:
         return self.runtime.sim_time + remaining_s
 
     def _submit(self, command: Mapping[str, Any], *, quantity: int | None = None) -> None:
+        # Fields the V1 console sends that V2 cannot honour are reported rather
+        # than silently dropped: a request that appears to succeed but changed
+        # nothing is worse than a clear refusal.
+        ignored: list[str] = []
+        if command.get("preferred_rack_layer") is not None:
+            # V2 assigns furnace layers by loading position (capacity-1-index),
+            # so a preferred layer cannot be reserved.
+            ignored.append("首选料架层（V2 按装炉顺序分配层位）")
+        strategy = str(command.get("route_strategy") or "").strip().upper()
+        if strategy and strategy != "STANDARD":
+            raise ValueError(f"V2 当前不支持工艺路线 {strategy}，订单未加入")
+        if command.get("custom_product") is not None:
+            raise ValueError("V2 当前不支持自定义产品执行，订单未加入")
         self.runtime.submit_order(
             str(command.get("preset", "A")),
             order_id=str(command.get("order_id") or "").strip() or None,
@@ -59,6 +74,9 @@ class V2ControlSurface:
             due_at=self._due_at(command),
             urgent=bool(command.get("urgent", False)),
         )
+        if ignored:
+            self.ignored_order_fields = ignored
+            raise ValueError("订单已接受，但以下设置在 V2 下未生效：" + "；".join(ignored))
 
     def process(self, command: Mapping[str, Any]) -> None:
         kind = str(command.get("type", "")).strip()
@@ -81,6 +99,33 @@ class V2ControlSurface:
         elif kind == "reset":
             self.runtime.reset()
             self.simulation_speed = 1.0
+        elif kind == "manual_fault_inject":
+            self.runtime.inject_fault(
+                str(command.get("fault_type", "")),
+                target=str(command.get("target", "")),
+                severity=str(command.get("severity", "recoverable")),
+                auto_recover=bool(command.get("auto_recover", True)),
+                duration_s=command.get("duration_s"),
+                label_zh=str(command.get("label_zh", "")),
+            )
+        elif kind == "resource_recover":
+            resource = str(command.get("resource_id", ""))
+            if not self.runtime.recover_resource(resource):
+                raise ValueError(f"资源 {resource} 当前未被故障隔离")
+        elif kind == "resource_fault":
+            self.runtime.inject_fault(
+                "ARM_UNAVAILABLE",
+                target=str(command.get("resource_id", "")),
+                duration_s=command.get("duration_s"),
+                label_zh=str(command.get("fault_code", "OPERATOR_FAULT")),
+            )
+        elif kind == "recovery_action":
+            recovery_id = str(command.get("recovery_id", ""))
+            action = str(command.get("action", ""))
+            if not self.runtime.recovery_action(recovery_id, action):
+                raise ValueError(f"恢复计划 {recovery_id} 无法执行动作 {action}")
+        elif kind == "flexibility_demo":
+            self._run_flexibility_demo(str(command.get("demo", "")))
         elif kind == "segment":
             segment = str(command.get("segment", ""))
             raise RuntimeError(f"V2 单段 {segment!r} 的物理 actor 尚未接通")
@@ -88,6 +133,61 @@ class V2ControlSurface:
             self.running = False
         else:
             raise ValueError(f"unsupported V2 command: {kind or '<empty>'}")
+
+    def _demo_order_id(self, label: str) -> str:
+        base = f"FLEX_{label.upper()}"
+        if base not in self.runtime.orders:
+            return base
+        index = 2
+        while f"{base}_{index:02d}" in self.runtime.orders:
+            index += 1
+        return f"{base}_{index:02d}"
+
+    def _run_flexibility_demo(self, demo: str) -> None:
+        """Run only demonstrations that the V2 physical runtime can honour."""
+
+        if demo == "product_mix":
+            for preset in ("A", "B", "C"):
+                self.runtime.submit_order(
+                    preset,
+                    order_id=self._demo_order_id(f"PRODUCT_{preset}"),
+                    quantity=1,
+                )
+        elif demo == "resource_parallel":
+            self.runtime.submit_order(
+                "A",
+                order_id=self._demo_order_id("DUAL_BRANCH"),
+                quantity=2,
+                priority=20,
+            )
+        elif demo == "batch_three":
+            self.runtime.submit_order(
+                "A",
+                order_id=self._demo_order_id("BATCH_3"),
+                quantity=3,
+            )
+        elif demo == "urgent_insert":
+            self.runtime.submit_order("B", order_id=self._demo_order_id("NORMAL_B"), quantity=2)
+            self.runtime.submit_order(
+                "C",
+                order_id=self._demo_order_id("URGENT_C"),
+                quantity=1,
+                priority=99,
+                urgent=True,
+            )
+        elif demo == "fault_loop":
+            self.runtime.submit_order(
+                "A",
+                order_id=self._demo_order_id("FAULT_LOOP"),
+                quantity=1,
+            )
+            self.runtime.inject_fault(
+                "BRAZING_MISSING",
+                target="path_02",
+                label_zh="柔性演示：漏涂闭环",
+            )
+        else:
+            raise ValueError(f"unsupported V2 flexibility demo: {demo or '-'}")
 
 
 class V2BrazingApplication:
@@ -217,6 +317,33 @@ class V2BrazingApplication:
                     "physical_complete": physical.get("physical_complete", False),
                     "error": physical.get("failure", ""),
                 }
+            )
+        # Replace duration-only task progress with measured physical waypoint
+        # progress whenever a robot actor is active.  Logical duration may hit
+        # zero while IK motion or camera analysis is still settling; reporting
+        # 100% at that point was the main reason the task graph looked stale.
+        for task in state.get("tasks", []):
+            if not isinstance(task, dict) or task.get("status") != "RUNNING":
+                continue
+            resource = str(task.get("assigned_resource") or "").lower()
+            physical = robot_motion.get(resource)
+            if not isinstance(physical, dict):
+                continue
+            waypoint_count = int(physical.get("waypoint_count", 0))
+            if waypoint_count <= 0:
+                continue
+            # The projector measures both the completed waypoint count and the
+            # active trajectory segment.  Using only ``waypoint_index`` made the
+            # task graph jump in coarse steps and look stale between waypoints.
+            progress = min(1.0, max(0.0, float(physical.get("progress", 0.0))))
+            task["progress"] = progress
+            task["updated_at"] = float(self.runtime.sim_time)
+            detail = str(task.get("display_detail_zh", "")).split(" · 执行进度", 1)[0]
+            target = str(physical.get("target_zh") or "")
+            task["display_detail_zh"] = (
+                f"{detail} · {target} · 执行进度 {progress * 100.0:.0f}%"
+                if target
+                else f"{detail} · 执行进度 {progress * 100.0:.0f}%"
             )
         state["motion_plans"] = [
             {

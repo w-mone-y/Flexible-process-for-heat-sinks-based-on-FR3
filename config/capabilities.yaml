@@ -1,0 +1,446 @@
+# 能力本体（Capability Ontology）
+#
+# 这是工厂级的“工序类型契约”，每种能力声明：
+#   task_type            —— 映射到执行层的 TaskType（技能注册表按此派发）
+#   requires_tool_class  —— 需要的工具类别，由资源的 available_tools 满足
+#   param_schema         —— 该工序接受的参数及其取值范围（严格校验，拒绝未知字段）
+#   duration_model       —— 参数化节拍表达式，替代硬编码常数表
+#   preconditions/effects—— 工艺谓词，用于校验工艺路线的因果完整性
+#   zones                —— 默认占用区域（产线拓扑装饰器可改写为具体工位区域）
+#   preemptive           —— 已开始的动作是否可被抢占
+#
+# duration_model 只允许数值常量、已声明参数、四则运算与
+# min/max/abs/round/ceil/floor，由 AST 解析求值，不使用 eval。
+#
+# 关于 max(envelope, 参数式) 写法：原实现中若干工序使用固定“节拍包线”
+# （例如涂覆 24 s）以保证跨托盘重叠窗口。这里保留该包线作为下界，同时给出
+# 真正的参数式上界，使当前 A/B/C 产品的计划节拍与重构前完全一致，而更大
+# 规格的新产品会自动获得更长的节拍，无需改代码。
+#
+# 边界：本文件描述“产品工艺”。工位分配、托盘移载与合流互斥属于“产线拓扑”，
+# 仍由 brazing_sim/planning/task_graph_builder.py 的拓扑装饰器负责。
+
+schema_version: 1
+
+capabilities:
+
+  # ---------------------------------------------------------------- 基板上料
+  BASE_PICKING:
+    task_type: PICK_BASE_PLATE
+    requires_tool_class: VACUUM
+    description_zh: 从基板料仓吸取基板
+    duration_model: "12.0"
+    effects: [base_picked]
+    zones: [ZONE_TABLE1]
+
+  BASE_LOADING:
+    task_type: PLACE_BASE_PLATE
+    requires_tool_class: VACUUM
+    description_zh: 搬运并放置基板到托盘模具
+    duration_model: "12.0"
+    preconditions: [base_picked]
+    effects: [base_placed]
+    zones: [ZONE_TABLE2_CORE]
+
+  # ---------------------------------------------------------------- 换刀
+  FIN_TOOL_CHANGE:
+    task_type: PREPARE_FIN_TOOL
+    requires_tool_class: GRIPPER
+    description_zh: 切换到翅片夹爪
+    # 12 s 包线让换刀动作与下一托盘的涂覆/检测窗口平滑重叠。
+    duration_model: "12.0"
+    preconditions: [base_placed]
+    effects: [fin_tool_ready]
+    zones: [ZONE_TOOL_CHANGE]
+
+  # ---------------------------------------------------------------- 钎料涂覆
+  # 双喷嘴与单喷嘴两遍是等价替代路线：效果相同，节拍与成本不同。
+  MATERIAL_DISPENSING_DUAL:
+    task_type: DISPENSE_BRAZING
+    requires_tool_class: DISPENSER
+    description_zh: 双喷嘴蛇形涂覆钎料
+    param_schema:
+      path_count: {type: int, min: 1, max: 24}
+      speed_m_s: {type: float, min: 0.02, max: 0.30}
+      bead_offset_m: {type: float, min: 0.0, max: 0.01, required: false, default: 0.0025}
+    # A(10)/B(8)/C(14) 条路径落在 24 s 包线内，与重构前节拍一致；
+    # 20 条以上的更大规格产品自动获得更长节拍。
+    duration_model: "max(24.0, 2.4 + 1.5 * path_count)"
+    preconditions: [base_placed]
+    effects: [brazing_applied]
+    zones: [ZONE_TABLE2_CORE]
+
+  MATERIAL_DISPENSING_SINGLE:
+    task_type: DISPENSE_BRAZING
+    requires_tool_class: DISPENSER
+    description_zh: 单喷嘴两遍涂覆钎料（双喷嘴不可用时的替代路线）
+    param_schema:
+      path_count: {type: int, min: 1, max: 24}
+      speed_m_s: {type: float, min: 0.02, max: 0.30}
+      bead_offset_m: {type: float, min: 0.0, max: 0.01, required: false, default: 0.0025}
+    duration_model: "1.8 * max(24.0, 2.4 + 1.5 * path_count)"
+    preconditions: [base_placed]
+    effects: [brazing_applied]
+    zones: [ZONE_TABLE2_CORE]
+
+  # ---------------------------------------------------------------- 焊料检测
+  VISUAL_INSPECTION_BRAZING:
+    task_type: INSPECT_BRAZING
+    requires_tool_class: CAMERA
+    description_zh: 机械臂手持相机检测钎料涂覆
+    param_schema:
+      path_count: {type: int, min: 1, max: 24}
+    duration_model: "max(10.0, 3.0 + 0.5 * path_count)"
+    preconditions: [brazing_applied]
+    effects: [brazing_verified]
+    zones: [ZONE_TABLE2_CORE]
+    preemptive: false
+
+  FIXED_VISION_BRAZING:
+    task_type: INSPECT_BRAZING
+    requires_tool_class: FIXED_CAMERA
+    description_zh: 固定视觉门架检测钎料涂覆（不占用机械臂）
+    param_schema:
+      path_count: {type: int, min: 1, max: 24}
+    duration_model: "max(7.0, 2.0 + 0.35 * path_count)"
+    preconditions: [brazing_applied]
+    effects: [brazing_verified]
+    zones: [ZONE_TABLE2_CORE]
+
+  # ---------------------------------------------------------------- 梳齿换型
+  COMB_CONFIGURATION:
+    task_type: CONFIGURE_COMB
+    description_zh: 按订单节距安装梳齿夹具
+    param_schema:
+      comb_module: {type: string}
+      pitch_m: {type: float, min: 0.010, max: 0.050}
+    duration_model: "2.0"
+    preconditions: [brazing_verified]
+    effects: [comb_installed]
+    zones: [ZONE_TABLE2_CORE]
+
+  # ---------------------------------------------------------------- 翅片安装
+  FIN_PICKING:
+    task_type: PICK_FIN
+    requires_tool_class: GRIPPER
+    description_zh: 从翅片料仓夹取单片翅片
+    duration_model: "8.0"
+    preconditions: [fin_tool_ready]
+    effects: [fin_picked]
+    zones: [ZONE_TABLE1]
+
+  FIN_ASSEMBLY:
+    task_type: INSTALL_FIN
+    requires_tool_class: GRIPPER
+    description_zh: 沿梳齿槽插入单片翅片
+    param_schema:
+      fin_pitch_m: {type: float, min: 0.010, max: 0.050}
+    duration_model: "10.0"
+    preconditions: [fin_picked, comb_installed]
+    effects: [fins_installed]
+    zones: [ZONE_TABLE2_CORE]
+    preemptive: false
+
+  VISUAL_INSPECTION_FINS:
+    task_type: INSPECT_FINS
+    requires_tool_class: CAMERA
+    description_zh: 检测全部翅片安装位姿
+    param_schema:
+      fin_count: {type: int, min: 1, max: 12}
+    duration_model: "max(10.0, 4.0 + 0.8 * fin_count)"
+    preconditions: [fins_installed]
+    effects: [fins_verified]
+    zones: [ZONE_TABLE2_CORE]
+    preemptive: false
+
+  # ---------------------------------------------------------------- 压紧锁定
+  PRESS_APPLICATION:
+    task_type: APPLY_PRESS
+    description_zh: 短压梁按目标力压紧翅片
+    param_schema:
+      target_force_n: {type: float, min: 1.0, max: 200.0}
+      force_hold_duration_s: {type: float, min: 0.1, max: 30.0}
+    duration_model: "max(2.0, 0.5 + force_hold_duration_s)"
+    preconditions: [fins_verified]
+    effects: [press_applied]
+    zones: [ZONE_TABLE2_CORE]
+
+  FIXTURE_LOCKING:
+    task_type: LOCK_FIXTURE
+    description_zh: 锁紧托盘夹具
+    duration_model: "1.0"
+    preconditions: [press_applied]
+    effects: [fixture_locked]
+    zones: [ZONE_TABLE2_CORE]
+
+  # ---------------------------------------------------------------- 炉前物流
+  TRAY_OUTFEED:
+    task_type: TRANSFER_TRAY_OUT
+    description_zh: 托盘进入炉前输送
+    duration_model: "4.0"
+    preconditions: [fixture_locked]
+    effects: [tray_outfed]
+    zones: [ZONE_OUTFEED]
+
+  ELEVATOR_POSITIONING:
+    task_type: MOVE_ELEVATOR
+    description_zh: 炉内层位分配
+    duration_model: "4.0"
+    preconditions: [tray_outfed]
+    effects: [layer_positioned]
+    zones: [ZONE_ELEVATOR_TRANSFER]
+
+  RACK_LOADING:
+    task_type: LOAD_RACK_LAYER
+    description_zh: 送入炉内料架层
+    duration_model: "5.0"
+    preconditions: [layer_positioned]
+    effects: [rack_loaded]
+    zones: [ZONE_RACK_FRONT, ZONE_FURNACE_LOADING]
+
+  RACK_LAYER_LOCKING:
+    task_type: LOCK_RACK_LAYER
+    description_zh: 锁定炉内料架层
+    duration_model: "1.0"
+    preconditions: [rack_loaded]
+    effects: [layer_locked]
+    zones: [ZONE_RACK_FRONT]
+
+  # ---------------------------------------------------------------- 炉内钎焊
+  FURNACE_BATCH_GATE:
+    task_type: BATCH_READY
+    description_zh: 确认炉批装载完成
+    duration_model: "0.0"
+    preconditions: [layer_locked]
+    effects: [batch_ready]
+    zones: [ZONE_FURNACE_LOADING]
+
+  FURNACE_BRAZING:
+    task_type: RUN_FURNACE
+    description_zh: 执行整炉热循环
+    param_schema:
+      recipe: {type: string}
+      duration_s: {type: float, min: 1.0, max: 3600.0}
+    duration_model: "10.0"
+    preconditions: [batch_ready]
+    effects: [brazed]
+    zones: [ZONE_FURNACE_LOADING]
+    preemptive: false
+
+  RACK_UNLOADING:
+    task_type: UNLOAD_RACK_LAYER
+    description_zh: 从料架卸载托盘
+    duration_model: "6.0"
+    preconditions: [brazed]
+    effects: [rack_unloaded]
+    zones: [ZONE_RACK_FRONT, ZONE_ELEVATOR_TRANSFER]
+
+  # ---------------------------------------------------------------- 焊后检测
+  POST_BRAZE_VISION:
+    task_type: POST_BRAZE_INSPECTION
+    requires_tool_class: CAMERA
+    description_zh: 焊后检测与质量分级
+    duration_model: "10.0"
+    preconditions: [rack_unloaded]
+    effects: [post_inspected]
+    zones: [ZONE_OUTFEED]
+    preemptive: false
+
+  POST_BRAZE_SECOND_VIEW:
+    task_type: SECOND_POST_BRAZE_VIEW
+    requires_tool_class: CAMERA
+    description_zh: 高可靠路线焊后第二视角复检
+    duration_model: "6.0"
+    preconditions: [post_inspected]
+    effects: [post_second_viewed]
+    zones: [ZONE_OUTFEED]
+
+  # ---------------------------------------------------------------- 焊后拆解
+  COMB_REMOVAL_AFTER_BRAZE:
+    task_type: REMOVE_OLD_COMB
+    description_zh: 焊后梳齿板缓慢退出
+    duration_model: "3.0"
+    preconditions: [post_inspected]
+    effects: [comb_removed]
+    zones: [ZONE_OUTFEED]
+
+  PRESS_REMOVAL_AFTER_BRAZE:
+    task_type: REMOVE_OLD_PRESS
+    description_zh: 焊后两根短压片同步抬升并退出
+    duration_model: "2.5"
+    preconditions: [comb_removed]
+    effects: [press_removed]
+    zones: [ZONE_OUTFEED]
+
+  # ================================================================
+  # 产线拓扑、换型与恢复能力
+  #
+  # 以下能力不属于“产品工艺路线”，而属于产线拓扑（托盘移载、转台）、
+  # 换型动作（龙门拆装模具/梳齿/压梁）与故障恢复（补涂、重装、回零）。
+  # 它们由拓扑装饰器和恢复策略生成，因此不出现在 routing 文件里；
+  # 但节拍同样在此声明，使常数节拍表得以完全退役。
+  # ================================================================
+
+  # ---------------------------------------------------------------- 上料索引
+  EMPTY_TRAY_INDEXING:
+    task_type: INDEX_EMPTY_TRAY
+    description_zh: 空托盘补位
+    duration_model: "2.0"
+
+  MATERIAL_KIT_INDEXING:
+    task_type: INDEX_MATERIAL_KIT
+    description_zh: 索引订单物料盒
+    duration_model: "1.5"
+
+  # ---------------------------------------------------------------- 换型（龙门）
+  PRESS_MODULE_REMOVAL:
+    task_type: REMOVE_OLD_PRESS
+    description_zh: 拆除双压片
+    duration_model: "2.5"
+
+  COMB_MODULE_REMOVAL:
+    task_type: REMOVE_OLD_COMB
+    description_zh: 拆除旧梳齿
+    duration_model: "3.0"
+
+  MOLD_REMOVAL:
+    task_type: REMOVE_OLD_MOLD
+    description_zh: 拆除旧托盘模具
+    duration_model: "3.0"
+
+  MOLD_FETCH:
+    task_type: FETCH_MOLD
+    description_zh: 龙门取出目标模具
+    duration_model: "2.5"
+
+  MOLD_INSTALL:
+    task_type: INSTALL_MOLD
+    description_zh: 安装低矮托盘模具
+    duration_model: "3.0"
+
+  MOLD_VERIFY:
+    task_type: VERIFY_MOLD
+    description_zh: 验证模具定位锁销
+    duration_model: "0.5"
+
+  CHANGEOVER_VERIFY:
+    task_type: VERIFY_CHANGEOVER
+    description_zh: 高可靠换型复核
+    duration_model: "1.2"
+
+  COMB_MODULE_FETCH:
+    task_type: FETCH_COMB
+    description_zh: 龙门取出梳齿模块
+    duration_model: "2.5"
+
+  COMB_MODULE_INSTALL:
+    task_type: INSTALL_COMB
+    description_zh: 安装前后梳齿模块
+    duration_model: "3.0"
+
+  COMB_MODULE_VERIFY:
+    task_type: VERIFY_COMB
+    description_zh: 验证梳齿模块锁定
+    duration_model: "0.5"
+
+  PRESS_MODULE_FETCH:
+    task_type: FETCH_PRESS_MODULE
+    description_zh: 龙门取出短压梁
+    duration_model: "2.0"
+
+  PRESS_MODULE_INSTALL:
+    task_type: INSTALL_PRESS_MODULE
+    description_zh: 安装两根短压梁
+    duration_model: "2.5"
+
+  # ---------------------------------------------------------------- 托盘移载
+  TRANSFER_S1_TO_S2A:
+    task_type: TRANSFER_S1_S2A
+    description_zh: 托盘移载 S1→S2A
+    duration_model: "2.2"
+
+  TRANSFER_S2A_TO_S2B:
+    task_type: TRANSFER_S2A_S2B
+    description_zh: 托盘移载 S2A→S2B
+    duration_model: "1.8"
+
+  TRANSFER_S2B_TO_S3:
+    task_type: TRANSFER_S2B_S3
+    description_zh: 托盘移载 S2B→S3
+    duration_model: "2.2"
+
+  TRANSFER_S3_TO_RACK:
+    task_type: TRANSFER_S3_RACK
+    description_zh: 托盘移载 S3→炉前料架
+    duration_model: "2.0"
+
+  TRANSFER_VERIFY:
+    task_type: VERIFY_TRANSFER
+    description_zh: 确认托盘移载到位
+    duration_model: "0.25"
+
+  # ---------------------------------------------------------------- 转台（历史）
+  TURNTABLE_ROTATION:
+    task_type: ROTATE_TABLE2
+    description_zh: 双巢位转台换位
+    duration_model: "2.0"
+
+  TURNTABLE_VERIFY:
+    task_type: VERIFY_TURNTABLE
+    description_zh: 确认转台停稳对位
+    duration_model: "0.3"
+
+  # ---------------------------------------------------------------- 检测复核
+  BASE_ALIGNMENT_VERIFY:
+    task_type: VERIFY_BASE_ALIGNMENT
+    requires_tool_class: CAMERA
+    description_zh: 复核基板定位
+    duration_model: "4.0"
+
+  # ---------------------------------------------------------------- 故障恢复
+  BRAZING_REWORK:
+    task_type: REWORK_BRAZING
+    requires_tool_class: DISPENSER
+    description_zh: 局部补涂钎料
+    duration_model: "8.0"
+
+  FIN_REINSTALL:
+    task_type: REINSTALL_FIN
+    requires_tool_class: GRIPPER
+    description_zh: 重新安装翅片
+    duration_model: "10.0"
+
+  TRANSFER_SAFE_HOME:
+    task_type: SAFE_HOME_TRANSFER
+    description_zh: 移载机构安全回零
+    duration_model: "3.0"
+
+  FURNACE_INTERLOCK_RECHECK:
+    task_type: FURNACE_INTERLOCK_CHECK
+    description_zh: 重新检查炉门互锁
+    duration_model: "1.0"
+
+  # ---------------------------------------------------------------- 成品分流
+  DISPOSITION_ROUTING_PASS:
+    task_type: ROUTE_PASS
+    description_zh: 合格品分流
+    duration_model: "6.5"
+    preconditions: [press_removed]
+    effects: [routed]
+    zones: [ZONE_OUTFEED]
+
+  DISPOSITION_ROUTING_REWORK:
+    task_type: ROUTE_REWORK
+    description_zh: 返工品分流
+    duration_model: "6.5"
+    preconditions: [press_removed]
+    effects: [routed]
+    zones: [ZONE_OUTFEED]
+
+  DISPOSITION_ROUTING_SCRAP:
+    task_type: ROUTE_SCRAP
+    description_zh: 报废品分流
+    duration_model: "6.5"
+    preconditions: [press_removed]
+    effects: [routed]
+    zones: [ZONE_OUTFEED]

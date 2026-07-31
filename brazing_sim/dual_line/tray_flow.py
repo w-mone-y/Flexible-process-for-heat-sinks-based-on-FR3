@@ -68,13 +68,23 @@ _ALLOWED_OWNER_TRANSITIONS: dict[TrayOwner, frozenset[TrayOwner]] = {
     TrayOwner.EMPTY_BUFFER: frozenset({TrayOwner.S1}),
     TrayOwner.S1: frozenset({TrayOwner.S2A}),
     TrayOwner.S2A: frozenset({TrayOwner.S2B}),
-    TrayOwner.S2B: frozenset({TrayOwner.INSTALL_A, TrayOwner.INSTALL_B}),
+    # Reverse edges are used only by camera-confirmed rework.  They are still
+    # ownership-checked physical handoffs, never a teleport or free-joint write.
+    TrayOwner.S2B: frozenset({TrayOwner.S2A, TrayOwner.INSTALL_A, TrayOwner.INSTALL_B}),
     TrayOwner.INSTALL_A: frozenset({TrayOwner.MERGE_A_WAIT}),
     TrayOwner.INSTALL_B: frozenset({TrayOwner.MERGE_B_WAIT}),
     TrayOwner.MERGE_A_WAIT: frozenset({TrayOwner.MERGE}),
     TrayOwner.MERGE_B_WAIT: frozenset({TrayOwner.MERGE}),
     TrayOwner.MERGE: frozenset({TrayOwner.S4}),
-    TrayOwner.S4: frozenset({TrayOwner.BUFFER_1, TrayOwner.BUFFER_2, TrayOwner.BUFFER_3}),
+    TrayOwner.S4: frozenset(
+        {
+            TrayOwner.INSTALL_A,
+            TrayOwner.INSTALL_B,
+            TrayOwner.BUFFER_1,
+            TrayOwner.BUFFER_2,
+            TrayOwner.BUFFER_3,
+        }
+    ),
     TrayOwner.BUFFER_1: frozenset({TrayOwner.FURNACE}),
     TrayOwner.BUFFER_2: frozenset({TrayOwner.FURNACE}),
     TrayOwner.BUFFER_3: frozenset({TrayOwner.FURNACE}),

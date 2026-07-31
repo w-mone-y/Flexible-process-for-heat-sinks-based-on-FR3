@@ -25,6 +25,8 @@ def test_v2_reuses_the_full_v1_console_with_dual_branch_controls() -> None:
 
     assert profile.tab_titles == (
         "运行总览",
+        # Six-dimension flexibility evidence, shared by both lines.
+        "柔性总览",
         "订单规划",
         "任务图 / 调度",
         "异步流水工位",
@@ -71,7 +73,12 @@ def test_v2_state_presenter_matches_the_shared_ui_contract_without_fake_capabili
     }.issubset(state["workstations"])
     assert not any(state["ui_capabilities"]["segments"].values())
     assert not state["ui_capabilities"]["custom_orders"]
-    assert not state["ui_capabilities"]["fault_injection"]
+    # V2 now owns a real fault controller, so the console must advertise it.
+    # The remaining gap is MuJoCo fault *visuals*, not the capability itself.
+    assert state["ui_capabilities"]["fault_injection"]
+    assert state["faults_v2"] == []
+    assert state["recoveries"] == []
+    assert state["manual_fault_requests"] == []
     assert state["physical_execution_complete"] is False
 
 

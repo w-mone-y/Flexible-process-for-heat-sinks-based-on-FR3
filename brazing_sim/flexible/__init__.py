@@ -1,5 +1,23 @@
 """Order-parameter-driven flexible-manufacturing API."""
 
+from .capability_loader import (
+    load_capabilities,
+    load_routing,
+    parse_resource_capabilities,
+    validate_routing_against_catalog,
+)
+from .capability_models import (
+    BatchPolicy,
+    CapabilityCatalog,
+    CapabilitySpec,
+    OperationAlternative,
+    OperationSpec,
+    ParamSpec,
+    ParamType,
+    ResourceCapability,
+    RoutingSpec,
+)
+from .duration_model import DurationModel, DurationModelError
 from .geometry import MAX_FINS, MAX_PATHS, fin_y_positions, generate_geometry
 from .loader import (
     FlexibleConfigError,
@@ -8,6 +26,14 @@ from .loader import (
     load_process_recipes,
     load_product,
     load_rack_config,
+)
+from .routing_compiler import (
+    AlternativeOption,
+    CompiledOperation,
+    RoutingCompileError,
+    RoutingCompiler,
+    compile_routing,
+    plan_parameter_bindings,
 )
 from .models import (
     BrazingPath,
@@ -27,14 +53,35 @@ from .planner import allocate_rack, build_preset_plan, build_process_plan, prese
 from .preflight import FlexiblePreflightError, validate_process_plan
 
 __all__ = [
+    "AlternativeOption",
+    "BatchPolicy",
     "BrazingPath",
+    "CapabilityCatalog",
+    "CapabilitySpec",
+    "CompiledOperation",
+    "DurationModel",
+    "DurationModelError",
     "FinTarget",
     "FixtureModuleConfig",
     "FlexibleConfigError",
     "FlexiblePreflightError",
     "MAX_FINS",
     "MAX_PATHS",
+    "OperationAlternative",
+    "OperationSpec",
     "OrderConfig",
+    "ParamSpec",
+    "ParamType",
+    "ResourceCapability",
+    "RoutingCompileError",
+    "RoutingCompiler",
+    "RoutingSpec",
+    "compile_routing",
+    "load_capabilities",
+    "load_routing",
+    "parse_resource_capabilities",
+    "plan_parameter_bindings",
+    "validate_routing_against_catalog",
     "ProcessPlan",
     "ProcessRecipeConfig",
     "ProductConfig",

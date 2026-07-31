@@ -58,6 +58,16 @@ def test_order_plan_and_v2_control_commands_validate() -> None:
         "duration_s": 8.0,
         "label_zh": "机械臂暂时离线",
     }
+    safety = validate_http_command(
+        "/faults/inject",
+        {
+            "fault_type": "CONTACT_SAFETY_STOP",
+            "auto_recover": True,
+            "duration_s": 8,
+        },
+    )
+    assert safety["auto_recover"] is False
+    assert safety["duration_s"] is None
     assert {"FIN_POSE", "BRAZING_MISSING", "FURNACE_PROFILE", "FORK_TIMEOUT"} <= set(MANUAL_FAULT_CATALOG)
 
 

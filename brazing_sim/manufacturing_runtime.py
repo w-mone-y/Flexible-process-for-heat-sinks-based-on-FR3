@@ -19,7 +19,19 @@ from .manufacturing_config import (
 )
 from .planning.task_graph import TaskGraph
 from .planning.batch_planner import are_process_plans_compatible
-from .planning.task_graph_builder import build_task_graph
+from .changeover.config_diff import FixtureConfiguration, required_configuration
+from .changeover.setup_matrix import (
+    PLACEHOLDER_TEACHING_BASELINE,
+    SetupTimeMatrix,
+    TeachingBaseline,
+)
+from .planning.capability_binding import V1_SHALLOW_U_PROFILE, LineExecutionProfile
+from .planning.task_graph_builder import (
+    LEGACY_DURATIONS,
+    ProcessPlanTaskGraphBuilder,
+    default_capability_catalog,
+    default_routing,
+)
 from .planning.task_models import ManufacturingTask, TaskStatus, TaskType
 from .planning.workcell_motion import WorkcellMotionPlanningService
 from .recovery import FaultRecord, FaultType, RecoveryPolicy, Replanner
@@ -183,6 +195,9 @@ class ManufacturingRuntime:
         context: Any = None,
         max_wip_units: int = 3,
         flexible_cell: bool = False,
+        execution_profile: LineExecutionProfile | None = None,
+        track_changeover: bool = False,
+        teaching_baseline: TeachingBaseline | None = None,
     ) -> None:
         self.config = scheduler_config or load_scheduler_config(ROOT / "config" / "scheduler.yaml")
         resources, zones = load_resource_config(resource_config_path or ROOT / "config" / "resources.yaml")
@@ -201,6 +216,19 @@ class ManufacturingRuntime:
         self.scenario: FaultScenario | None = None
         self.max_wip_units = int(max_wip_units)
         self.flexible_cell = bool(flexible_cell)
+        # Step B: which resources may realise a capability depends on what this
+        # line's actors can physically execute, not just on capability data.
+        # V1's fin skills are implemented against Arm1's welds, so Arm3 is an
+        # inspection-only arm here; V2 supplies its own profile.
+        self.execution_profile = execution_profile or V1_SHALLOW_U_PROFILE
+        # Step D: changeover state persists across orders, which is what makes
+        # setup time sequence-dependent rather than a per-order constant.
+        self.track_changeover = bool(track_changeover)
+        self.installed_fixture = FixtureConfiguration()
+        self.setup_matrix = SetupTimeMatrix(durations=dict(LEGACY_DURATIONS))
+        self.teaching_baseline = teaching_baseline or PLACEHOLDER_TEACHING_BASELINE
+        self._unit_configurations: dict[str, FixtureConfiguration] = {}
+        self.changeover_log: list[dict[str, Any]] = []
         self.motion_planning = WorkcellMotionPlanningService(seed=0) if self.flexible_cell else None
         self.workstations: dict[WorkstationId, WorkstationState] = {}
         self.transfers: dict[TransferId, AsyncTransferState] = {}
@@ -276,7 +304,26 @@ class ManufacturingRuntime:
         order_id = plan.order.order_id
         if order_id in self.orders:
             raise ValueError(f"duplicate order id: {order_id}")
-        new_graph = build_task_graph(plan, flexible_cell=self.flexible_cell)
+        builder = ProcessPlanTaskGraphBuilder(
+            flexible_cell=self.flexible_cell,
+            catalog=default_capability_catalog(),
+            routing=default_routing(),
+            resources=self.resources.states.values(),
+            profile=self.execution_profile,
+            track_changeover=self.track_changeover,
+            # Carrying the installed configuration into the next order is what
+            # makes setup time sequence-dependent (FJSP-SDST) instead of a
+            # per-order constant.
+            fixture_state=self.installed_fixture,
+        )
+        new_graph = builder.build(plan)
+        if self.track_changeover:
+            self.installed_fixture = builder.fixture_state
+            self.changeover_log.extend(builder.changeover_plans)
+            configuration = required_configuration(plan)
+            for assignment in plan.rack_assignments:
+                unit_id = f"{plan.order.order_id}_UNIT_{assignment.unit_index + 1:02d}"
+                self._unit_configurations[unit_id] = configuration
         task_ids: list[str] = []
         for task in new_graph.topological_order():
             # Queue admission, rather than dependencies, controls WIP release.
@@ -414,6 +461,26 @@ class ManufacturingRuntime:
             )
         if refresh_ready:
             self._refresh_ready(now)
+
+    def _annotate_changeover_cost(self, ready: list[ManufacturingTask]) -> None:
+        """Publish the setup cost each ready task would incur, in seconds.
+
+        A task whose unit needs the fixture already mounted costs nothing; one
+        that would force a module swap carries the full sequence-dependent
+        setup time.  The dynamic scheduler multiplies this by
+        ``SchedulingWeights.product_changeover_cost``, so with several units
+        ready it naturally continues with the same fixture family first.
+        """
+
+        if not self.track_changeover:
+            return
+        for task in ready:
+            target = self._unit_configurations.get(task.unit_id)
+            if target is None:
+                continue
+            seconds = self.setup_matrix.setup_time(self.installed_fixture, target)
+            task.payload["product_changeover_cost"] = seconds
+            task.payload["changeover_required"] = seconds > 0.0
 
     def _refresh_ready(self, now: float) -> list[ManufacturingTask]:
         for task in self.graph:
@@ -1116,6 +1183,10 @@ class ManufacturingRuntime:
             ready = [task for task in ready if self._cell_task_available(task)]
         ready = self._prepare_furnace_batches(ready, timestamp)
         occupied = {zone for zone, lease in self.zones.snapshot().items() if lease is not None}
+        # Step D: make the sequence-dependent setup cost visible to the
+        # scheduler.  ``SchedulingWeights.product_changeover_cost`` already
+        # existed but nothing ever populated it, so setup was effectively free.
+        self._annotate_changeover_cost(ready)
         assignments = self.scheduler.select_assignments(
             ready,
             self.resources.states,
@@ -1423,6 +1494,11 @@ class ManufacturingRuntime:
         self._furnace_batch_sequence = 0
         if self.motion_planning is not None:
             self.motion_planning.reset()
+        # A reset returns the cell to a cold line: nothing is mounted, so the
+        # next order pays a full installation.
+        self.installed_fixture = FixtureConfiguration()
+        self._unit_configurations.clear()
+        self.changeover_log.clear()
         self._reset_flexible_cell_state()
 
     def _reset_flexible_cell_state(self) -> None:

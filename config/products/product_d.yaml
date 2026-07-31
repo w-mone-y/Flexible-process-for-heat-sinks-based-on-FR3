@@ -1,0 +1,36 @@
+# 产品 D：高密度散热组件（换型能力演示件）
+#
+# 存在意义：证明"新增产品 = 新增一个 YAML"。本文件与 config/orders/order_004.yaml
+# 是加入 D 型订单所需的**全部**改动 —— 没有一行 Python、没有一处示教点。
+#
+# 与 A/B/C 的差异刻意选在能触发数据驱动行为的地方：
+#   * 9 片翅片、18 条钎料路径（占满 15 mm 梳齿模块的 9 个槽位）
+#     → 涂覆与检测节拍由 duration_model 自动增长，超出兼容包线
+#   * 15 mm 节距 → 落在 Arm3 窄夹爪许可窗口 [0.015, 0.030] 内，
+#     因此 V2 剖面下 Arm1/Arm3 都是安装候选
+#   * 30 N 压紧力、2.5 s 保压 → 压紧节拍随参数变化
+#
+# 翅片数受实体工装约束：comb_insert_15mm 只有 9 个槽，配置 12 片会被
+# 加载器以"梳齿槽数不足"拒绝（这正是严格校验应有的行为）。
+
+schema_version: 1
+product_id: PRODUCT_D
+preset: D
+base_size_m: [0.36, 0.24, 0.008]
+fin_size_m: [0.30, 0.002, 0.06]
+fin_count: 9
+fin_pitch_m: 0.015
+start_offset_y_m: null
+path_margin_m: 0.015
+path_width_m: 0.004
+brazing_sides: [left, right]
+comb_module: comb_insert_15mm
+target_clamping_force_n: 30.0
+clamping_force_tolerance_n: 3.0
+force_hold_duration_s: 2.5
+nozzle_spacing_m: 0.0050
+bead_offset_m: 0.0025
+nozzle_tip_height_m: 0.0015
+material_speed_m_s: 0.10
+recipe: demo_brazing
+material_system: demo_aluminum_brazing

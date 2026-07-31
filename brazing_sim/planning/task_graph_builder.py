@@ -1,15 +1,67 @@
-"""Build executable manufacturing DAGs from validated ``ProcessPlan`` objects."""
+"""Build executable manufacturing DAGs from validated ``ProcessPlan`` objects.
+
+Durations and resource eligibility are data-driven (steps A and B).  When a
+:class:`~brazing_sim.flexible.capability_models.CapabilityCatalog` is available
+the builder evaluates each capability's ``duration_model`` against the plan's
+real parameters and derives ``eligible_resources`` from capability declarations
+instead of naming one arm.  ``LEGACY_DURATIONS`` is retained only as the offline
+fallback used when no catalog/resource configuration is supplied.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 
+from ..flexible.capability_loader import load_capabilities, load_routing
+from ..flexible.capability_models import CapabilityCatalog, RoutingSpec
 from ..flexible.models import ProcessPlan, RackAssignment, RouteStrategy
+from ..changeover.config_diff import (
+    FixtureConfiguration,
+    plan_changeover,
+    required_configuration,
+)
+from ..flexible.routing_compiler import CompiledOperation, RoutingCompiler
+from ..paths import CONFIG_DIR
+from .capability_binding import (
+    UNRESTRICTED_PROFILE,
+    CapabilityBinder,
+    LineExecutionProfile,
+)
 from .task_graph import TaskGraph
 from .task_models import ManufacturingTask, TaskType
 
-DEFAULT_DURATIONS: dict[TaskType, float] = {
+DEFAULT_CAPABILITIES_PATH = CONFIG_DIR / "capabilities.yaml"
+DEFAULT_ROUTING_PATH = CONFIG_DIR / "routings" / "heat_sink_standard.yaml"
+
+
+@lru_cache(maxsize=4)
+def _cached_catalog(path: str) -> CapabilityCatalog:
+    return load_capabilities(path)
+
+
+@lru_cache(maxsize=4)
+def _cached_routing(path: str, catalog_path: str) -> RoutingSpec:
+    return load_routing(path, catalog=_cached_catalog(catalog_path))
+
+
+def default_capability_catalog() -> CapabilityCatalog:
+    """Load (and memoize) the repository's capability ontology."""
+
+    return _cached_catalog(str(DEFAULT_CAPABILITIES_PATH))
+
+
+def default_routing() -> RoutingSpec:
+    """Load (and memoize) the standard heat-sink routing."""
+
+    return _cached_routing(str(DEFAULT_ROUTING_PATH), str(DEFAULT_CAPABILITIES_PATH))
+
+
+# Nominal task durations used only when no capability catalog is provided.  The
+# authoritative values now live in ``config/capabilities.yaml`` as parametric
+# ``duration_model`` expressions.
+LEGACY_DURATIONS: dict[TaskType, float] = {
     TaskType.INDEX_MATERIAL_KIT: 1.5,
     TaskType.INDEX_EMPTY_TRAY: 2.0,
     TaskType.REMOVE_OLD_PRESS: 2.5,
@@ -67,24 +119,116 @@ DEFAULT_DURATIONS: dict[TaskType, float] = {
 }
 
 
+# Backwards-compatible alias: external callers and historical experiment
+# snapshots still import ``DEFAULT_DURATIONS``.
+DEFAULT_DURATIONS = LEGACY_DURATIONS
+
+
 def _task_id(order_id: str, unit_index: int, suffix: str) -> str:
     return f"{order_id}_U{unit_index + 1:02d}_{suffix}"
 
 
 class ProcessPlanTaskGraphBuilder:
-    """Generate one graph for every unit plus a shared furnace-batch gate."""
+    """Generate one graph for every unit plus a shared furnace-batch gate.
+
+    ``catalog`` / ``routing`` / ``resources`` are optional.  When supplied, task
+    durations come from parametric capability duration models and
+    ``eligible_resources`` is derived from capability declarations filtered by a
+    :class:`LineExecutionProfile`.  Without them the builder falls back to the
+    legacy constant table and its historical single-resource bindings, which
+    keeps unit tests that construct plans in isolation working unchanged.
+    """
 
     def __init__(
         self,
         durations: dict[str | TaskType, float] | None = None,
         *,
         flexible_cell: bool = False,
+        catalog: CapabilityCatalog | None = None,
+        routing: RoutingSpec | None = None,
+        resources: Iterable[Any] = (),
+        profile: LineExecutionProfile = UNRESTRICTED_PROFILE,
+        track_changeover: bool = False,
+        fixture_state: FixtureConfiguration | None = None,
     ) -> None:
-        self.durations = dict(DEFAULT_DURATIONS)
+        # Step D.  Off by default so every existing caller keeps its exact graph;
+        # the runtime turns it on and carries fixture state across orders.
+        self.track_changeover = bool(track_changeover)
+        self.fixture_state = fixture_state or FixtureConfiguration()
+        self._changeover_plans: list[dict[str, Any]] = []
+        self.durations = dict(LEGACY_DURATIONS)
         for key, value in (durations or {}).items():
             self.durations[TaskType(key)] = float(value)
+        # Explicit overrides win over capability-derived durations so callers can
+        # still shorten a demo without editing YAML.
+        self._duration_overrides = {TaskType(key) for key in (durations or {})}
         self._sequence = 0
         self.flexible_cell = bool(flexible_cell)
+        self.catalog = catalog
+        self.routing = routing
+        self.profile = profile
+        resource_list = list(resources)
+        self.binder = (
+            CapabilityBinder(catalog, resource_list, profile=profile)
+            if catalog is not None and resource_list
+            else None
+        )
+        # Populated per build: task_type -> compiled operation data.
+        self._compiled: dict[int, dict[str, CompiledOperation]] = {}
+        self._binding_snapshots: list[dict[str, Any]] = []
+
+    # ------------------------------------------------------------------ step A
+    def _compile_plan(self, plan: ProcessPlan) -> None:
+        """Compile the routing for every unit so durations/params come from data."""
+
+        self._compiled = {}
+        if self.catalog is None or self.routing is None:
+            return
+        compiler = RoutingCompiler(self.catalog)
+        for assignment in plan.rack_assignments:
+            operations = compiler.compile_unit(self.routing, plan, assignment.unit_index)
+            by_key: dict[str, CompiledOperation] = {}
+            for operation in operations:
+                key = operation.task_type
+                if operation.fin_index is not None:
+                    key = f"{operation.task_type}#{operation.fin_index}"
+                by_key[key] = operation
+            self._compiled[assignment.unit_index] = by_key
+
+    def _compiled_operation(
+        self,
+        unit_index: int,
+        task_type: TaskType,
+        fin_index: int | None = None,
+    ) -> CompiledOperation | None:
+        unit = self._compiled.get(unit_index)
+        if not unit:
+            return None
+        if fin_index is not None:
+            found = unit.get(f"{task_type.value}#{fin_index}")
+            if found is not None:
+                return found
+        return unit.get(task_type.value)
+
+    def _capability_duration(
+        self,
+        task_type: TaskType,
+        operation: CompiledOperation | None,
+    ) -> float | None:
+        """Parametric duration for a task, or ``None`` to use the legacy table."""
+
+        if task_type in self._duration_overrides:
+            return None
+        if operation is not None:
+            return operation.nominal_duration
+        # Topology / changeover / recovery nodes are not in the routing, but
+        # their capability still declares a duration model.
+        if self.catalog is None:
+            return None
+        for capability in self.catalog:
+            if capability.task_type == task_type.value and not capability.param_schema:
+                return capability.duration_for({})
+        return None
 
     def _make(
         self,
@@ -105,8 +249,24 @@ class ProcessPlanTaskGraphBuilder:
         station_capabilities: Iterable[str] = (),
         route_phase: str | None = None,
         motion_constraints: dict[str, Any] | None = None,
+        unit_index: int | None = None,
+        fin_index: int | None = None,
     ) -> ManufacturingTask:
         self._sequence += 1
+        resources = list(resources)
+        payload = dict(payload or {})
+        duration: float | None = None
+
+        if unit_index is not None:
+            operation = self._compiled_operation(unit_index, task_type, fin_index)
+            duration = self._capability_duration(task_type, operation)
+            if operation is not None:
+                resources, payload = self._apply_capability_binding(
+                    operation,
+                    resources,
+                    payload,
+                    task_id=task_id,
+                )
         return ManufacturingTask(
             task_id=task_id,
             task_type=task_type,
@@ -122,12 +282,152 @@ class ProcessPlanTaskGraphBuilder:
             eligible_resources=list(resources),
             required_tool=tool,
             required_zones=list(zones),
-            estimated_duration=self.durations.get(task_type, 1.0),
+            estimated_duration=(self.durations.get(task_type, 1.0) if duration is None else duration),
             priority=plan.order.priority,
             retry_limit=retry_limit,
-            payload=dict(payload or {}),
+            payload=payload,
             sequence_index=self._sequence,
         )
+
+    # ------------------------------------------------------------------ step B
+    def _apply_capability_binding(
+        self,
+        operation: CompiledOperation,
+        resources: list[str],
+        payload: dict[str, Any],
+        *,
+        task_id: str,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """Replace a hard-coded resource list with capability-derived candidates.
+
+        The capability name, its OR alternatives and every rejection reason are
+        recorded on the payload so the console can explain a dispatch decision
+        instead of showing an opaque single-resource binding.
+        """
+
+        payload["capability"] = operation.capability
+        payload["capability_params"] = dict(operation.params)
+        if operation.requires_tool_class:
+            payload["required_tool_class"] = operation.requires_tool_class
+        if not operation.preemptive:
+            payload["non_preemptive"] = True
+
+        if self.binder is None:
+            return resources, payload
+
+        binding = self.binder.bind(
+            operation.capability,
+            operation.params,
+            base_duration=operation.nominal_duration,
+        )
+        alternatives: dict[str, Any] = {}
+        if operation.alternatives:
+            for mode, result in self.binder.bind_alternatives(operation.alternatives).items():
+                alternatives[mode] = result.as_dict()
+            payload["capability_alternatives"] = alternatives
+
+        candidates = list(binding.resource_ids)
+        if not candidates:
+            # Never silently widen or empty the candidate set: keep the authored
+            # binding and record why capability binding produced nothing.
+            payload["capability_binding_warning"] = (
+                f"能力 {operation.capability} 在当前产线没有可用资源，回退到既有绑定"
+            )
+            payload["capability_rejected"] = [
+                {"resource_id": key, "reason": value} for key, value in binding.rejected
+            ]
+            self._binding_snapshots.append({"task_id": task_id, "fallback": True, **binding.as_dict()})
+            return resources, payload
+
+        payload["capability_candidates"] = [item.as_dict() for item in binding.candidates]
+        if binding.rejected:
+            payload["capability_rejected"] = [
+                {"resource_id": key, "reason": value} for key, value in binding.rejected
+            ]
+        self._binding_snapshots.append({"task_id": task_id, "fallback": False, **binding.as_dict()})
+        return candidates, payload
+
+    @property
+    def binding_snapshots(self) -> list[dict[str, Any]]:
+        """Per-task capability binding records from the most recent build."""
+
+        return list(self._binding_snapshots)
+
+    # ------------------------------------------------------------------ step D
+    def _emit_changeover(
+        self,
+        graph: TaskGraph,
+        plan: ProcessPlan,
+        *,
+        unit_index: int,
+        unit_id: str,
+        tray_id: str | None,
+        predecessor: str,
+    ) -> str:
+        """Emit the minimal changeover chain, returning the new predecessor.
+
+        Returns ``predecessor`` unchanged when no physical changeover is needed,
+        so an unchanged fixture costs exactly zero tasks and zero seconds.
+        """
+
+        if not self.track_changeover:
+            return predecessor
+
+        target = required_configuration(plan)
+        changeover = plan_changeover(
+            self.fixture_state,
+            target,
+            verify=self._uses_high_reliability_route(plan, unit_index),
+        )
+        self._changeover_plans.append(
+            {
+                "order_id": plan.order.order_id,
+                "unit_id": unit_id,
+                "unit_index": unit_index,
+                **changeover.as_dict(),
+                "nominal_seconds": changeover.duration(self.durations),
+            }
+        )
+        # Advance the tracked state even when nothing changed, so the program
+        # identifier follows the product.
+        self.fixture_state = target
+
+        current = predecessor
+        for action in changeover.actions:
+            task = self._make(
+                task_id=_task_id(plan.order.order_id, unit_index, action.suffix),
+                task_type=action.task_type,
+                plan=plan,
+                unit_index=unit_index,
+                unit_id=unit_id,
+                tray_id=tray_id,
+                predecessors=(current,),
+                resources=("CHANGEOVER_GANTRY",),
+                zones=("ZONE_TABLE2_CORE", "ZONE_CHANGEOVER_GANTRY"),
+                route_phase="CHANGEOVER",
+                payload={
+                    "module_name": action.module_name,
+                    "changeover_slot": action.slot,
+                    "changeover_kind": action.kind,
+                    "changeover_from": changeover.source.as_dict(),
+                    "changeover_to": changeover.target.as_dict(),
+                },
+            )
+            graph.add_task(task)
+            current = task.task_id
+        return current
+
+    @staticmethod
+    def _uses_high_reliability_route(plan: ProcessPlan, unit_index: int) -> bool:
+        return plan.route_strategy is RouteStrategy.HIGH_RELIABILITY or (
+            plan.route_strategy is RouteStrategy.FIRST_ARTICLE and unit_index == 0
+        )
+
+    @property
+    def changeover_plans(self) -> list[dict[str, Any]]:
+        """Per-unit changeover records from the most recent build."""
+
+        return list(self._changeover_plans)
 
     def _build_unit(
         self,
@@ -144,6 +444,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("PICK_BASE"),
             task_type=TaskType.PICK_BASE_PLATE,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             resources=("ARM1",),
@@ -156,6 +457,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("PLACE_BASE"),
             task_type=TaskType.PLACE_BASE_PLATE,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(pick_base.task_id,),
@@ -172,6 +474,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("PREPARE_FIN_TOOL"),
             task_type=TaskType.PREPARE_FIN_TOOL,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(place_base.task_id,),
@@ -185,6 +488,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("DISPENSE"),
             task_type=TaskType.DISPENSE_BRAZING,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(place_base.task_id,),
@@ -204,6 +508,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("INSPECT_BRAZING"),
             task_type=TaskType.INSPECT_BRAZING,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(dispense.task_id,),
@@ -213,13 +518,27 @@ class ProcessPlanTaskGraphBuilder:
             payload={"path_ids": [path.path_id for path in plan.brazing_paths]},
         )
         graph.add_task(inspect_material)
+        # Step D: the fixture changeover needed *before* this unit's comb can be
+        # configured is derived from (installed configuration → required
+        # configuration).  When the previous unit left the right modules mounted
+        # the diff is empty and no gantry motion is emitted at all — that is
+        # where family-batching savings physically come from.
+        comb_predecessor = self._emit_changeover(
+            graph,
+            plan,
+            unit_index=index,
+            unit_id=unit_id,
+            tray_id=tray_id,
+            predecessor=inspect_material.task_id,
+        )
         configure_comb = self._make(
             task_id=prefix("CONFIGURE_COMB"),
             task_type=TaskType.CONFIGURE_COMB,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
-            predecessors=(inspect_material.task_id,),
+            predecessors=(comb_predecessor,),
             resources=("FIXTURE",),
             zones=("ZONE_TABLE2_CORE",),
             payload={"comb_module_name": plan.fixture_module.name},
@@ -240,6 +559,8 @@ class ProcessPlanTaskGraphBuilder:
                 task_id=prefix(f"PICK_FIN_{target.index + 1:02d}"),
                 task_type=TaskType.PICK_FIN,
                 plan=plan,
+                unit_index=index,
+                fin_index=target.index,
                 unit_id=unit_id,
                 tray_id=tray_id,
                 predecessors=predecessors,
@@ -254,6 +575,8 @@ class ProcessPlanTaskGraphBuilder:
                 task_id=prefix(f"INSTALL_FIN_{target.index + 1:02d}"),
                 task_type=TaskType.INSTALL_FIN,
                 plan=plan,
+                unit_index=index,
+                fin_index=target.index,
                 unit_id=unit_id,
                 tray_id=tray_id,
                 predecessors=(pick_fin.task_id, configure_comb.task_id),
@@ -271,6 +594,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("INSPECT_FINS"),
             task_type=TaskType.INSPECT_FINS,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=install_ids,
@@ -284,6 +608,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("APPLY_PRESS"),
             task_type=TaskType.APPLY_PRESS,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(inspect_fins.task_id,),
@@ -299,6 +624,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("LOCK_FIXTURE"),
             task_type=TaskType.LOCK_FIXTURE,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(press.task_id,),
@@ -310,6 +636,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("TRANSFER_OUT"),
             task_type=TaskType.TRANSFER_TRAY_OUT,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(lock_fixture.task_id,),
@@ -322,6 +649,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("MOVE_ELEVATOR"),
             task_type=TaskType.MOVE_ELEVATOR,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(transfer_out.task_id,),
@@ -335,6 +663,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("LOAD_RACK"),
             task_type=TaskType.LOAD_RACK_LAYER,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(move_lift.task_id,),
@@ -348,6 +677,7 @@ class ProcessPlanTaskGraphBuilder:
             task_id=prefix("LOCK_RACK"),
             task_type=TaskType.LOCK_RACK_LAYER,
             plan=plan,
+            unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
             predecessors=(load_layer.task_id,),
@@ -575,318 +905,13 @@ class ProcessPlanTaskGraphBuilder:
             graph.add_dependency(transfer_ids[index - 1]["2b3"], transfer_ids[index]["2a2b"])
             graph.add_dependency(transfer_ids[index - 1]["3r"], transfer_ids[index]["2b3"])
 
-    def _decorate_flexible_cell(self, graph: TaskGraph, plan: ProcessPlan) -> None:
-        """Turn the safe legacy unit chains into a two-nest physical pipeline.
-
-        One rotation node represents both nests.  For boundary ``i`` it returns
-        unit ``i-1`` from PROCESS to ASSEMBLY and simultaneously sends unit
-        ``i`` from ASSEMBLY to PROCESS.  This prevents the common but invalid
-        model where the two trays appear to rotate independently.
-        """
-
-        order_id = plan.order.order_id
-        quantity = len(plan.rack_assignments)
-
-        def uses_high_reliability_route(index: int) -> bool:
-            return plan.route_strategy is RouteStrategy.HIGH_RELIABILITY or (
-                plan.route_strategy is RouteStrategy.FIRST_ARTICLE and index == 0
-            )
-
-        lookup: list[dict[str, ManufacturingTask]] = []
-        for index in range(quantity):
-            prefix = f"{order_id}_U{index + 1:02d}_"
-            items = {
-                task.task_id.removeprefix(prefix): task for task in graph if task.task_id.startswith(prefix)
-            }
-            lookup.append(items)
-            nest_id = "NEST_A" if index % 2 == 0 else "NEST_B"
-            assembly_types = {
-                TaskType.PLACE_BASE_PLATE,
-                TaskType.CONFIGURE_COMB,
-                TaskType.INSTALL_FIN,
-                TaskType.INSPECT_FINS,
-                TaskType.APPLY_PRESS,
-                TaskType.LOCK_FIXTURE,
-            }
-            process_types = {TaskType.DISPENSE_BRAZING, TaskType.INSPECT_BRAZING}
-            for task in items.values():
-                task.nest_id = nest_id
-                if task.task_type in assembly_types:
-                    self._replace_zone(task, "ZONE_TABLE2_CORE", "ZONE_TABLE2_ASSEMBLY")
-                    task.station_id = "TABLE2_ASSEMBLY"
-                    task.station_capabilities = ["ASSEMBLY"]
-                elif task.task_type in process_types:
-                    self._replace_zone(task, "ZONE_TABLE2_CORE", "ZONE_TABLE2_PROCESS")
-                    task.station_id = "TABLE2_PROCESS"
-                    task.station_capabilities = ["BRAZING", "MATERIAL_INSPECTION"]
-                if task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}:
-                    task.route_phase = "MOLD_READY"
-                elif task.task_type in process_types:
-                    task.route_phase = "BASE_READY"
-                elif task.task_type in {
-                    TaskType.CONFIGURE_COMB,
-                    TaskType.PICK_FIN,
-                    TaskType.INSTALL_FIN,
-                    TaskType.INSPECT_FINS,
-                }:
-                    task.route_phase = "MATERIAL_READY"
-                elif task.task_type in {TaskType.APPLY_PRESS, TaskType.LOCK_FIXTURE}:
-                    task.route_phase = "ASSEMBLY_READY"
-                task.motion_constraints.setdefault("minimum_clearance_m", 0.04)
-                task.motion_constraints.setdefault("sample_interval_m", 0.01)
-                task.motion_constraints.setdefault("time_sample_s", 0.02)
-                if task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PICK_FIN, TaskType.INSTALL_FIN}:
-                    task.motion_constraints["lock_joint_indices"] = [6]
-                if task.task_type is TaskType.DISPENSE_BRAZING:
-                    task.motion_constraints["tool_z_vertical_tolerance_deg"] = 0.1
-
-        # Visible old-module removal and mold installation precede each base.
-        for index, items in enumerate(lookup):
-            unit_id = f"{order_id}_UNIT_{index + 1:02d}"
-            tray_id = plan.rack_assignments[index].tray_id
-            nest_id = "NEST_A" if index % 2 == 0 else "NEST_B"
-            predecessor: tuple[str, ...] = ()
-            if index >= 2:
-                predecessor = (lookup[index - 2]["TRANSFER_OUT"].task_id,)
-            chain: list[tuple[str, TaskType, str]] = [
-                ("INDEX_TRAY", TaskType.INDEX_EMPTY_TRAY, "EMPTY_TRAY_INDEXER"),
-                ("REMOVE_PRESS", TaskType.REMOVE_OLD_PRESS, "CHANGEOVER_GANTRY"),
-                ("REMOVE_COMB", TaskType.REMOVE_OLD_COMB, "CHANGEOVER_GANTRY"),
-                ("REMOVE_MOLD", TaskType.REMOVE_OLD_MOLD, "CHANGEOVER_GANTRY"),
-                ("FETCH_MOLD", TaskType.FETCH_MOLD, "CHANGEOVER_GANTRY"),
-                ("INSTALL_MOLD", TaskType.INSTALL_MOLD, "CHANGEOVER_GANTRY"),
-                ("VERIFY_MOLD", TaskType.VERIFY_MOLD, "CHANGEOVER_GANTRY"),
-            ]
-            previous = predecessor
-            for suffix, task_type, resource in chain:
-                task = self._make(
-                    task_id=f"{order_id}_U{index + 1:02d}_{suffix}",
-                    task_type=task_type,
-                    plan=plan,
-                    unit_id=unit_id,
-                    tray_id=tray_id,
-                    predecessors=previous,
-                    resources=(resource,),
-                    zones=(
-                        "ZONE_TABLE2_ASSEMBLY",
-                        "ZONE_CHANGEOVER_GANTRY",
-                    ),
-                    station_id="TABLE2_ASSEMBLY",
-                    nest_id=nest_id,
-                    route_phase="CHANGEOVER",
-                    payload={"module_name": plan.fixture_module.name},
-                )
-                graph.add_task(task)
-                previous = (task.task_id,)
-            graph.add_dependency(previous[0], items["PICK_BASE"].task_id)
-
-            # Material-kit selection shares no swept volume with the gantry and
-            # can therefore run while the mold is being fitted.
-            kit = self._make(
-                task_id=f"{order_id}_U{index + 1:02d}_INDEX_MATERIAL",
-                task_type=TaskType.INDEX_MATERIAL_KIT,
-                plan=plan,
-                unit_id=unit_id,
-                tray_id=tray_id,
-                predecessors=predecessor,
-                resources=("MATERIAL_INDEXER",),
-                zones=("ZONE_MATERIAL_INDEXER",),
-                payload={"product_id": plan.product.product_id},
-            )
-            graph.add_task(kit)
-            graph.add_dependency(kit.task_id, items["PICK_BASE"].task_id)
-
-            if uses_high_reliability_route(index):
-                verify_mold = graph.get(f"{order_id}_U{index + 1:02d}_VERIFY_MOLD")
-                graph.remove_dependency(verify_mold.task_id, items["PICK_BASE"].task_id)
-                verify_changeover = self._make(
-                    task_id=f"{order_id}_U{index + 1:02d}_VERIFY_CHANGEOVER",
-                    task_type=TaskType.VERIFY_CHANGEOVER,
-                    plan=plan,
-                    unit_id=unit_id,
-                    tray_id=tray_id,
-                    predecessors=(verify_mold.task_id,),
-                    resources=("CHANGEOVER_GANTRY",),
-                    zones=("ZONE_TABLE2_ASSEMBLY", "ZONE_CHANGEOVER_GANTRY"),
-                    station_id="TABLE2_ASSEMBLY",
-                    nest_id=nest_id,
-                    route_phase="CHANGEOVER",
-                    payload={
-                        "module_name": plan.fixture_module.name,
-                        "second_confirmation": True,
-                    },
-                )
-                graph.add_task(verify_changeover)
-                graph.add_dependency(verify_changeover.task_id, items["PICK_BASE"].task_id)
-
-        # One physical turntable task advances both nests at every boundary.
-        swap_verifies: list[str] = []
-        for index, items in enumerate(lookup):
-            if index == 0:
-                predecessors = [items["PLACE_BASE"].task_id]
-            else:
-                predecessors = [lookup[index - 1]["INSPECT_BRAZING"].task_id, items["PLACE_BASE"].task_id]
-            rotate = self._make(
-                task_id=f"{order_id}_SWAP_{index + 1:02d}",
-                task_type=TaskType.ROTATE_TABLE2,
-                plan=plan,
-                unit_id=f"{order_id}_TURNTABLE",
-                tray_id=None,
-                predecessors=predecessors,
-                resources=("TURNTABLE",),
-                zones=("ZONE_TABLE2_ASSEMBLY", "ZONE_TABLE2_PROCESS", "ZONE_TURNTABLE_SWEEP"),
-                station_capabilities=("SYNCHRONOUS_NEST_SWAP",),
-                motion_constraints={"s_curve": True, "rotation_deg": 180.0, "settle_s": 0.3},
-                payload={
-                    "assembly_tray": items["PLACE_BASE"].tray_id,
-                    "process_tray": None if index == 0 else lookup[index - 1]["PLACE_BASE"].tray_id,
-                },
-            )
-            graph.add_task(rotate)
-            if uses_high_reliability_route(index):
-                graph.remove_dependency(items["PLACE_BASE"].task_id, rotate.task_id)
-                base_verify = self._make(
-                    task_id=f"{order_id}_U{index + 1:02d}_VERIFY_BASE_ALIGNMENT",
-                    task_type=TaskType.VERIFY_BASE_ALIGNMENT,
-                    plan=plan,
-                    unit_id=items["PLACE_BASE"].unit_id,
-                    tray_id=items["PLACE_BASE"].tray_id,
-                    predecessors=(items["PLACE_BASE"].task_id,),
-                    resources=("ARM3",),
-                    zones=("ZONE_TABLE2_ASSEMBLY",),
-                    station_id="TABLE2_ASSEMBLY",
-                    nest_id=items["PLACE_BASE"].nest_id,
-                    route_phase="BASE_READY",
-                    payload={"second_confirmation": True},
-                )
-                graph.add_task(base_verify)
-                graph.add_dependency(base_verify.task_id, rotate.task_id)
-            verify = self._make(
-                task_id=f"{order_id}_SWAP_{index + 1:02d}_VERIFY",
-                task_type=TaskType.VERIFY_TURNTABLE,
-                plan=plan,
-                unit_id=f"{order_id}_TURNTABLE",
-                tray_id=None,
-                predecessors=(rotate.task_id,),
-                resources=("TURNTABLE",),
-                zones=("ZONE_TURNTABLE_SWEEP",),
-                station_capabilities=("SYNCHRONOUS_NEST_SWAP",),
-            )
-            graph.add_task(verify)
-            swap_verifies.append(verify.task_id)
-            graph.remove_dependency(items["PLACE_BASE"].task_id, items["DISPENSE"].task_id)
-            graph.add_dependency(verify.task_id, items["DISPENSE"].task_id)
-            if index > 0:
-                previous_comb = lookup[index - 1]["CONFIGURE_COMB"]
-                graph.remove_dependency(
-                    lookup[index - 1]["INSPECT_BRAZING"].task_id,
-                    previous_comb.task_id,
-                )
-                graph.add_dependency(verify.task_id, previous_comb.task_id)
-
-        if quantity > 1:
-            graph.add_dependency(swap_verifies[0], f"{order_id}_U02_INDEX_TRAY")
-            graph.add_dependency(swap_verifies[0], f"{order_id}_U02_INDEX_MATERIAL")
-
-        # Return the final process tray after the preceding assembly tray has
-        # physically cleared the left nest.
-        last_index = quantity - 1
-        last = lookup[last_index]
-        final_predecessors = [last["INSPECT_BRAZING"].task_id]
-        if quantity > 1:
-            final_predecessors.append(lookup[last_index - 1]["TRANSFER_OUT"].task_id)
-        final_rotate = self._make(
-            task_id=f"{order_id}_SWAP_RETURN_FINAL",
-            task_type=TaskType.ROTATE_TABLE2,
-            plan=plan,
-            unit_id=f"{order_id}_TURNTABLE",
-            tray_id=None,
-            predecessors=final_predecessors,
-            resources=("TURNTABLE",),
-            zones=("ZONE_TABLE2_ASSEMBLY", "ZONE_TABLE2_PROCESS", "ZONE_TURNTABLE_SWEEP"),
-            station_capabilities=("SYNCHRONOUS_NEST_SWAP",),
-            motion_constraints={"s_curve": True, "rotation_deg": 180.0, "settle_s": 0.3},
-        )
-        graph.add_task(final_rotate)
-        final_verify = self._make(
-            task_id=f"{order_id}_SWAP_RETURN_FINAL_VERIFY",
-            task_type=TaskType.VERIFY_TURNTABLE,
-            plan=plan,
-            unit_id=f"{order_id}_TURNTABLE",
-            tray_id=None,
-            predecessors=(final_rotate.task_id,),
-            resources=("TURNTABLE",),
-            zones=("ZONE_TURNTABLE_SWEEP",),
-        )
-        graph.add_task(final_verify)
-        graph.remove_dependency(last["INSPECT_BRAZING"].task_id, last["CONFIGURE_COMB"].task_id)
-        graph.add_dependency(final_verify.task_id, last["CONFIGURE_COMB"].task_id)
-
-        # Comb and short press beams are now explicit visible gantry branches.
-        for index, items in enumerate(lookup):
-            configure = items["CONFIGURE_COMB"]
-            original_predecessors = list(configure.predecessors)
-            for predecessor_id in original_predecessors:
-                graph.remove_dependency(predecessor_id, configure.task_id)
-            previous = original_predecessors
-            for suffix, task_type in (
-                ("FETCH_COMB", TaskType.FETCH_COMB),
-                ("INSTALL_COMB", TaskType.INSTALL_COMB),
-                ("VERIFY_COMB", TaskType.VERIFY_COMB),
-            ):
-                task = self._make(
-                    task_id=f"{order_id}_U{index + 1:02d}_{suffix}",
-                    task_type=task_type,
-                    plan=plan,
-                    unit_id=configure.unit_id,
-                    tray_id=configure.tray_id,
-                    predecessors=previous,
-                    resources=("CHANGEOVER_GANTRY",),
-                    zones=("ZONE_TABLE2_ASSEMBLY", "ZONE_CHANGEOVER_GANTRY"),
-                    station_id="TABLE2_ASSEMBLY",
-                    nest_id=configure.nest_id,
-                    route_phase="MATERIAL_READY",
-                    payload={"module_name": plan.fixture_module.name},
-                )
-                graph.add_task(task)
-                previous = [task.task_id]
-            graph.add_dependency(previous[0], configure.task_id)
-
-            inspect_fins = items["INSPECT_FINS"]
-            press = items["APPLY_PRESS"]
-            graph.remove_dependency(inspect_fins.task_id, press.task_id)
-            fetch_press = self._make(
-                task_id=f"{order_id}_U{index + 1:02d}_FETCH_PRESS",
-                task_type=TaskType.FETCH_PRESS_MODULE,
-                plan=plan,
-                unit_id=press.unit_id,
-                tray_id=press.tray_id,
-                predecessors=(inspect_fins.task_id,),
-                resources=("CHANGEOVER_GANTRY",),
-                zones=("ZONE_CHANGEOVER_GANTRY",),
-                station_id="TABLE2_ASSEMBLY",
-                nest_id=press.nest_id,
-                route_phase="ASSEMBLY_READY",
-            )
-            graph.add_task(fetch_press)
-            install_press = self._make(
-                task_id=f"{order_id}_U{index + 1:02d}_INSTALL_PRESS",
-                task_type=TaskType.INSTALL_PRESS_MODULE,
-                plan=plan,
-                unit_id=press.unit_id,
-                tray_id=press.tray_id,
-                predecessors=(fetch_press.task_id,),
-                resources=("CHANGEOVER_GANTRY",),
-                zones=("ZONE_TABLE2_ASSEMBLY", "ZONE_CHANGEOVER_GANTRY"),
-                station_id="TABLE2_ASSEMBLY",
-                nest_id=press.nest_id,
-                route_phase="ASSEMBLY_READY",
-            )
-            graph.add_task(install_press)
-            graph.add_dependency(install_press.task_id, press.task_id)
-
     def build(self, plan: ProcessPlan) -> TaskGraph:
         self._sequence = 0
+        self._binding_snapshots = []
+        self._changeover_plans = []
+        # Step A: resolve the data-driven routing before any node is created, so
+        # durations and capability bindings come from the plan's real parameters.
+        self._compile_plan(plan)
         graph = TaskGraph()
         lock_tasks = [self._build_unit(graph, plan, assignment) for assignment in plan.rack_assignments]
         if self.flexible_cell:
@@ -901,6 +926,7 @@ class ProcessPlanTaskGraphBuilder:
                 task_id=f"{prefix}_BATCH_READY",
                 task_type=TaskType.BATCH_READY,
                 plan=plan,
+                unit_index=assignment.unit_index,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
                 predecessors=(lock_task_id,),
@@ -913,6 +939,7 @@ class ProcessPlanTaskGraphBuilder:
                 task_id=f"{prefix}_RUN_FURNACE",
                 task_type=TaskType.RUN_FURNACE,
                 plan=plan,
+                unit_index=assignment.unit_index,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
                 predecessors=(batch_ready.task_id,),
@@ -937,6 +964,7 @@ class ProcessPlanTaskGraphBuilder:
                 task_id=_task_id(plan.order.order_id, assignment.unit_index, "UNLOAD_RACK"),
                 task_type=TaskType.UNLOAD_RACK_LAYER,
                 plan=plan,
+                unit_index=assignment.unit_index,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
                 predecessors=(furnace.task_id,),
@@ -950,6 +978,7 @@ class ProcessPlanTaskGraphBuilder:
                 task_id=_task_id(plan.order.order_id, assignment.unit_index, "POST_INSPECT"),
                 task_type=TaskType.POST_BRAZE_INSPECTION,
                 plan=plan,
+                unit_index=assignment.unit_index,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
                 predecessors=(unload.task_id,),
@@ -970,6 +999,7 @@ class ProcessPlanTaskGraphBuilder:
                     ),
                     task_type=TaskType.SECOND_POST_BRAZE_VIEW,
                     plan=plan,
+                    unit_index=assignment.unit_index,
                     unit_id=unit_id,
                     tray_id=assignment.tray_id,
                     predecessors=(inspect.task_id,),
@@ -987,6 +1017,7 @@ class ProcessPlanTaskGraphBuilder:
                 ),
                 task_type=TaskType.REMOVE_OLD_COMB,
                 plan=plan,
+                unit_index=assignment.unit_index,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
                 predecessors=(route_predecessor,),
@@ -1003,6 +1034,7 @@ class ProcessPlanTaskGraphBuilder:
                 ),
                 task_type=TaskType.REMOVE_OLD_PRESS,
                 plan=plan,
+                unit_index=assignment.unit_index,
                 unit_id=unit_id,
                 tray_id=assignment.tray_id,
                 predecessors=(remove_comb.task_id,),
@@ -1021,6 +1053,7 @@ class ProcessPlanTaskGraphBuilder:
                     task_id=_task_id(plan.order.order_id, assignment.unit_index, f"ROUTE_{disposition}"),
                     task_type=task_type,
                     plan=plan,
+                    unit_index=assignment.unit_index,
                     unit_id=unit_id,
                     tray_id=assignment.tray_id,
                     predecessors=(route_predecessor,),
@@ -1053,8 +1086,37 @@ def build_task_graph(
     durations: dict[str | TaskType, float] | None = None,
     *,
     flexible_cell: bool = False,
+    capabilities: bool = True,
+    resources: Iterable[Any] = (),
+    profile: LineExecutionProfile | None = None,
 ) -> TaskGraph:
-    return ProcessPlanTaskGraphBuilder(durations, flexible_cell=flexible_cell).build(plan)
+    """Build a plan's DAG.
+
+    ``capabilities`` (default) sources durations from the capability ontology.
+    Passing ``resources`` additionally enables step-B delayed binding, where
+    ``eligible_resources`` is derived from capability declarations filtered by
+    ``profile``.  Set ``capabilities=False`` for the fully offline legacy path.
+    """
+
+    catalog = default_capability_catalog() if capabilities else None
+    routing = default_routing() if capabilities else None
+    return ProcessPlanTaskGraphBuilder(
+        durations,
+        flexible_cell=flexible_cell,
+        catalog=catalog,
+        routing=routing,
+        resources=resources,
+        profile=profile or UNRESTRICTED_PROFILE,
+    ).build(plan)
 
 
-__all__ = ["DEFAULT_DURATIONS", "ProcessPlanTaskGraphBuilder", "build_task_graph"]
+__all__ = [
+    "DEFAULT_CAPABILITIES_PATH",
+    "DEFAULT_DURATIONS",
+    "DEFAULT_ROUTING_PATH",
+    "LEGACY_DURATIONS",
+    "ProcessPlanTaskGraphBuilder",
+    "build_task_graph",
+    "default_capability_catalog",
+    "default_routing",
+]

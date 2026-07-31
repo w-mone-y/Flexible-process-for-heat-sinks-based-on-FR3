@@ -14,6 +14,7 @@ from .planning.task_models import task_detail_label_zh, task_status_label_zh, ta
 TASK_GRAPH_NODE_SIZE = (190.0, 72.0)
 PLANNING_TAB_TITLES = (
     "运行总览",
+    "柔性总览",
     "订单规划",
     "任务图 / 调度",
     "异步流水工位",
@@ -77,17 +78,25 @@ _V2_UI_PROFILE = LineUiProfile(
         UiSegmentAction("三层炉批", "v2_furnace_batch"),
         UiSegmentAction("炉后检测与交付", "v2_post_braze_delivery"),
     ),
+    # Keys must match the ``station_id`` values V2 actually puts on its tasks,
+    # otherwise the station filter silently matches nothing.  The three numbered
+    # buffers were exactly that case: tasks carry the unnumbered
+    # ``FURNACE_BUFFER``, so selecting "炉前缓存 1" filtered out every task.
     station_titles={
         "S1_BASE_LOADING": "S1 基板上料",
         "S2A_DISPENSING": "S2A 钎料涂覆",
         "S2B_MATERIAL_INSPECTION": "S2B 焊料检测与分流",
+        "INSTALL_BRANCH_PENDING": "安装支路待分配",
         "S3A_ARM1_INSTALL": "S3A Arm1 翅片安装",
         "S3B_ARM3_INSTALL": "S3B Arm3 翅片安装",
         "Y_MERGE_SHARED": "Y 形合流单占用区",
         "S4_PRE_BRAZE_INSPECTION": "S4 共享焊前检测",
-        "FURNACE_BUFFER_1": "炉前缓存 1",
-        "FURNACE_BUFFER_2": "炉前缓存 2",
-        "FURNACE_BUFFER_3": "炉前缓存 3",
+        "FURNACE_BUFFER": "炉前缓存位",
+        "FURNACE_FRONT": "炉前门装载",
+        "FURNACE": "三层贯通炉",
+        "FURNACE_REAR": "炉后门卸载",
+        "POST_BRAZE_SCAN": "焊后固定视觉检测",
+        "FINISHED_OUTPUT": "成品出口",
     },
 )
 
@@ -318,6 +327,13 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.setPen(QPen(QColor("#8b949e"), 1))
             self.setBrush(QBrush(QColor(fill)))
 
+        def set_content(self, title: str, detail: str, status: str, fill: str) -> None:
+            self.title = str(title)
+            self.detail = str(detail)
+            self.status = str(status)
+            self.setBrush(QBrush(QColor(fill)))
+            self.update()
+
         def paint(self, painter: Any, option: Any, widget: Any = None) -> None:  # type: ignore[override]
             super().paint(painter, option, widget)
             _paint_task_graph_node_text(
@@ -347,25 +363,42 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.setScene(self.canvas)
             self.setRenderHint(QPainter.Antialiasing)
             self.setMinimumHeight(430)
-            self.signature: tuple[Any, ...] = ()
+            self.signature: tuple[Any, ...] | None = None
+            self.nodes: dict[str, TaskNodeItem] = {}
 
         def set_tasks(self, tasks: list[dict[str, Any]]) -> None:
+            # Rebuild only when graph topology changes.  Status/progress changes
+            # update the existing items in-place, eliminating the visible flash
+            # caused by clearing the whole scene four times per second.
             signature = tuple(
                 (
                     task.get("task_id"),
                     task.get("task_type"),
-                    task.get("status"),
-                    task.get("assigned_resource"),
-                    task.get("display_name_zh"),
-                    task.get("display_detail_zh"),
-                    task.get("status_zh"),
+                    tuple(task.get("predecessors", ())),
                 )
                 for task in tasks
             )
             if signature == self.signature:
+                for task in tasks:
+                    task_id = str(task.get("task_id"))
+                    node = self.nodes.get(task_id)
+                    if node is None:
+                        continue
+                    status = str(task.get("status", "PENDING"))
+                    progress = float(task.get("progress", 0.0))
+                    status_zh = str(task.get("status_zh") or task_status_label_zh(status))
+                    if status == "RUNNING":
+                        status_zh = f"{status_zh} · {progress * 100.0:.0f}%"
+                    node.set_content(
+                        str(task.get("display_name_zh") or task_type_label_zh(task.get("task_type", ""))),
+                        str(task.get("display_detail_zh") or task_detail_label_zh(task)),
+                        status_zh,
+                        self.COLORS.get(status, "#54606f"),
+                    )
                 return
             self.signature = signature
             self.canvas.clear()
+            self.nodes.clear()
             if not tasks:
                 self.canvas.addText("当前没有任务图。请先在“订单规划”中预览或加入订单。")
                 return
@@ -392,6 +425,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 title_zh = str(task.get("display_name_zh") or task_type_label_zh(task.get("task_type", "")))
                 detail_zh = str(task.get("display_detail_zh") or task_detail_label_zh(task))
                 status_zh = str(task.get("status_zh") or task_status_label_zh(status))
+                if status == "RUNNING":
+                    status_zh = f"{status_zh} · {float(task.get('progress', 0.0)) * 100.0:.0f}%"
                 rect = TaskNodeItem(
                     title_zh,
                     detail_zh,
@@ -399,6 +434,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                     self.COLORS.get(status, "#54606f"),
                 )
                 self.canvas.addItem(rect)
+                self.nodes[task_id] = rect
                 _place_task_graph_node(rect, x, y)
                 rect.setZValue(1.0)
                 rect.setToolTip(
@@ -608,7 +644,168 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.timer.timeout.connect(self.refresh)
             self.timer.start(250)
 
+        def _build_flexibility_tab(self) -> None:
+            """Six-dimension flexibility evidence, refreshed on demand.
+
+            The report recompiles a routing and reloads configuration, so it is
+            fetched on an explicit button press rather than on the 250 ms poll.
+            """
+
+            page = QWidget()
+            root = QVBoxLayout(page)
+            header = QHBoxLayout()
+            self.flexibility_summary = QLabel("点击右侧按钮生成柔性评估")
+            self.flexibility_summary.setWordWrap(True)
+            self.flexibility_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            header.addWidget(self.flexibility_summary, 1)
+            refresh = QPushButton("刷新柔性评估")
+            refresh.clicked.connect(self.refresh_flexibility)
+            header.addWidget(refresh)
+            root.addLayout(header)
+
+            demo_group = QGroupBox("可执行柔性演示（直接驱动 V2 运行时与 MuJoCo）")
+            demo_layout = QGridLayout(demo_group)
+            demos = (
+                ("A/B/C 混流", "product_mix", "产品柔性：三个不同规格订单进入同一实体流程"),
+                ("双安装支路并行", "resource_parallel", "资源柔性：Arm1/Arm3 在线选择安装支路"),
+                ("三件炉批", "batch_three", "批量柔性：三托盘逐件入炉后合批"),
+                ("紧急插单", "urgent_insert", "订单柔性：当前动作不抢占，下一次派工优先紧急单"),
+                ("漏涂闭环", "fault_loop", "扰动柔性：先形成缺口，再由相机检测、返工、复检"),
+            )
+            self.flexibility_demo_buttons = {}
+            for index, (title, demo, tip) in enumerate(demos):
+                button = QPushButton(title)
+                button.setToolTip(tip)
+                button.clicked.connect(
+                    lambda _=False, value=demo: self.post(
+                        "/flexibility/demo",
+                        {"demo": value},
+                    )
+                )
+                button.setEnabled(selected_profile.profile_id == "V2_DUAL_INSTALL")
+                self.flexibility_demo_buttons[demo] = button
+                demo_layout.addWidget(button, index // 3, index % 3)
+            for index, (title, tip) in enumerate(
+                (
+                    ("AND/OR 工艺路线", "V2 物理运行时尚未消费 OR 分支；当前只允许在订单预览中查看"),
+                    ("实体自动换型", "V2 换型龙门尚未接入实体执行，禁止用瞬时显隐冒充换型"),
+                    ("CP-SAT / 拍卖调度", "当前 V2 使用在线最早完成分派；优化器接口完成后再开放"),
+                )
+            ):
+                button = QPushButton(title)
+                button.setEnabled(False)
+                button.setToolTip(tip)
+                demo_layout.addWidget(button, 2, index)
+            root.addWidget(demo_group)
+
+            self.flexibility_table = QTableWidget(0, 4)
+            self.flexibility_table.setHorizontalHeaderLabels(["柔性维度", "状态", "关键指标", "依据"])
+            self.flexibility_table.horizontalHeader().setStretchLastSection(True)
+            root.addWidget(self.flexibility_table, 1)
+
+            self.flexibility_detail = QTableWidget(0, 5)
+            self.flexibility_detail.setHorizontalHeaderLabels(["维度", "对象", "候选/分支", "数值", "说明"])
+            self.flexibility_detail.horizontalHeader().setStretchLastSection(True)
+            root.addWidget(self.flexibility_detail, 1)
+            self.tabs.addTab(page, "柔性总览")
+
+        def refresh_flexibility(self) -> None:
+            try:
+                report = get_json(base_url + "/flexibility", timeout=5.0)
+            except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+                self.flexibility_summary.setText(f"柔性评估获取失败：{exc}")
+                return
+            summary = report.get("summary", {})
+            self.flexibility_summary.setText(
+                f"产线剖面 {report.get('line_profile', '-')} ｜ "
+                f"共 {summary.get('total', 0)} 个柔性维度："
+                f"已实现 {summary.get('full', 0)} ｜ "
+                f"部分实现 {summary.get('partial', 0)} ｜ "
+                f"未实现 {summary.get('none', 0)}"
+            )
+            dimensions = [item for item in report.get("dimensions", []) if isinstance(item, dict)]
+            self._fill_table(
+                self.flexibility_table,
+                [
+                    [
+                        item.get("label_zh", "-"),
+                        item.get("state_zh", "-"),
+                        item.get("headline_zh", "-"),
+                        item.get("evidence_zh", "-"),
+                    ]
+                    for item in dimensions
+                ],
+            )
+            self._fill_table(self.flexibility_detail, self._flexibility_detail_rows(dimensions))
+
+        @staticmethod
+        def _flexibility_detail_rows(dimensions: list[dict[str, Any]]) -> list[list[Any]]:
+            rows: list[list[Any]] = []
+            for item in dimensions:
+                label = item.get("label_zh", "-")
+                metrics = item.get("metrics", {}) or {}
+                for product in metrics.get("products", []):
+                    rows.append(
+                        [
+                            label,
+                            f"{product.get('preset')} 型",
+                            f"{product.get('comb_module')}",
+                            f"{product.get('fin_count')} 片 / {product.get('path_count')} 条",
+                            f"节距 {product.get('fin_pitch_mm')} mm，"
+                            f"压紧 {product.get('clamping_force_n')} N",
+                        ]
+                    )
+                for route in metrics.get("routes", []):
+                    for branch in route.get("branches", []):
+                        rows.append(
+                            [
+                                label,
+                                route.get("operation_id", "-"),
+                                branch.get("mode", "-"),
+                                f"{float(branch.get('duration_s', 0.0)):.1f}s",
+                                (
+                                    "可用：" + ", ".join(branch.get("resources", []))
+                                    if branch.get("available")
+                                    else "不可用：" + ("；".join(branch.get("reasons", [])) or "无可用资源")
+                                ),
+                            ]
+                        )
+                for binding in metrics.get("bindings", []):
+                    if len(binding.get("candidates", [])) <= 1 and not binding.get("rejected"):
+                        continue
+                    rows.append(
+                        [
+                            label,
+                            binding.get("operation_id", "-"),
+                            ", ".join(
+                                f"{candidate.get('resource_id')}"
+                                f"({float(candidate.get('duration', 0.0)):.1f}s)"
+                                for candidate in binding.get("candidates", [])
+                            )
+                            or "无候选",
+                            f"{len(binding.get('candidates', []))} 个候选",
+                            "；".join(str(entry.get("reason", "")) for entry in binding.get("rejected", []))
+                            or "-",
+                        ]
+                    )
+                for tier in metrics.get("tiers", []):
+                    rows.append(
+                        [
+                            label,
+                            tier.get("label_zh", "-"),
+                            f"{tier.get('changeover_count', 0)} 次换型",
+                            f"{float(tier.get('changeover_seconds', 0.0)):.1f}s",
+                            (
+                                "基线为占位值，需以现场实测替换"
+                                if tier.get("name") == "MANUAL_TEACHING"
+                                else "-"
+                            ),
+                        ]
+                    )
+            return rows
+
         def _build_planning_tabs(self) -> None:
+            self._build_flexibility_tab()
             order_page = QWidget()
             order_root = QVBoxLayout(order_page)
             form_group = QGroupBox("运行时订单规划（不会改写YAML）")
@@ -636,6 +833,13 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.route_strategy_input.addItem("标准路线", "STANDARD")
             self.route_strategy_input.addItem("高可靠路线", "HIGH_RELIABILITY")
             self.route_strategy_input.addItem("首件高可靠", "FIRST_ARTICLE")
+            if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                self.layer_input.setEnabled(False)
+                self.layer_input.setToolTip("V2 由炉前实时空层状态分配，不接受静态层位占用")
+                for index in (1, 2):
+                    item = self.route_strategy_input.model().item(index)
+                    item.setEnabled(False)
+                    item.setToolTip("该 AND/OR 路线尚未接入 V2 物理运行时，只可在柔性报告中评估")
             form.addRow("订单ID", self.order_id_input)
             form.addRow("规划模式", self.order_mode_input)
             form.addRow("产品", self.preset_input)
@@ -729,6 +933,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.tabs.addTab(order_page, "订单规划")
 
             task_page = QWidget()
+            self.task_page = task_page
             task_root = QVBoxLayout(task_page)
             self.scheduler_summary = QLabel("scheduler: FIXED_SEQUENCE")
             self.scheduler_summary.setWordWrap(True)
@@ -935,14 +1140,19 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             injection_root.addWidget(self.fault_injection_result)
             recovery_root.addWidget(injection_group)
             if selected_profile.profile_id == "V2_DUAL_INSTALL":
-                injection_group.setEnabled(False)
-                injection_group.setToolTip("V2 故障物理 actor 接通后开放手动注入")
+                injection_group.setToolTip("V2 完整闭环：工序形成物理缺陷 → 相机检测 → 托盘返回返工 → 再检测")
 
             self.manual_fault_table = QTableWidget(0, 6)
             self.manual_fault_table.setHorizontalHeaderLabels(
                 ["注入请求", "故障", "目标", "状态", "触发时间", "自动恢复"]
             )
             recovery_root.addWidget(self.manual_fault_table)
+            self.physical_fault_table = QTableWidget(0, 8)
+            self.physical_fault_table.setHorizontalHeaderLabels(
+                ["物理缺陷", "类型", "目标", "形成工序", "检测工序", "阶段", "形成时间", "检测/修复"]
+            )
+            self.physical_fault_table.horizontalHeader().setStretchLastSection(True)
+            recovery_root.addWidget(self.physical_fault_table)
             self.fault_table = QTableWidget(0, 6)
             self.fault_table.setHorizontalHeaderLabels(
                 ["故障ID", "类型", "来源", "目标/任务", "可恢复", "状态"]
@@ -961,13 +1171,14 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             ):
                 button = QPushButton(title)
                 button.clicked.connect(lambda _=False, value=action: self.recovery_action(value))
-                if selected_profile.profile_id == "V2_DUAL_INSTALL":
-                    button.setEnabled(False)
                 recovery_actions.addWidget(button)
             replan = QPushButton("手动重规划")
             replan.clicked.connect(lambda: self.post("/scheduler/replan", {"reason": "qt_operator"}))
+            # V2 has no replanner: its dispatcher re-evaluates every tick, so a
+            # manual replan request has nothing to trigger.
             if selected_profile.profile_id == "V2_DUAL_INSTALL":
                 replan.setEnabled(False)
+                replan.setToolTip("V2 调度器每 tick 自动重算，无需手动重规划")
             recovery_actions.addWidget(replan)
             recovery_root.addLayout(recovery_actions)
             self.tabs.addTab(recovery_page, "故障与恢复规划")
@@ -998,7 +1209,13 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.metrics_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
             metrics_root.addWidget(self.metrics_text)
             self.metrics_table = QTableWidget(0, 4)
-            self.metrics_table.setHorizontalHeaderLabels(["指标", "Fixed", "Dynamic", "变化"])
+            self.metrics_table.setHorizontalHeaderLabels(
+                (
+                    ["指标", "基线", "当前 V2", "数据来源"]
+                    if selected_profile.profile_id == "V2_DUAL_INSTALL"
+                    else ["指标", "Fixed", "Dynamic", "变化"]
+                )
+            )
             metrics_root.addWidget(self.metrics_table, 1)
             self.tabs.addTab(metrics_page, "指标与实验")
 
@@ -1133,10 +1350,10 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.fault_auto_recover.setChecked(not safety_fault)
             self.fault_hint.setText(
                 f"触发说明：{definition.hint_zh}\n"
-                "提示：点击注入后无需卡准时机，系统会在匹配的任务运行时自动触发。"
+                "提示：点击后先进入等待；生产工序会形成可见缺陷，相机完成检测后才启动返工与复检。"
             )
             self.fault_duration_input.setEnabled(definition.supports_duration)
-            self.fault_auto_recover.setEnabled(definition.runtime_fault is not None)
+            self.fault_auto_recover.setEnabled(definition.runtime_fault is not None and not safety_fault)
             self.recover_selected_arm.setEnabled(definition.target_kind == "arm")
             self._fault_target_signature = ()
             self._refresh_fault_targets(self.latest_state)
@@ -1311,6 +1528,12 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                     )
                     button.setEnabled(enabled)
                     button.setToolTip("" if enabled else "对应物理工序尚未接通，禁止形式化演示")
+                flexibility_actions = (
+                    capabilities.get("flexibility_actions", {}) if isinstance(capabilities, dict) else {}
+                )
+                for action, button in self.flexibility_demo_buttons.items():
+                    enabled = bool(flexibility_actions.get(action, False))
+                    button.setEnabled(enabled)
                 self._refresh_fault_targets(state)
                 self.order.setText(f"order: {state.get('order_id') or '-'}")
                 paused = " (PAUSED)" if state.get("paused", False) else ""
@@ -1456,7 +1679,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                     f"最大并行 {scheduler.get('max_assignments_per_tick', '-') }"
                 )
                 tasks = state.get("tasks", [])
-                if isinstance(tasks, list) and self.tabs.currentIndex() == 2:
+                if isinstance(tasks, list) and self.tabs.currentWidget() is self.task_page:
                     self._refresh_task_graph()
                 selected_ids = {
                     str(item.get("task_id"))
@@ -1638,7 +1861,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 self._fill_table(self.resource_table, resource_rows)
                 zone_locks = state.get("zone_locks", {})
                 locked = [
-                    f"{zone}:{lease.get('task_id')}"
+                    f"{zone}:{lease.get('task_id') or lease.get('holder') or '-'}"
                     for zone, lease in zone_locks.items()
                     if isinstance(lease, dict)
                 ]
@@ -1678,7 +1901,10 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 manual_rows = []
                 request_status_labels = {
                     "ARMED": "等待匹配工序",
-                    "FIRED": "已触发",
+                    "MANIFESTED": "缺陷已形成（待相机检测）",
+                    "DETECTED": "相机已检出（待返工）",
+                    "RECOVERING": "返工/复检中",
+                    "FIRED": "设备故障已触发",
                     "ACTIVE": "物理流程已暂停",
                     "RECOVERED": "物理流程已恢复",
                     "MISSED": "本订单未触发",
@@ -1697,6 +1923,37 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                         ]
                     )
                 self._fill_table(self.manual_fault_table, manual_rows)
+                physical_status_labels = {
+                    "MANIFESTED": "物理缺陷可见",
+                    "DETECTED": "相机已检出",
+                    "REPAIRED": "已修复，等待复检",
+                    "RECOVERED": "复检通过",
+                }
+                physical_rows = []
+                for item in state.get("physical_faults", []):
+                    if not isinstance(item, dict):
+                        continue
+                    visual_type = str(item.get("visual_type") or item.get("fault_type") or "")
+                    definition = MANUAL_FAULT_CATALOG.get(visual_type)
+                    detected_at = item.get("detected_at")
+                    repaired_at = item.get("repaired_at")
+                    physical_rows.append(
+                        [
+                            item.get("defect_id", "-"),
+                            definition.label_zh if definition is not None else visual_type,
+                            item.get("target") or "整机",
+                            item.get("source_operation") or "-",
+                            item.get("detection_operation") or "-",
+                            physical_status_labels.get(str(item.get("status", "")), item.get("status", "-")),
+                            f"{float(item.get('manifested_at', 0.0)):.2f}s",
+                            (
+                                f"检出 {float(detected_at):.2f}s"
+                                if detected_at is not None and repaired_at is None
+                                else f"修复 {float(repaired_at):.2f}s" if repaired_at is not None else "-"
+                            ),
+                        ]
+                    )
+                self._fill_table(self.physical_fault_table, physical_rows)
                 recovery_rows = []
                 strategy_labels = {
                     "LOCAL_BRAZING_REWORK": "局部补涂并复检",
@@ -1740,6 +1997,42 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                         f"平均利用率 {100*float(experiment.get('average_robot_utilization', 0.0)):.1f}% | "
                         f"恢复率 {100*float(experiment.get('recovery_rate', 0.0)):.1f}%"
                     )
+                    if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                        self._fill_table(
+                            self.metrics_table,
+                            [
+                                [
+                                    "完工时间 / 当前时长",
+                                    "-",
+                                    f"{float(experiment.get('makespan', 0.0)):.2f}s",
+                                    "仿真事件时间戳",
+                                ],
+                                [
+                                    "吞吐率",
+                                    "-",
+                                    f"{float(experiment.get('throughput_per_sim_second', 0.0)):.4f}/s",
+                                    "UNIT_COMPLETED 事件",
+                                ],
+                                [
+                                    "机械臂平均利用率",
+                                    "-",
+                                    f"{100 * float(experiment.get('average_robot_utilization', 0.0)):.1f}%",
+                                    "OPERATION_STARTED/COMPLETED",
+                                ],
+                                [
+                                    "故障恢复率",
+                                    "-",
+                                    f"{100 * float(experiment.get('recovery_rate', 0.0)):.1f}%",
+                                    "FAULT_DETECTED/恢复完成",
+                                ],
+                                [
+                                    "已完成工件",
+                                    "-",
+                                    str(experiment.get("completed_units", 0)),
+                                    "UNIT_COMPLETED 事件",
+                                ],
+                            ],
+                        )
             except Exception as exc:
                 self.result.setText(f"controller unavailable: {exc}")
 

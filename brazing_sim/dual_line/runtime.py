@@ -12,6 +12,8 @@ from enum import Enum
 from math import isfinite
 from typing import Any, Protocol
 
+from ..recovery.fault_models import RecoveryStatus
+from .faults import V2FaultController
 from .dispatch import (
     DualInstallDispatcher,
     InstallBranch,
@@ -66,6 +68,7 @@ class V2UnitState:
     completed_at: float | None = None
     buffer_owner: TrayOwner | None = None
     furnace_layer: int | None = None
+    rework_fin_index: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -82,6 +85,7 @@ class V2UnitState:
             "fins_installed": self.fins_installed,
             "furnace_layer": self.furnace_layer,
             "completed_at": self.completed_at,
+            "rework_fin_index": self.rework_fin_index,
         }
 
 
@@ -115,6 +119,22 @@ class _Operation:
     kind: str
     remaining_s: float
     started_at: float
+    duration_s: float
+    recovery: bool = False
+    recovery_strategy: str = ""
+    recovery_fault_type: str = ""
+    recovery_target_index: int | None = None
+    fault_hold_remaining_s: float = 0.0
+    hold_fault_ids: tuple[str, ...] = ()
+    manual_hold_fault_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryWork:
+    effort_factor: float
+    strategy: str
+    fault_type: str
+    target_index: int | None
 
 
 class RuntimeExecutionGate(Protocol):
@@ -174,6 +194,9 @@ class _Durations:
         )
 
 
+# Stage progression index, used to tell forward motion from a recovery rewind.
+_STAGE_ORDER: dict[UnitStage, int] = {stage: index for index, stage in enumerate(UnitStage)}
+
 _FIN_COUNTS = {"A": 5, "B": 4, "C": 7}
 _STANDARD_RECIPE = BatchRecipe("CAB_STANDARD", "aluminium", 600.0, 240.0, 0.10)
 
@@ -220,6 +243,12 @@ class DualLineRuntime:
         self.scheduled_parallel_install_seconds = 0.0
         self.upstream_work_during_brazing_s = 0.0
         self.maximum_wip = 0
+        # Disturbance flexibility: fault injection, recovery planning and
+        # resource isolation.  Holds no MuJoCo reference, so the logical runtime
+        # stays testable headless.
+        self.faults = V2FaultController()
+        # unit_id -> duration multiplier for its next operation (rework surcharge)
+        self._rework_effort: dict[str, _RecoveryWork] = {}
         self._execution_gate: RuntimeExecutionGate | None = None
 
     def set_execution_gate(self, gate: RuntimeExecutionGate | None) -> None:
@@ -305,22 +334,77 @@ class DualLineRuntime:
             tray_id=unit.tray_id,
             stage=stage.value,
         )
+        # Recovery is completed explicitly by the follow-up camera operation;
+        # mere forward motion after a repair is not proof of quality.
 
-    def _start(self, resource: str, unit: V2UnitState, kind: str, duration: float) -> None:
+    def _resource_online(self, resource: str) -> bool:
+        """False while a resource is isolated by an ARM_UNAVAILABLE fault."""
+
+        return self.faults.resource_available(resource)
+
+    def _start(self, resource: str, unit: V2UnitState, kind: str, duration: float) -> bool:
+        """Begin an operation, or decline when the resource is unavailable.
+
+        Returns False when a fault has isolated the resource.  Declining rather
+        than raising keeps the guard fail-safe: several dispatch branches call
+        ``_start`` without first consulting ``_operation_start_allowed``, and an
+        isolated mechanism must stall the line, not crash the tick.
+        """
+
         if resource in self.operations:
             raise RuntimeError(f"resource already busy: {resource}")
+        if not self._resource_online(resource):
+            return False
+        # A unit carrying pending rework performs the next operation at rework
+        # effort, then the surcharge is consumed.
+        recovery_work = self._rework_effort.pop(unit.unit_id, None)
+        recovery = recovery_work is not None
+        if recovery_work is not None:
+            duration = float(duration) * float(recovery_work.effort_factor)
+            self._event(
+                "REWORK_EFFORT_APPLIED",
+                resource=resource,
+                unit_id=unit.unit_id,
+                kind=kind,
+                factor=recovery_work.effort_factor,
+                strategy=recovery_work.strategy,
+                target_index=recovery_work.target_index,
+            )
+        hold = self.faults.take_hold(unit.unit_id)
+        if hold > 0.0:
+            duration = float(duration) + hold
+            self._event(
+                "FAULT_HOLD_APPLIED",
+                resource=resource,
+                unit_id=unit.unit_id,
+                kind=kind,
+                seconds=hold,
+                applied_to="NEXT_OPERATION",
+            )
         self.operations[resource] = _Operation(
             resource=resource,
             unit_id=unit.unit_id,
             kind=kind,
             remaining_s=float(duration),
             started_at=self.sim_time,
+            duration_s=float(duration),
+            recovery=recovery,
+            recovery_strategy="" if recovery_work is None else recovery_work.strategy,
+            recovery_fault_type="" if recovery_work is None else recovery_work.fault_type,
+            recovery_target_index=(None if recovery_work is None else recovery_work.target_index),
         )
         self._event("OPERATION_STARTED", resource=resource, unit_id=unit.unit_id, kind=kind)
+        return True
 
     def _resource_available_at(self, resource: str) -> float:
         operation = self.operations.get(resource)
-        return self.sim_time if operation is None else self.sim_time + operation.remaining_s
+        if operation is not None and operation.manual_hold_fault_ids:
+            return float("inf")
+        return (
+            self.sim_time
+            if operation is None
+            else self.sim_time + operation.remaining_s + operation.fault_hold_remaining_s
+        )
 
     def _waiting_units(self, *stages: UnitStage) -> list[V2UnitState]:
         allowed = set(stages)
@@ -368,6 +452,11 @@ class DualLineRuntime:
         unit: V2UnitState,
         kind: str,
     ) -> bool:
+        # A resource isolated by a fault cannot start anything.  Checking it here
+        # covers every physical start through one choke point, rather than
+        # relying on each dispatch branch to remember the guard.
+        if not self._resource_online(resource):
+            return False
         if self._execution_gate is None:
             return True
         callback = getattr(self._execution_gate, "operation_start_allowed", None)
@@ -517,6 +606,14 @@ class DualLineRuntime:
 
     def _complete_operation(self, operation: _Operation) -> None:
         unit = self.units[operation.unit_id]
+        if operation.recovery:
+            self.faults.mark_repaired(unit.unit_id, self.sim_time)
+            self._event(
+                "FAULT_REPAIRED",
+                unit_id=unit.unit_id,
+                kind=operation.kind,
+                resource=operation.resource,
+            )
         self._event(
             "OPERATION_COMPLETED",
             resource=operation.resource,
@@ -528,14 +625,19 @@ class DualLineRuntime:
         elif operation.kind == "DISPENSING":
             self._set_stage(unit, UnitStage.WAITING_S2B)
         elif operation.kind == "MATERIAL_INSPECTION":
+            self.faults.complete_recovery(unit.unit_id, self.sim_time)
             self._set_stage(unit, UnitStage.WAITING_INSTALL)
             self._assign_branch(unit)
         elif operation.kind == "INSTALL_FIN":
-            unit.fins_installed += 1
+            installed_index = unit.rework_fin_index or (unit.fins_installed + 1)
+            if unit.rework_fin_index is None:
+                unit.fins_installed += 1
+            else:
+                unit.rework_fin_index = None
             self._event(
                 "FIN_INSTALLED",
                 unit_id=unit.unit_id,
-                fin_index=unit.fins_installed,
+                fin_index=installed_index,
                 fin_count=unit.fin_count,
                 branch=None if unit.branch is None else unit.branch.value,
             )
@@ -546,6 +648,7 @@ class DualLineRuntime:
         elif operation.kind == "MERGING":
             self._set_stage(unit, UnitStage.WAITING_S4)
         elif operation.kind == "PRE_BRAZE_INSPECTION":
+            self.faults.complete_recovery(unit.unit_id, self.sim_time)
             self._set_stage(unit, UnitStage.WAITING_BUFFER)
         elif operation.kind == "POST_BRAZE_INSPECTION":
             self._set_stage(unit, UnitStage.WAITING_OUTPUT)
@@ -637,11 +740,79 @@ class DualLineRuntime:
             self.upstream_work_during_brazing_s += dt
         completed: list[_Operation] = []
         for operation in self.operations.values():
-            operation.remaining_s = max(0.0, operation.remaining_s - dt)
+            if operation.manual_hold_fault_ids:
+                operation.manual_hold_fault_ids = tuple(
+                    fault_id
+                    for fault_id in operation.manual_hold_fault_ids
+                    if not self.faults.faults[fault_id].recovered
+                )
+                if operation.manual_hold_fault_ids:
+                    continue
+            # An isolated arm is physically stopped, so its logical operation
+            # clock must stop as well.  Otherwise the task graph can finish an
+            # action while the MuJoCo arm is visibly frozen mid-path.
+            if not self._resource_online(operation.resource):
+                continue
+            advance = dt
+            if operation.fault_hold_remaining_s > 0.0:
+                held = min(advance, operation.fault_hold_remaining_s)
+                operation.fault_hold_remaining_s = max(
+                    0.0,
+                    operation.fault_hold_remaining_s - held,
+                )
+                advance -= held
+            operation.remaining_s = max(0.0, operation.remaining_s - advance)
             if operation.remaining_s <= 1.0e-9 and self._operation_can_complete(operation):
                 completed.append(operation)
         for operation in completed:
             self.operations.pop(operation.resource, None)
+            recovered_faults = self.faults.complete_bound_operation_recovery(
+                operation.hold_fault_ids,
+                resource=operation.resource,
+                unit_id=operation.unit_id,
+                operation_kind=operation.kind,
+                now=self.sim_time,
+            )
+            for fault_id in recovered_faults:
+                self._event(
+                    "RECOVERY_RETRY_COMPLETED",
+                    fault_id=fault_id,
+                    resource=operation.resource,
+                    unit_id=operation.unit_id,
+                    kind=operation.kind,
+                )
+            detected = self.faults.detect_for_operation(
+                operation,
+                now=self.sim_time,
+                unit_lookup=self.units,
+            )
+            if detected:
+                self._event(
+                    "OPERATION_CANCELLED",
+                    resource=operation.resource,
+                    unit_id=operation.unit_id,
+                    kind=operation.kind,
+                    reason="QUALITY_DEFECT_DETECTED",
+                )
+                for record in detected:
+                    self._event(
+                        "FAULT_DETECTED",
+                        fault_id=record.fault_id,
+                        fault_type=record.fault_type.value,
+                        source=record.source,
+                        unit_id=record.details.get("unit_id"),
+                        target=record.details.get("target"),
+                    )
+                    self._event(
+                        "FAULT_INJECTED",
+                        fault_id=record.fault_id,
+                        fault_type=record.fault_type.value,
+                        source=record.source,
+                        unit_id=record.details.get("unit_id"),
+                        recoverable=record.recoverable,
+                    )
+                self._apply_rollbacks()
+                continue
             self._complete_operation(operation)
 
     def _admit_next_unit(self) -> bool:
@@ -792,14 +963,14 @@ class DualLineRuntime:
 
     def _dispatch_resources(self) -> bool:
         changed = False
-        if "ARM2" not in self.operations:
+        if "ARM2" not in self.operations and self._resource_online("ARM2"):
             waiting = [unit for unit in self._waiting_units(UnitStage.DISPENSING) if self._tray_ready(unit)]
             if waiting:
                 self._start("ARM2", waiting[0], "DISPENSING", self.durations.dispensing)
                 changed = True
         # Detection always gets Arm3 before another fin is picked. An active
         # INSTALL_FIN operation remains non-preemptible until this tick ends.
-        if "ARM3" not in self.operations:
+        if "ARM3" not in self.operations and self._resource_online("ARM3"):
             waiting_s4 = [
                 unit for unit in self._waiting_units(UnitStage.PRE_BRAZE_INSPECTION) if self._tray_ready(unit)
             ]
@@ -825,19 +996,19 @@ class DualLineRuntime:
                         self.durations.material_inspection,
                     )
                     changed = True
-        if "MERGE" not in self.operations:
+        if "MERGE" not in self.operations and self._resource_online("MERGE"):
             waiting = [unit for unit in self._waiting_units(UnitStage.MERGING) if self._tray_ready(unit)]
             if waiting:
                 self._start("MERGE", waiting[0], "MERGING", self.durations.merge)
                 changed = True
         # Arm1 prioritises a tray already committed to installation; only then
         # does it admit another base plate.
-        if "ARM1" not in self.operations:
+        if "ARM1" not in self.operations and self._resource_online("ARM1"):
             install = [
                 unit
                 for unit in self._waiting_units(UnitStage.FIN_INSTALLATION)
                 if unit.branch is InstallBranch.ARM1_A
-                and unit.fins_installed < unit.fin_count
+                and (unit.fins_installed < unit.fin_count or unit.rework_fin_index is not None)
                 and self._tray_ready(unit)
             ]
             if install:
@@ -857,18 +1028,18 @@ class DualLineRuntime:
                     changed = True
                 elif self._admit_next_unit():
                     changed = True
-        if "ARM3" not in self.operations:
+        if "ARM3" not in self.operations and self._resource_online("ARM3"):
             install = [
                 unit
                 for unit in self._waiting_units(UnitStage.FIN_INSTALLATION)
                 if unit.branch is InstallBranch.ARM3_B
-                and unit.fins_installed < unit.fin_count
+                and (unit.fins_installed < unit.fin_count or unit.rework_fin_index is not None)
                 and self._tray_ready(unit)
             ]
             if install:
                 self._start("ARM3", install[0], "INSTALL_FIN", self.durations.arm3_fin)
                 changed = True
-        if "OUTPUT" not in self.operations:
+        if "OUTPUT" not in self.operations and self._resource_online("OUTPUT"):
             delivering = [
                 unit for unit in self._waiting_units(UnitStage.DELIVERING) if self._tray_ready(unit)
             ]
@@ -880,7 +1051,11 @@ class DualLineRuntime:
                     self.durations.output_delivery,
                 )
                 changed = True
-        if "OUTPUT_GATE" not in self.operations and not self._output_gate_open:
+        if (
+            "OUTPUT_GATE" not in self.operations
+            and self._resource_online("OUTPUT_GATE")
+            and not self._output_gate_open
+        ):
             waiting_output = [
                 unit
                 for unit in self._waiting_units(UnitStage.WAITING_OUTPUT)
@@ -900,7 +1075,7 @@ class DualLineRuntime:
                 changed = True
         for unit in self._waiting_units(UnitStage.VIRTUAL_RETURN):
             resource = f"RETURN:{unit.unit_id}"
-            if resource not in self.operations:
+            if resource not in self.operations and self._resource_online(resource):
                 self._start(
                     resource,
                     unit,
@@ -1044,8 +1219,31 @@ class DualLineRuntime:
             assert unit.tray_id is not None and unit.buffer_owner is not None
             if not self._tray_ready(unit):
                 return False
-            layer = self.furnace.capacity - 1 - self._furnace_load_position
+            available_layers = sorted(
+                (
+                    layer.index
+                    for layer in self.furnace.state.layers
+                    if layer.tray_id is None and self.faults.layer_available(layer.index)
+                ),
+                reverse=True,
+            )
+            if not available_layers:
+                return False
+            layer = available_layers[0]
             unit.furnace_layer = layer
+            for fault_layer in sorted(self.faults.unavailable_rack_layers):
+                if self.faults.mark_rack_reallocated(
+                    fault_layer,
+                    layer,
+                    unit.unit_id,
+                    self.sim_time,
+                ):
+                    self._event(
+                        "RACK_LAYER_REALLOCATED",
+                        unit_id=unit.unit_id,
+                        fault_layer=fault_layer,
+                        selected_layer=layer,
+                    )
             self._handoff(
                 unit,
                 unit.buffer_owner,
@@ -1082,7 +1280,11 @@ class DualLineRuntime:
     def _dispatch_furnace_unload(self) -> bool:
         if not self._active_batch_units or not self.furnace.ready_to_unload:
             return False
-        if not self.furnace.state.rear_door_open and "FURNACE_DOOR" not in self.operations:
+        if (
+            not self.furnace.state.rear_door_open
+            and "FURNACE_DOOR" not in self.operations
+            and self._resource_online("FURNACE_DOOR")
+        ):
             self.furnace.open_rear(now=self.sim_time)
             self._start(
                 "FURNACE_DOOR",
@@ -1149,12 +1351,284 @@ class DualLineRuntime:
         if self.paused:
             return self.snapshot()
         self.sim_time += dt
+        # Faults are serviced before operations advance: an armed request fires
+        # against the operation that is running *now*, and an isolated resource
+        # must already be excluded from this tick's dispatch.
+        self._service_faults()
+        if not self.faults.cell_available():
+            return self.snapshot()
         self._advance_operations(dt)
         self.furnace.update(self.sim_time)
         self._dispatch()
         active_wip = sum(tray.owner is not TrayOwner.EMPTY_BUFFER for tray in self.flow.trays)
         self.maximum_wip = max(self.maximum_wip, active_wip)
         return self.snapshot()
+
+    # ------------------------------------------------------------------ faults
+    def _service_faults(self) -> None:
+        """Fire armed requests, apply rollbacks and release auto-recoveries."""
+
+        for resource in self.faults.service_auto_recovery(self.sim_time):
+            self._event("RESOURCE_RECOVERED", resource=resource)
+        manifested = self.faults.manifest_matching(
+            self.operations.values(),
+            now=self.sim_time,
+            unit_lookup=self.units,
+        )
+        for defect in manifested:
+            self._event(
+                "FAULT_MANIFESTED",
+                defect_id=defect.defect_id,
+                fault_type=defect.fault_type.value,
+                visual_type=defect.visual_type,
+                unit_id=defect.unit_id,
+                target=defect.target,
+                operation=defect.source_operation,
+            )
+        fired = self.faults.fire_matching(
+            self.operations.values(),
+            now=self.sim_time,
+            unit_lookup=self.units,
+        )
+        for record in fired:
+            self._event(
+                "FAULT_INJECTED",
+                fault_id=record.fault_id,
+                fault_type=record.fault_type.value,
+                source=record.source,
+                unit_id=record.details.get("unit_id"),
+                recoverable=record.recoverable,
+            )
+            unit_id = str(record.details.get("unit_id") or "")
+            requested_hold = float(record.details.get("duration_s") or 4.0)
+            hold = self.faults.take_hold(unit_id, requested_hold) if unit_id else 0.0
+            if hold <= 0.0:
+                continue
+            operation = next(
+                (
+                    item
+                    for item in self.operations.values()
+                    if item.unit_id == unit_id and item.resource == record.source
+                ),
+                None,
+            )
+            if operation is None:
+                # Defensive fallback: preserve the owed delay so a committed
+                # mechanism transition can consume it at its next safe start.
+                self.faults.unit_holds[unit_id] = self.faults.unit_holds.get(unit_id, 0.0) + hold
+                continue
+            plan = self.faults.plans.get(record.recovery_id or "")
+            if plan is not None and plan.status is RecoveryStatus.MANUAL_REVIEW:
+                operation.manual_hold_fault_ids = (
+                    *operation.manual_hold_fault_ids,
+                    record.fault_id,
+                )
+                self.faults.bind_hold_to_operation(
+                    record.fault_id,
+                    resource=operation.resource,
+                    operation_kind=operation.kind,
+                    seconds=hold,
+                )
+                self._event(
+                    "FAULT_HOLD_APPLIED",
+                    resource=operation.resource,
+                    unit_id=unit_id,
+                    kind=operation.kind,
+                    seconds=hold,
+                    applied_to="CURRENT_OPERATION",
+                    manual_confirmation=True,
+                    fault_id=record.fault_id,
+                )
+                continue
+            # ``fault_hold_remaining_s`` is a separate frozen-clock interval.
+            # Do not also add it to ``remaining_s`` or the same timeout would
+            # be charged twice (once while frozen and once after motion resumes).
+            operation.fault_hold_remaining_s += hold
+            operation.hold_fault_ids = (*operation.hold_fault_ids, record.fault_id)
+            self.faults.bind_hold_to_operation(
+                record.fault_id,
+                resource=operation.resource,
+                operation_kind=operation.kind,
+                seconds=hold,
+            )
+            self._event(
+                "FAULT_HOLD_APPLIED",
+                resource=operation.resource,
+                unit_id=unit_id,
+                kind=operation.kind,
+                seconds=hold,
+                applied_to="CURRENT_OPERATION",
+                fault_id=record.fault_id,
+            )
+        self._apply_rollbacks()
+
+    def _apply_rollbacks(self) -> None:
+        """Roll a failed unit back to the stage that must be redone.
+
+        V1 achieves recovery by inserting rework tasks into a DAG.  V2 has no
+        DAG, so the equivalent is returning the unit's stage machine to the point
+        before the failed operation and letting the dispatcher run it again.
+
+        The rollback is applied exactly once per plan.  Note that the unit is
+        often *already* sitting in the rollback stage (a braze defect is detected
+        during ``MATERIAL_INSPECTION``, whose stage is still ``DISPENSING``);
+        skipping those would silently drop the rework, so completion is keyed on
+        an explicit ``rollback_applied`` flag rather than on a stage difference.
+        """
+
+        for plan in list(self.faults.plans.values()):
+            if plan.status is not RecoveryStatus.RUNNING or plan.rollback_applied:
+                continue
+            if not plan.unit_id or not plan.rollback_stage:
+                continue
+            unit = self.units.get(plan.unit_id)
+            if unit is None:
+                continue
+            try:
+                stage = UnitStage(plan.rollback_stage)
+            except ValueError:
+                continue
+            actual_stage = stage
+            if unit.tray_id is not None:
+                owner = self.flow.get(unit.tray_id).owner
+                if plan.strategy == "LOCAL_BRAZING_REWORK" and owner is TrayOwner.S2B:
+                    if not (self._owner_free(TrayOwner.S2A) and self._target_available(TrayOwner.S2A)):
+                        continue
+                    self._handoff(
+                        unit,
+                        TrayOwner.S2B,
+                        TrayOwner.S2A,
+                        TrayPhase.DISPENSING,
+                    )
+                    actual_stage = UnitStage.DISPENSING
+                    self._event(
+                        "RECOVERY_RETURN_STARTED",
+                        unit_id=unit.unit_id,
+                        source=TrayOwner.S2B.value,
+                        target=TrayOwner.S2A.value,
+                        strategy=plan.strategy,
+                    )
+                elif plan.strategy == "FIN_REINSTALL" and owner is TrayOwner.S4:
+                    target_owner = (
+                        TrayOwner.INSTALL_B if unit.branch is InstallBranch.ARM3_B else TrayOwner.INSTALL_A
+                    )
+                    if not (self._owner_free(target_owner) and self._target_available(target_owner)):
+                        continue
+                    self._handoff(
+                        unit,
+                        TrayOwner.S4,
+                        target_owner,
+                        TrayPhase.FIN_INSTALLATION,
+                    )
+                    actual_stage = UnitStage.FIN_INSTALLATION
+                    self._event(
+                        "RECOVERY_RETURN_STARTED",
+                        unit_id=unit.unit_id,
+                        source=TrayOwner.S4.value,
+                        target=target_owner.value,
+                        strategy=plan.strategy,
+                    )
+            # Cancel any in-flight operation for this unit before rewinding, so a
+            # completing operation cannot advance a unit that is being redone.
+            for resource, operation in list(self.operations.items()):
+                if operation.unit_id == plan.unit_id:
+                    del self.operations[resource]
+                    self._event(
+                        "OPERATION_CANCELLED",
+                        resource=resource,
+                        unit_id=plan.unit_id,
+                        kind=operation.kind,
+                        reason="RECOVERY_ROLLBACK",
+                    )
+            rollback_fin_count = unit.fins_installed
+            if actual_stage is UnitStage.FIN_INSTALLATION:
+                # Keep every already installed fin physically present.  The
+                # exact failed index is carried separately so the repair actor
+                # returns to that slot instead of pretending the last fin failed.
+                defect = next(
+                    (item for item in self.faults.physical_faults.values() if item.fault_id == plan.fault_id),
+                    None,
+                )
+                unit.rework_fin_index = (None if defect is None else defect.operation_index) or max(
+                    1, unit.fins_installed
+                )
+                rollback_fin_count = max(0, unit.fins_installed - 1)
+            plan.rollback_applied = True
+            # Rework costs more than the interrupted operation's remainder: the
+            # defect itself must be repaired.  Charging it here keeps recovery
+            # visible in makespan rather than looking free.
+            defect = next(
+                (item for item in self.faults.physical_faults.values() if item.fault_id == plan.fault_id),
+                None,
+            )
+            self._rework_effort[plan.unit_id] = _RecoveryWork(
+                effort_factor=plan.effort_factor,
+                strategy=plan.strategy,
+                fault_type="" if defect is None else defect.fault_type.value,
+                target_index=None if defect is None else defect.operation_index,
+            )
+            self._set_stage(unit, actual_stage)
+            self._event(
+                "RECOVERY_ROLLBACK",
+                unit_id=plan.unit_id,
+                recovery_id=plan.recovery_id,
+                stage=stage.value,
+                actual_stage=actual_stage.value,
+                effort_factor=plan.effort_factor,
+                fins_installed=rollback_fin_count,
+                fin_index=unit.rework_fin_index,
+            )
+
+    def inject_fault(
+        self,
+        fault_type: str,
+        *,
+        target: str = "",
+        severity: str = "recoverable",
+        auto_recover: bool = True,
+        duration_s: float | None = None,
+        label_zh: str = "",
+    ) -> dict[str, Any]:
+        """Arm a manual fault; returns the request snapshot for the UI."""
+
+        from ..fault_catalog import MANUAL_FAULT_CATALOG
+
+        requested_type = str(fault_type).strip().upper()
+        definition = MANUAL_FAULT_CATALOG.get(requested_type)
+        runtime_type = requested_type if definition is None else definition.runtime_fault
+        if not runtime_type:
+            raise ValueError(f"V2 暂不支持故障 {requested_type} 的运行时执行")
+        request = self.faults.arm(
+            runtime_type,
+            target=target,
+            severity=severity,
+            auto_recover=auto_recover,
+            duration_s=duration_s,
+            label_zh=label_zh,
+            visual_type=requested_type,
+            now=self.sim_time,
+        )
+        self._event(
+            "FAULT_ARMED",
+            request_id=request.request_id,
+            fault_type=request.fault_type.value,
+            visual_type=request.visual_type,
+            target=request.target,
+            status=request.status,
+        )
+        return request.as_dict()
+
+    def recover_resource(self, resource_id: str) -> bool:
+        recovered = self.faults.recover_resource(resource_id, self.sim_time)
+        if recovered:
+            self._event("RESOURCE_RECOVERED", resource=str(resource_id).upper())
+        return recovered
+
+    def recovery_action(self, recovery_id: str, action: str) -> bool:
+        applied = self.faults.action(recovery_id, action, self.sim_time)
+        if applied:
+            self._event("RECOVERY_ACTION", recovery_id=recovery_id, action=action)
+        return applied
 
     def run_until_complete(self, *, max_sim_time: float, dt: float = 0.05) -> dict[str, Any]:
         maximum = float(max_sim_time)
@@ -1198,6 +1672,8 @@ class DualLineRuntime:
         self.scheduled_parallel_install_seconds = 0.0
         self.upstream_work_during_brazing_s = 0.0
         self.maximum_wip = 0
+        self.faults.reset()
+        self._rework_effort.clear()
 
     def snapshot(self) -> dict[str, Any]:
         completed_orders = [
@@ -1234,6 +1710,20 @@ class DualLineRuntime:
                     "unit_id": operation.unit_id,
                     "kind": operation.kind,
                     "remaining_s": max(0.0, operation.remaining_s),
+                    "duration_s": operation.duration_s,
+                    "started_at": operation.started_at,
+                    "progress": (
+                        1.0
+                        if operation.duration_s <= 0.0
+                        else max(
+                            0.0,
+                            min(1.0, 1.0 - operation.remaining_s / operation.duration_s),
+                        )
+                    ),
+                    "recovery": operation.recovery,
+                    "recovery_strategy": operation.recovery_strategy,
+                    "recovery_fault_type": operation.recovery_fault_type,
+                    "recovery_target_index": operation.recovery_target_index,
                 }
                 for resource, operation in sorted(self.operations.items())
             },
@@ -1253,7 +1743,15 @@ class DualLineRuntime:
             "metrics": {
                 "upstream_work_during_brazing_s": round(self.upstream_work_during_brazing_s, 6),
                 "maximum_wip": self.maximum_wip,
+                "fault_count": len(self.faults.faults),
+                "recovered_fault_count": sum(1 for record in self.faults.faults.values() if record.recovered),
+                "recovery_rate": (
+                    0.0
+                    if not self.faults.faults
+                    else sum(1 for r in self.faults.faults.values() if r.recovered) / len(self.faults.faults)
+                ),
             },
+            **self.faults.snapshot(),
             "events": list(self.events),
         }
 

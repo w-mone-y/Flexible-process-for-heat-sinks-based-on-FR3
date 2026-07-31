@@ -1,0 +1,206 @@
+# 散热组件标准工艺路线
+#
+# A/B/C 与自定义订单共用这一条路线：产品差异（基板尺寸、翅片数、节距、路径数、
+# 压紧力、配方）全部通过参数注入，不需要为每个产品复制一份路线。
+#
+# 关键字段：
+#   after         —— 工序级依赖（必须引用已声明的前序工序，禁止前向引用与环）
+#   params        —— 传给能力的参数；`$xxx` 占位符由计划编译时用 ProcessPlan 求值
+#   alternatives  —— OR 分支：同一工序的等价替代路线，派工时刻才决定走哪条
+#   per_unit_of   —— fin 表示按翅片数量展开为多个节点
+#   batchable     —— 声明可拼炉，由炉批规划器消费
+#
+# 注意：本文件只描述“产品要经过哪些工艺”。托盘在 S1/S2A/S2B/S3 之间如何移载、
+# 双支路如何合流，属于产线拓扑，由拓扑装饰器负责，不写在工艺路线里。
+
+schema_version: 1
+routing_id: HEAT_SINK_STANDARD
+product: HEAT_SINK_FAMILY
+description_zh: 低压配电柜散热组件标准钎焊工艺路线
+
+operations:
+
+  # ------------------------------------------------------------ 上料
+  - id: OP10_PICK_BASE
+    capability: BASE_PICKING
+    retry_limit: 1
+    description_zh: 吸取基板
+
+  - id: OP15_PLACE_BASE
+    capability: BASE_LOADING
+    after: [OP10_PICK_BASE]
+    retry_limit: 1
+    description_zh: 搬运并放置基板
+
+  # ------------------------------------------------------------ 换刀（与涂覆并行）
+  # 故意不依赖涂覆：Arm1 换刀可以和 Arm2 涂覆同时进行。
+  - id: OP18_PREPARE_FIN_TOOL
+    capability: FIN_TOOL_CHANGE
+    after: [OP15_PLACE_BASE]
+    retry_limit: 1
+    description_zh: 切换翅片夹爪
+
+  # ------------------------------------------------------------ 涂覆（OR 分支）
+  - id: OP20_DISPENSE
+    capability: MATERIAL_DISPENSING_DUAL
+    after: [OP15_PLACE_BASE]
+    retry_limit: 2
+    params:
+      path_count: $path_count
+      speed_m_s: $material_speed_m_s
+      bead_offset_m: $bead_offset_m
+    alternatives:
+      - mode: DUAL_NOZZLE
+        capability: MATERIAL_DISPENSING_DUAL
+        cost_hint: 1.0
+      - mode: SINGLE_TWO_PASS
+        capability: MATERIAL_DISPENSING_SINGLE
+        cost_hint: 1.8
+    description_zh: 涂覆钎料
+
+  # ------------------------------------------------------------ 焊料检测（OR 分支）
+  - id: OP25_INSPECT_BRAZING
+    capability: VISUAL_INSPECTION_BRAZING
+    after: [OP20_DISPENSE]
+    retry_limit: 2
+    params:
+      path_count: $path_count
+    alternatives:
+      - mode: ARM_HANDHELD
+        capability: VISUAL_INSPECTION_BRAZING
+        cost_hint: 1.0
+      - mode: FIXED_GANTRY
+        capability: FIXED_VISION_BRAZING
+        cost_hint: 0.7
+    description_zh: 检测钎料涂覆
+
+  # ------------------------------------------------------------ 梳齿换型
+  - id: OP28_CONFIGURE_COMB
+    capability: COMB_CONFIGURATION
+    after: [OP25_INSPECT_BRAZING]
+    params:
+      comb_module: $comb_module
+      pitch_m: $comb_pitch_m
+    description_zh: 安装订单匹配梳齿
+
+  # ------------------------------------------------------------ 翅片安装（按片展开）
+  # 单夹爪一次只能持一片：第 i 片的夹取必须等第 i-1 片装好。
+  # 这条物理约束由 after_previous 声明，不再写在编译器里。
+  # 夹取只依赖换刀（不依赖梳齿），因此第一片可在梳齿安装期间预取。
+  - id: OP30_PICK_FIN
+    capability: FIN_PICKING
+    after: [OP18_PREPARE_FIN_TOOL]
+    after_previous: [OP35_INSTALL_FIN]
+    per_unit_of: fin
+    retry_limit: 2
+    description_zh: 夹取单片翅片
+
+  - id: OP35_INSTALL_FIN
+    capability: FIN_ASSEMBLY
+    after: [OP30_PICK_FIN, OP28_CONFIGURE_COMB]
+    per_unit_of: fin
+    retry_limit: 2
+    params:
+      fin_pitch_m: $fin_pitch_m
+    description_zh: 插入单片翅片
+
+  - id: OP40_INSPECT_FINS
+    capability: VISUAL_INSPECTION_FINS
+    after: [OP35_INSTALL_FIN]
+    retry_limit: 2
+    params:
+      fin_count: $fin_count
+    description_zh: 检测翅片安装
+
+  # ------------------------------------------------------------ 压紧锁定
+  - id: OP45_APPLY_PRESS
+    capability: PRESS_APPLICATION
+    after: [OP40_INSPECT_FINS]
+    params:
+      target_force_n: $target_clamping_force_n
+      force_hold_duration_s: $force_hold_duration_s
+    description_zh: 压梁压紧翅片
+
+  - id: OP50_LOCK_FIXTURE
+    capability: FIXTURE_LOCKING
+    after: [OP45_APPLY_PRESS]
+    description_zh: 锁紧托盘夹具
+
+  # ------------------------------------------------------------ 炉前物流
+  - id: OP55_TRAY_OUT
+    capability: TRAY_OUTFEED
+    after: [OP50_LOCK_FIXTURE]
+    retry_limit: 1
+    description_zh: 托盘进入炉前输送
+
+  - id: OP60_MOVE_ELEVATOR
+    capability: ELEVATOR_POSITIONING
+    after: [OP55_TRAY_OUT]
+    retry_limit: 1
+    description_zh: 炉内层位分配
+
+  - id: OP65_LOAD_RACK
+    capability: RACK_LOADING
+    after: [OP60_MOVE_ELEVATOR]
+    retry_limit: 1
+    description_zh: 送入炉内料架层
+
+  - id: OP70_LOCK_RACK
+    capability: RACK_LAYER_LOCKING
+    after: [OP65_LOAD_RACK]
+    description_zh: 锁定炉内料架层
+
+  # ------------------------------------------------------------ 炉内钎焊（可拼炉）
+  - id: OP75_BATCH_READY
+    capability: FURNACE_BATCH_GATE
+    after: [OP70_LOCK_RACK]
+    description_zh: 确认炉批装载完成
+
+  - id: OP80_RUN_FURNACE
+    capability: FURNACE_BRAZING
+    after: [OP75_BATCH_READY]
+    batchable:
+      group_key: recipe
+      max_units: 3
+    params:
+      recipe: $recipe
+      duration_s: $furnace_duration_s
+    description_zh: 执行整炉热循环
+
+  - id: OP85_UNLOAD_RACK
+    capability: RACK_UNLOADING
+    after: [OP80_RUN_FURNACE]
+    retry_limit: 1
+    description_zh: 从料架卸载托盘
+
+  # ------------------------------------------------------------ 焊后检测与拆解
+  - id: OP90_POST_INSPECT
+    capability: POST_BRAZE_VISION
+    after: [OP85_UNLOAD_RACK]
+    description_zh: 焊后检测
+
+  - id: OP92_REMOVE_COMB
+    capability: COMB_REMOVAL_AFTER_BRAZE
+    after: [OP90_POST_INSPECT]
+    description_zh: 焊后梳齿退出
+
+  - id: OP94_REMOVE_PRESS
+    capability: PRESS_REMOVAL_AFTER_BRAZE
+    after: [OP92_REMOVE_COMB]
+    description_zh: 焊后压片退出
+
+  # ------------------------------------------------------------ 成品分流（三条互斥出口）
+  - id: OP96_ROUTE_PASS
+    capability: DISPOSITION_ROUTING_PASS
+    after: [OP94_REMOVE_PRESS]
+    description_zh: 合格品分流
+
+  - id: OP97_ROUTE_REWORK
+    capability: DISPOSITION_ROUTING_REWORK
+    after: [OP94_REMOVE_PRESS]
+    description_zh: 返工品分流
+
+  - id: OP98_ROUTE_SCRAP
+    capability: DISPOSITION_ROUTING_SCRAP
+    after: [OP94_REMOVE_PRESS]
+    description_zh: 报废品分流

@@ -63,14 +63,28 @@
 
 ### ✨ 核心能力
 
-- 📦 **订单参数驱动**：A/B/C 与严格 YAML 配置共用一套执行主线。
-- 🧩 **物理工装换型**：15/20/30 mm 梳齿、短压梁和托盘随订单变化。
-- 🔀 **多订单异步流水**：最多三张托盘在制，不同机械臂可在不同工位并行。
+- 📦 **订单参数驱动**：A/B/C 物理订单与严格 YAML 配置共用一套执行主线，D 型用于验证免改代码扩展。
+- 🧩 **订单驱动工装**：15/20/30 mm 梳齿、短压梁和托盘随产品参数变化，并记录序列相关换型成本。
+- 🔀 **多订单异步流水**：V1 三托盘、V2 六托盘 WIP，不同机械臂可在不同工位并行。
 - 🧠 **任务图动态调度**：`ProcessPlan → Task DAG → Scheduler → Skills`。
 - 🛠️ **可见故障与恢复**：漏涂、偏位、设备离线、输送超时、炉门互锁等。
 - 🔥 **完整炉体闭环**：三层前门装炉、30 秒演示热循环、后门卸载、检测与交付。
 - 🖥️ **规划控制台**：订单、任务图、工程示意、资源、故障、物流与实验指标。
 - ⚡ **0.25×～32× 倍速**：只改变仿真推进速度，不改变任务依赖与质量结果。
+
+### 当前能力边界（避免把规划能力当成物理能力）
+
+| 能力 | V1 稳定线 | V2 双安装线 | 当前边界 |
+|---|:---:|:---:|---|
+| A/B/C 实体订单 | ✅ | ✅ | 共用产品与配方语义，使用独立物理运行时 |
+| D 型 / 自定义 YAML | ✅ 规划与 dry-run | ⚠️ 规划可见、实体执行未开放 | 无实体模块或超容量时在启动前拒绝 |
+| 多订单协同 | ✅ 三托盘 | ✅ 六托盘、双安装支路 | 单炉最多三件，超出 WIP 的订单留在虚拟队列 |
+| 可见故障与返工 | ✅ | ✅ | 质量故障由相机检出后返工；安全故障不能自动绕过 |
+| 动态任务 DAG | ✅ | ⚠️ V2 使用异步阶段状态机 | V2 UI 会实时投影物理任务，但不是同一套 DAG 执行器 |
+| 自动换型规划与 KPI | ✅ | ✅ 展示 | 换型动作与成本已建模；实体换型龙门仍是后续工作 |
+
+> `✅` 表示当前代码和回归测试覆盖；`⚠️` 表示已具备规划、展示或部分执行能力，
+> 但仍保留明确的物理边界。项目不会用动画或 UI 文案冒充尚未接通的 actor。
 
 ## 🏭 一张图看懂生产流程
 
@@ -211,7 +225,7 @@ mjpython brazing_line.py --order C
 mjpython brazing_line.py --batch A
 ```
 
-### 4. V2 双安装支路 Phase 1
+### 4. V2 双安装支路
 
 V2 使用独立入口和独立 MJCF，不覆盖 V1。它提供六托盘、Arm1/Arm3 双翅片
 安装支路、Y 形合流、三层贯通炉（前门装载、后门卸载）以及相同的十页签 Qt
@@ -225,9 +239,11 @@ mjpython brazing_line_v2.py
 python brazing_line_v2.py --headless --orders A,B,C --fast
 ```
 
-> V2 当前是 Phase 1 物理门控预演版：机器人动作、抓取、TCP 到位、载具
-> 运输和炉体流程均参与门控；自定义产品、V2 单段 actor 与物理故障 actor 留待
-> Phase 2。完整边界见 [V2 规格](docs/specs/v2-dual-install-line.md)。
+> V2 已接通机器人动作、抓取、工位运输、三层炉批、实时任务投影，以及质量/设备
+> 故障的“物理形成 → 检测 → 实体返工或安全保持”。当前仍未开放 V2 自定义产品实体
+> 执行、九个单段 actor 和可见换型龙门；界面会明确禁用或提示，不会静默假装成功。
+> 完整边界见 [V2 规格](docs/specs/v2-dual-install-line.md)与
+> [V2 扰动柔性说明](docs/specs/v2-disturbance-flexibility.md)。
 
 ### 5. YAML 柔性订单
 
@@ -281,6 +297,9 @@ mjpython brazing_line.py
 | 文件应该去哪里找 | [项目目录说明](docs/architecture/项目目录说明.md) |
 | 场景、网格和中文铭牌如何组织 | [视觉模型与资产说明](docs/architecture/视觉模型与资产说明.md) |
 | Arm2 在完整工艺中的职责 | [Arm2 工艺说明](docs/process/Arm2%20在整体流程中的任务.md) |
+| 工艺如何由 YAML 驱动、资源如何延迟绑定 | [数据驱动工艺与能力延迟绑定](docs/specs/capability-driven-flexibility.md) |
+| 换型时间如何建模与度量 | [换型建模与 KPI](docs/specs/changeover-modelling.md) |
+| V2 的故障注入与恢复如何工作 | [V2 扰动柔性与控制台接通](docs/specs/v2-disturbance-flexibility.md) |
 | 项目的核心领域术语与不变量 | [领域上下文](CONTEXT.md) · [架构决策记录](docs/adr/) |
 
 ### 关键实现入口
@@ -307,18 +326,33 @@ mjpython brazing_line.py
 | **A** | 0.36 × 0.22 × 0.008 m | 5 | 20 mm | 20 mm | 10 | 20 N |
 | **B** | 0.36 × 0.24 × 0.008 m | 4 | 30 mm | 30 mm | 8 | 18 N |
 | **C** | 0.34 × 0.20 × 0.008 m | 7 | 15 mm | 15 mm | 14 | 22 N |
+| **D** | 0.36 × 0.24 × 0.008 m | 9 | 15 mm | 15 mm | 18 | 30 N |
+
+> **D 型是换型免编程的证据**：加入它只需
+> [`product_d.yaml`](config/products/product_d.yaml) 与
+> [`order_004.yaml`](config/orders/order_004.yaml) 两个文件，没有一行 Python、
+> 没有一处示教点。涂覆节拍自动由 24.0 s 增至 29.4 s，翅片检测由 10.0 s 增至
+> 11.2 s，全部来自
+> [能力本体](config/capabilities.yaml)的参数化节拍模型。
 
 配置职责：
 
 ```text
 config/products/          产品几何、翅片、喷嘴与压紧参数
 config/orders/            数量、优先级、交期与首选料架层
+config/capabilities.yaml  能力本体：工具类别、参数范围、参数化节拍、工艺谓词
+config/routings/          产品工艺路线：工序、依赖与 OR 替代分支
 config/fixture_modules.yaml
 config/process_recipes.yaml
 config/rack_config.yaml
-config/resources.yaml
+config/resources.yaml     资源能力声明、节拍系数、参数窗口与工具类别
 config/scheduler.yaml
 ```
+
+规划层的工艺与资源均为数据：**加新产品 = 加一个 product/order YAML；加新工艺 =
+扩展 routing 与 capability；注册同能力资源 = 加一个 resource 条目。** 新资源要参与
+MuJoCo 实体动作时，仍必须提供对应 actor、可达性和安全验收，不能只改 YAML。
+详见[数据驱动工艺与能力延迟绑定](docs/specs/capability-driven-flexibility.md)。
 
 加载器采用严格校验。缺字段、未知字段、错误类型、负数、路径越界、超过 12 片翅片 /
 24 条路径容量，或没有可用料架层，都会在机械臂运动前给出“文件 + 字段路径 + 原因”，
@@ -376,8 +410,9 @@ flowchart TB
 - 早期 V1 只支持 A，完整单 A 在 333.63 s 触发炉体/Arm2 非预期接触并安全停机，
   因此不把快进时间包装成有效完工成绩。
 
-> V2 仍是 `CONTROL_PLANE_REHEARSAL` Phase 1，以上数据证明调度、可见运输、动画门控
-> 和双安装支路的效率收益，不代表真实工厂节拍，也不等同于 Phase 2 全 TCP/抓取验收。
+> 这组 2026-07-29 历史基准采集于 `CONTROL_PLANE_REHEARSAL` 阶段，证明当时调度、
+> 可见运输和双安装支路的相对效率收益；它不代表真实工厂节拍，也不替代当前版本的
+> TCP、抓取、故障恢复与安全回归。复现实验会在新输出目录生成新的时间戳结果。
 
 查看[完整报告、原始 JSON/CSV 与复现说明](benchmarks/results/2026-07-29-v1-v2/comparison.md)。
 
@@ -450,12 +485,14 @@ brazing_sim/
 ├── cli/                      三个启动器的真实实现
 ├── domain.py                 强类型订单、产品、任务和检测状态
 ├── flexible/                 配置加载、几何生成、工装和计划
+├── changeover/               配置差分、序列相关换型成本与 KPI
 ├── planning/                 ManufacturingTask 与 TaskGraph
 ├── scheduling/               固定/动态调度、资源和区域锁
 ├── execution/                技能注册、actor 适配和超时监测
 ├── dual_line/                V2 拓扑、运行时、场景投影与机器人动作
 ├── recovery/                 故障模型、恢复策略和在线重规划
 ├── experiments/              事件指标与 fixed/dynamic 对比
+├── flexibility_report.py     六类柔性能力与边界的可解释快照
 ├── motion.py                 FR3 控制、IK 与平滑轨迹
 ├── inspection.py             Arm3 检测姿态与相机几何
 ├── fixture.py                梳齿、压梁与力控压紧
@@ -520,7 +557,7 @@ mjpython brazing_line_cinematic.py --batch A
 <details>
 <summary><strong>展开查看常用接口</strong></summary>
 
-默认 HTTP 地址：`127.0.0.1:8766`
+默认 HTTP 地址：V1 `127.0.0.1:8766`，V2 `127.0.0.1:8767`。
 
 | 接口 | 作用 |
 |---|---|

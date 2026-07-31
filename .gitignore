@@ -1,6 +1,3 @@
-diffik_qpsolvers.py
-diffik_qp.py
-
 # Python / test / editor artifacts
 __pycache__/
 *.py[cod]
@@ -13,6 +10,11 @@ build/
 dist/
 *.egg-info/
 .DS_Store
+.claude/
+.idea/
+.vscode/
+*.swp
+*~
 
 # Runtime outputs are reproducible and must not bloat the repository.
 artifacts/

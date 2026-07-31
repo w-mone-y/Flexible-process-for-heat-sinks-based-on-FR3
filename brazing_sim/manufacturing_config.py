@@ -8,6 +8,9 @@ from typing import Any
 
 import yaml
 
+from .flexible.capability_loader import parse_resource_capabilities
+from .flexible.capability_models import ResourceCapability
+from .flexible.loader import FlexibleConfigError
 from .recovery.fault_models import FaultType
 from .scheduling.resource_manager import ResourceState
 from .scheduling.scheduling_cost import SchedulingWeights
@@ -32,9 +35,15 @@ def _mapping(path: str | Path) -> tuple[Path, dict[str, Any]]:
     return source, value
 
 
-def _keys(source: Path, data: dict[str, Any], required: set[str], path: str = "") -> None:
+def _keys(
+    source: Path,
+    data: dict[str, Any],
+    required: set[str],
+    path: str = "",
+    optional: set[str] | None = None,
+) -> None:
     missing = required - set(data)
-    unknown = set(data) - required
+    unknown = set(data) - required - (optional or set())
     if missing:
         raise ManufacturingConfigError(f"{source} [{path or '<root>'}.{sorted(missing)[0]}]: 缺少必填字段")
     if unknown:
@@ -155,6 +164,7 @@ def load_resource_config(path: str | Path) -> tuple[list[ResourceState], tuple[s
             raw,
             {"resource_id", "resource_type", "current_tool", "available_tools", "capabilities"},
             f"resources[{index}]",
+            optional={"process_capabilities", "tool_classes"},
         )
         for key in ("resource_id", "resource_type"):
             _expect(source, raw[key], str, f"resources[{index}].{key}")
@@ -164,6 +174,33 @@ def load_resource_config(path: str | Path) -> tuple[list[ResourceState], tuple[s
             values = _expect(source, raw[key], list, f"resources[{index}].{key}")
             if any(not isinstance(item, str) for item in values):
                 raise ManufacturingConfigError(f"{source} [resources[{index}].{key}]: 必须是字符串列表")
+
+        # Capability-ontology view (step A/B).  Both fields are optional so any
+        # existing resources.yaml keeps loading unchanged.
+        tool_classes: dict[str, str] = {}
+        raw_tool_classes = raw.get("tool_classes")
+        if raw_tool_classes is not None:
+            _expect(source, raw_tool_classes, dict, f"resources[{index}].tool_classes")
+            for tool, tool_class in raw_tool_classes.items():
+                path = f"resources[{index}].tool_classes.{tool}"
+                _expect(source, tool_class, str, path)
+                if str(tool) not in {str(item) for item in raw["available_tools"]}:
+                    raise ManufacturingConfigError(f"{source} [{path}]: 工具 {tool} 不在 available_tools 中")
+                tool_classes[str(tool)] = str(tool_class)
+
+        process_capabilities: dict[str, ResourceCapability] = {}
+        raw_process = raw.get("process_capabilities")
+        if raw_process is not None:
+            try:
+                parsed = parse_resource_capabilities(
+                    raw_process,
+                    source=source,
+                    path=f"resources[{index}].process_capabilities",
+                )
+            except FlexibleConfigError as exc:
+                raise ManufacturingConfigError(str(exc)) from exc
+            process_capabilities = {item.name: item for item in parsed}
+
         resources.append(
             ResourceState(
                 resource_id=str(raw["resource_id"]),
@@ -171,6 +208,8 @@ def load_resource_config(path: str | Path) -> tuple[list[ResourceState], tuple[s
                 current_tool=None if raw["current_tool"] is None else str(raw["current_tool"]),
                 available_tools={str(item) for item in raw["available_tools"]},
                 capabilities={str(item) for item in raw["capabilities"]},
+                process_capabilities=process_capabilities,
+                tool_classes=tool_classes,
             )
         )
     if any(not isinstance(zone, str) or not zone for zone in data["zones"]):

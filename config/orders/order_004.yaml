@@ -1,0 +1,9 @@
+# D 型订单：数据驱动换型演示。
+# 与 product_d.yaml 一起，构成"新增一个产品"所需的全部改动。
+schema_version: 1
+order_id: ORDER_004
+product: ../products/product_d.yaml
+quantity: 1
+priority: 20
+due_time: null
+preferred_rack_layer: null

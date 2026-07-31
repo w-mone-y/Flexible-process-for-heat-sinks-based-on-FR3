@@ -44,8 +44,9 @@ def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
             target_owner=TrayOwner.MERGE_B_WAIT,
         ),
         (
-            (0.05, -0.45, 0.225),
-            (0.05, -1.22, 0.225),
+            (0.15, -0.45, 0.225),
+            (0.115, -0.475, 0.225),
+            (0.115, -1.22, 0.225),
             (1.55, -1.22, 0.225),
         ),
         atol=1.0e-9,
@@ -67,7 +68,7 @@ def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
             source_owner=TrayOwner.MERGE_B_WAIT,
             target_owner=TrayOwner.MERGE,
         ),
-        (merge,),
+        ((1.55, 0.0, 0.225), merge),
         atol=1.0e-9,
     )
 
@@ -97,6 +98,133 @@ def test_scene_adapter_moves_an_active_tray_continuously_without_changing_orient
         orientation_error_rad = 2.0 * np.arccos(np.clip(orientation_dot, -1.0, 1.0))
         assert orientation_error_rad < np.deg2rad(0.01)
         assert adapter.tray_visible(tray.tray_id)
+    finally:
+        adapter.close()
+
+
+def test_robot_motion_snapshot_reports_continuous_operation_progress() -> None:
+    """The task graph needs segment progress, not a coarse waypoint counter."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="ROBOT_PROGRESS_A")
+        active = None
+        for _ in range(1_200):
+            runtime.tick(0.05)
+            adapter.sync(runtime)
+            adapter.step_physics(0.05)
+            active = next(
+                (item for item in adapter.robot_motion_snapshot().values() if item.get("operation")),
+                None,
+            )
+            if active is not None:
+                break
+        assert active is not None
+        assert 0.0 <= float(active["progress"]) <= 1.0
+    finally:
+        adapter.close()
+
+
+def test_offline_arm_freezes_its_physical_joint_path_until_recovered() -> None:
+    """ARM_UNAVAILABLE must stop both logical time and MuJoCo joint playback."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="PHYSICAL_ARM_HOLD")
+        adapter.sync(runtime)
+        for _ in range(20):
+            adapter.step_physics(0.01)
+            adapter.sync(runtime)
+
+        runtime.inject_fault("ARM_UNAVAILABLE", target="ARM1", auto_recover=False)
+        adapter.sync(runtime)
+        before = adapter.robot_motion_snapshot()["arm1"]
+        before_joints = np.asarray(before["joint_positions"], dtype=float)
+        before_progress = float(before["progress"])
+
+        for _ in range(20):
+            adapter.step_physics(0.01)
+            adapter.sync(runtime)
+
+        held = adapter.robot_motion_snapshot()["arm1"]
+        np.testing.assert_allclose(held["joint_positions"], before_joints, atol=1.0e-7)
+        assert float(held["progress"]) == pytest.approx(before_progress)
+        assert "故障隔离" in str(held["target_zh"])
+
+        assert runtime.recover_resource("ARM1")
+        adapter.sync(runtime)
+        for _ in range(10):
+            adapter.step_physics(0.01)
+        resumed = adapter.robot_motion_snapshot()["arm1"]
+        assert float(resumed["progress"]) > before_progress
+    finally:
+        adapter.close()
+
+
+def test_fault_hold_freezes_carrier_without_a_resume_teleport() -> None:
+    """A timeout pauses tray/lift timing and resumes from the same path point."""
+
+    pytest.importorskip("mujoco")
+    adapter = DualLineSceneAdapter(V2_XML, transfer_speed_m_s=0.25)
+    tray_id = "V2_TRAY_01"
+    try:
+        start = adapter.tray_position(tray_id)
+        target = start + np.asarray([0.30, 0.0, 0.0])
+        adapter._begin_motion(
+            tray_id,
+            target,
+            0.0,
+            TrayOwner.S1,
+            TrayOwner.S2A,
+        )
+        adapter._advance_motion(tray_id, 0.20)
+        before_hold = adapter.tray_position(tray_id)
+
+        adapter._advance_motion(tray_id, 0.20, paused=True)
+        adapter._advance_motion(tray_id, 1.20, paused=True)
+        np.testing.assert_allclose(adapter.tray_position(tray_id), before_hold, atol=1.0e-12)
+
+        adapter._advance_motion(tray_id, 1.20, paused=False)
+        np.testing.assert_allclose(adapter.tray_position(tray_id), before_hold, atol=1.0e-12)
+        adapter._advance_motion(tray_id, 1.30)
+        assert np.linalg.norm(adapter.tray_position(tray_id) - before_hold) > 0.0
+    finally:
+        adapter.close()
+
+
+def test_local_brazing_rework_preserves_all_existing_beads_on_return() -> None:
+    """A local gap repair must never erase the already-applied bead layout."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="LOCAL_BRAZE_REWORK")
+        runtime.inject_fault("BRAZING_MISSING", target="path_02")
+        unit = runtime.units["LOCAL_BRAZE_REWORK_UNIT_01"]
+        observed_rework = False
+        for _ in range(5_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            local_rework = any(
+                operation.unit_id == unit.unit_id and operation.kind == "DISPENSING" and operation.recovery
+                for operation in runtime.operations.values()
+            )
+            if local_rework:
+                observed_rework = True
+                assert unit.tray_id is not None
+                visible = [
+                    adapter.component_visible(unit.tray_id, f"braze_{index:02d}")
+                    for index in range(1, 2 * unit.fin_count + 1)
+                ]
+                assert all(visible), "局部补涂开始时已有焊道不能整批消失"
+                break
+        assert observed_rework, "没有观察到托盘返回 S2A 后的局部补涂阶段"
     finally:
         adapter.close()
 

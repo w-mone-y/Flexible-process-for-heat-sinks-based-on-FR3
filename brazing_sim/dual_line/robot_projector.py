@@ -173,6 +173,8 @@ class V2RobotMotionProjector:
         self.model = model
         self.data = data
         self._set_component_visible = set_component_visible
+        self._paused_arms: set[str] = set()
+        self._paused_joint_positions: dict[str, np.ndarray] = {}
         self.controllers = {arm: ArmController(model, data, arm) for arm in ("arm1", "arm2", "arm3")}
         self._arm1_tools = QuickChangeToolManager(
             model,
@@ -520,9 +522,17 @@ class V2RobotMotionProjector:
         yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0])) + math.pi
         return origin, rotation, yaw
 
+    @staticmethod
+    def _active_fin_index(unit: "V2UnitState") -> int:
+        return int(unit.rework_fin_index or (int(unit.fins_installed) + 1))
+
+    @classmethod
+    def _fin_operation_completes_unit(cls, unit: "V2UnitState") -> bool:
+        return unit.rework_fin_index is not None or cls._active_fin_index(unit) >= int(unit.fin_count)
+
     def _raw_fin_position(self, arm_name: str, unit: "V2UnitState") -> np.ndarray:
         branch = "a" if arm_name == "arm1" else "b"
-        index = min(int(unit.fins_installed) + 1, 12)
+        index = min(self._active_fin_index(unit), 12)
         geom = self.data.geom(f"v2_fin_{branch}_raw_fin_{index:02d}")
         return np.asarray(geom.xpos, dtype=float).copy()
 
@@ -613,7 +623,7 @@ class V2RobotMotionProjector:
             return
         branch = "a" if arm_name == "arm1" else "b"
         half_size = np.asarray(geometry.fin_size_m, dtype=float) / 2.0
-        picked_index = int(unit.fins_installed) + 1
+        picked_index = self._active_fin_index(unit)
         v1_positions = tuple(
             SHALLOW_U_LAYOUT.raw_fin_position(
                 index,
@@ -768,7 +778,7 @@ class V2RobotMotionProjector:
                     stop=index == descent_samples,
                 )
             )
-        if station_name == "S3B" and int(unit.fins_installed) + 1 >= int(unit.fin_count):
+        if station_name == "S3B" and self._fin_operation_completes_unit(unit):
             # The lower-branch rail starts beside S3B.  Completing the final
             # insertion while the hybrid gripper is still over the pallet
             # lets the tray leave underneath the fingers.  Make clearance a
@@ -912,7 +922,7 @@ class V2RobotMotionProjector:
                     unit,
                     source=self._raw_fin_position(arm_name, unit),
                     goal=geometry.world_fin_target(
-                        unit.fins_installed,
+                        self._active_fin_index(unit) - 1,
                         origin=origin,
                         rotation=rotation,
                     ),
@@ -929,26 +939,49 @@ class V2RobotMotionProjector:
             geometry = V2ProcessGeometry.for_preset(unit.preset)
             origin, rotation, yaw = self._tray_frame(unit)
             points: list[_Waypoint] = []
-            for pass_index in range(unit.fin_count):
+            local_target = (
+                int(operation.recovery_target_index)
+                if operation.recovery_strategy == "LOCAL_BRAZING_REWORK"
+                and operation.recovery_target_index is not None
+                else None
+            )
+            pass_indices = (
+                (max(0, (local_target - 1) // 2),) if local_target is not None else range(unit.fin_count)
+            )
+            for pass_index in pass_indices:
                 dispense_pass = geometry.world_dispense_pass(
                     pass_index,
                     origin=origin,
                     rotation=rotation,
                 )
                 start, end = dispense_pass.start.copy(), dispense_pass.end.copy()
-                if pass_index % 2:
+                if local_target is not None:
+                    # The defect visual retains the first 36% of a missing
+                    # path.  Move one enabled nozzle only over the missing tail;
+                    # the paired nozzle is treated as shut off for touch-up.
+                    if operation.recovery_fault_type == "BRAZING_MISSING":
+                        start = start + 0.36 * (end - start)
+                elif pass_index % 2:
                     start, end = end, start
                 hover = start + rotation @ np.asarray([0.0, 0.0, 0.045 if points else 0.080])
                 points.append(
                     _Waypoint(
                         _top_down_pose(hover, yaw=yaw),
-                        f"S2A 第{pass_index + 1}道安全接近",
+                        (
+                            f"S2A {local_target:02d}号焊道局部补涂安全接近"
+                            if local_target is not None
+                            else f"S2A 第{pass_index + 1}道安全接近"
+                        ),
                     )
                 )
                 points.append(
                     _Waypoint(
                         _top_down_pose(start, yaw=yaw),
-                        f"S2A 第{pass_index + 1}道起点精确对准",
+                        (
+                            f"S2A {local_target:02d}号焊道缺口起点精确对准（关闭非目标喷嘴）"
+                            if local_target is not None
+                            else f"S2A 第{pass_index + 1}道起点精确对准"
+                        ),
                     )
                 )
                 # V1 uses a dense 3 mm Cartesian chain for every bead.  This
@@ -962,7 +995,11 @@ class V2RobotMotionProjector:
                     points.append(
                         _Waypoint(
                             _top_down_pose(position, yaw=yaw),
-                            f"S2A 第{pass_index + 1}道双喷嘴连续涂覆",
+                            (
+                                f"S2A {local_target:02d}号焊道局部连续补涂"
+                                if local_target is not None
+                                else f"S2A 第{pass_index + 1}道双喷嘴连续涂覆"
+                            ),
                             stop=sample_index == sample_count,
                         )
                     )
@@ -970,7 +1007,11 @@ class V2RobotMotionProjector:
                 points.append(
                     _Waypoint(
                         _top_down_pose(lift, yaw=yaw),
-                        f"S2A 第{pass_index + 1}道完成后抬枪",
+                        (
+                            f"S2A {local_target:02d}号焊道补涂完成后抬枪"
+                            if local_target is not None
+                            else f"S2A 第{pass_index + 1}道完成后抬枪"
+                        ),
                     )
                 )
             return "arm2_dispenser", tuple(points)
@@ -1018,7 +1059,7 @@ class V2RobotMotionProjector:
                     unit,
                     source=source,
                     goal=geometry.world_fin_target(
-                        unit.fins_installed,
+                        self._active_fin_index(unit) - 1,
                         origin=origin,
                         rotation=rotation,
                     ),
@@ -1376,7 +1417,7 @@ class V2RobotMotionProjector:
             not failure
             and arm_name == "arm3"
             and operation.kind == "INSTALL_FIN"
-            and int(unit.fins_installed) + 1 >= int(unit.fin_count)
+            and self._fin_operation_completes_unit(unit)
             and len(goals) == len(waypoints)
         ):
             # Finish the final B-line task on the physically certified
@@ -1386,7 +1427,15 @@ class V2RobotMotionProjector:
             goals[-1] = self.ARM3_BRANCH_CLEAR_QPOS.copy()
         start = np.asarray(self.data.qpos[controller.qpos_ids], dtype=float).copy()
         first_goal = start if not goals else goals[0]
-        points_per_pass = len(waypoints) // unit.fin_count if operation.kind == "DISPENSING" else 0
+        points_per_pass = (
+            (
+                len(waypoints)
+                if operation.recovery_strategy == "LOCAL_BRAZING_REWORK"
+                else len(waypoints) // unit.fin_count
+            )
+            if operation.kind == "DISPENSING"
+            else 0
+        )
         # Fast/headless rehearsals preserve the same quintic paths and stop
         # points while compressing Cartesian dwell.  The previous 2.5 scale
         # left the collision-safe branch reservation just outside the
@@ -1446,7 +1495,7 @@ class V2RobotMotionProjector:
             fin_thickness_m=fin_thickness_m,
             fin_clamp_position_m=fin_clamp_position_m,
             tray_id=(unit.tray_id if operation.kind in {"BASE_LOADING", "INSTALL_FIN"} else None),
-            fin_index=(int(unit.fins_installed) + 1 if operation.kind == "INSTALL_FIN" else None),
+            fin_index=(self._active_fin_index(unit) if operation.kind == "INSTALL_FIN" else None),
         )
 
     def _start_continuous_path(
@@ -1715,6 +1764,21 @@ class V2RobotMotionProjector:
     def sync(self, runtime: "DualLineRuntime") -> None:
         for arm_name, controller in self.controllers.items():
             operation = runtime.operations.get(arm_name.upper())
+            resource_paused = not runtime.faults.resource_available(arm_name.upper())
+            if resource_paused:
+                self._paused_arms.add(arm_name)
+                held = self._paused_joint_positions.setdefault(
+                    arm_name,
+                    np.asarray(self.data.qpos[controller.qpos_ids], dtype=float).copy(),
+                )
+                self.data.qpos[controller.qpos_ids] = held
+                self.data.qvel[controller.dof_ids] = 0.0
+                controller.hold()
+                self.data.ctrl[controller.actuator_ids] = held
+                self._target_label[arm_name] = "故障隔离：保持当前安全位姿"
+                continue
+            self._paused_arms.discard(arm_name)
+            self._paused_joint_positions.pop(arm_name, None)
             if operation is None:
                 idle_transform = {
                     "arm2": "arm2_dispenser",
@@ -1782,6 +1846,12 @@ class V2RobotMotionProjector:
     def control_tick(self, dt: float) -> None:
         timestep = float(dt)
         for arm_name, controller in self.controllers.items():
+            if arm_name in self._paused_arms:
+                held = self._paused_joint_positions[arm_name]
+                self.data.qpos[controller.qpos_ids] = held
+                self.data.qvel[controller.dof_ids] = 0.0
+                self.data.ctrl[controller.actuator_ids] = held
+                continue
             plan = self._plans[arm_name]
             if plan is None or plan.failure:
                 continue
@@ -1852,6 +1922,23 @@ class V2RobotMotionProjector:
                 minimum_s=plan.minimum_segment_s,
                 speed_scale=plan.motion_speed_scale,
             )
+
+    def enforce_paused_state(self) -> None:
+        """Project a faulted arm back onto its certified frozen joint state.
+
+        MuJoCo's position actuator can move a few millimetres while dissipating
+        pre-fault inertia.  A safety isolation is stricter than ordinary servo
+        settling, so the held state is re-applied after every physics substep.
+        """
+
+        if not self._paused_joint_positions:
+            return
+        for arm_name, held in self._paused_joint_positions.items():
+            controller = self.controllers[arm_name]
+            self.data.qpos[controller.qpos_ids] = held
+            self.data.qvel[controller.dof_ids] = 0.0
+            self.data.ctrl[controller.actuator_ids] = held
+        self.mujoco.mj_forward(self.model, self.data)
 
     def operation_complete(self, resource: str, unit_id: str, kind: str) -> bool:
         arm_name = str(resource).strip().lower()
@@ -1991,6 +2078,8 @@ class V2RobotMotionProjector:
             for actuator_id in actuator_ids:
                 self.data.ctrl[actuator_id] = 0.0
         self._arm1_tools.reset_to_rack()
+        self._paused_arms.clear()
+        self._paused_joint_positions.clear()
         for arm_name, controller in self.controllers.items():
             controller.hold()
             self._plans[arm_name] = None
@@ -2018,7 +2107,7 @@ class V2RobotMotionProjector:
                 position_error, orientation_error = 0.0, 0.0
                 rigid_position_error, rigid_orientation_error = 0.0, 0.0
                 waypoint_index, waypoint_count = 0, 0
-                complete, failure = False, ""
+                complete, failure, progress = False, "", 0.0
             else:
                 target_index = min(plan.waypoint_index, len(plan.waypoints) - 1)
                 actual_tcp = pose_from_site(
@@ -2037,14 +2126,24 @@ class V2RobotMotionProjector:
                 waypoint_index = plan.waypoint_index + 1
                 waypoint_count = len(plan.waypoints)
                 complete, failure = plan.complete, plan.failure
+                unit_id, operation_kind = plan.operation_key.rsplit(":", 1)
+                progress = self.operation_progress(
+                    arm_name,
+                    unit_id,
+                    operation_kind,
+                )
             result[arm_name] = {
                 "mode": "V1_COMPATIBLE_JOINT_PLAYBACK",
                 "planner": "POSE_LOCKED_CARTESIAN_QUINTIC",
                 "operation": self._active_operation[arm_name],
                 "target_zh": (
-                    plan.waypoints[min(plan.waypoint_index, len(plan.waypoints) - 1)].label_zh
-                    if plan is not None and not plan.failure and not plan.complete
-                    else self._target_label[arm_name]
+                    self._target_label[arm_name]
+                    if arm_name in self._paused_arms
+                    else (
+                        plan.waypoints[min(plan.waypoint_index, len(plan.waypoints) - 1)].label_zh
+                        if plan is not None and not plan.failure and not plan.complete
+                        else self._target_label[arm_name]
+                    )
                 ),
                 "joint_positions": np.asarray(
                     self.data.qpos[controller.qpos_ids],
@@ -2069,6 +2168,7 @@ class V2RobotMotionProjector:
                 ),
                 "waypoint_index": waypoint_index,
                 "waypoint_count": waypoint_count,
+                "progress": progress,
                 "physical_complete": complete,
                 "grasp_verified": False if plan is None else plan.grasp_verified,
                 "release_verified": False if plan is None else plan.release_verified,

@@ -20,6 +20,9 @@
 - [项目目录说明](architecture/项目目录说明.md)
 - [视觉模型与资产说明](architecture/视觉模型与资产说明.md)
 - [V2 双安装支路规格](specs/v2-dual-install-line.md)
+- [数据驱动工艺与能力延迟绑定](specs/capability-driven-flexibility.md)
+- [换型建模、序列相关设置时间与 KPI](specs/changeover-modelling.md)
+- [V2 扰动柔性与控制台接通](specs/v2-disturbance-flexibility.md)
 - [V1/V2 实测效率报告](../benchmarks/results/2026-07-29-v1-v2/comparison.md)
 - [Arm2 在整体流程中的任务](process/Arm2%20在整体流程中的任务.md)
 

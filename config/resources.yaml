@@ -1,3 +1,15 @@
+# 资源声明
+#
+# `capabilities`         —— 执行层 TaskType 白名单（既有字段，语义不变）
+# `process_capabilities` —— 能力本体名称 + 节拍系数 + 参数窗口 + 工具类别
+#                           （新增字段，供能力延迟绑定使用）
+# `tool_classes`         —— 每个物理工具属于哪个工具类别，用于满足
+#                           capabilities.yaml 的 requires_tool_class
+#
+# 两套字段并存：TaskType 白名单保证 V1/V2 现有派工语义不变；能力声明让
+# 调度器能在派工时刻按“谁能做、能做多快、参数是否在窗口内”算出候选集，
+# 而不是由任务图硬绑定单一资源。
+
 schema_version: 1
 zones:
   - ZONE_TABLE1
@@ -24,6 +36,9 @@ resources:
     resource_type: ROBOT
     current_tool: vacuum_gripper
     available_tools: [vacuum_gripper, parallel_gripper]
+    tool_classes:
+      vacuum_gripper: VACUUM
+      parallel_gripper: GRIPPER
     capabilities:
       - PICK_BASE_PLATE
       - PLACE_BASE_PLATE
@@ -32,26 +47,65 @@ resources:
       - INSTALL_FIN
       - REINSTALL_FIN
       - INDEX_MATERIAL_KIT
+    # Arm1 是专职安装资源：全节距可做，节拍系数 1.0 为基准。
+    process_capabilities:
+      - name: BASE_PICKING
+      - name: BASE_LOADING
+      - name: FIN_TOOL_CHANGE
+      - name: FIN_PICKING
+      - {name: FIN_ASSEMBLY, speed_factor: 1.0, preemptive: false,
+         param_limits: {fin_pitch_m: [0.010, 0.050]}}
   - resource_id: ARM2
     resource_type: ROBOT
     current_tool: brazing_dispenser
     available_tools: [brazing_dispenser]
+    tool_classes:
+      brazing_dispenser: DISPENSER
     capabilities: [DISPENSE_BRAZING, REWORK_BRAZING]
+    # 叉形双喷嘴永久安装，因此双喷嘴与单喷嘴两遍两条 OR 分支都能执行。
+    process_capabilities:
+      - name: MATERIAL_DISPENSING_DUAL
+      - name: MATERIAL_DISPENSING_SINGLE
   - resource_id: ARM3
     resource_type: ROBOT
     current_tool: inspection_camera
-    available_tools: [inspection_camera]
+    available_tools: [inspection_camera, narrow_gripper]
+    tool_classes:
+      inspection_camera: CAMERA
+      narrow_gripper: GRIPPER
     capabilities:
       - INSPECT_BRAZING
       - INSPECT_FINS
       - POST_BRAZE_INSPECTION
       - VERIFY_BASE_ALIGNMENT
       - SECOND_POST_BRAZE_VIEW
+      - INSTALL_FIN
+      - PICK_FIN
+    # Arm3 检测优先，空闲窗口兼职安装。窄夹爪比 Arm1 的平行夹爪更快
+    # （speed_factor 1.35），但只覆盖 15/20/30 mm 节距，40 mm 由 Arm1 独占。
+    # preemptive: false 表达“已夹住的单片翅片不可抢占”这一既有不变量。
+    process_capabilities:
+      - name: VISUAL_INSPECTION_BRAZING
+        preemptive: false
+      - name: VISUAL_INSPECTION_FINS
+        preemptive: false
+      - name: POST_BRAZE_VISION
+        preemptive: false
+      - name: POST_BRAZE_SECOND_VIEW
+      - name: FIN_PICKING
+      - {name: FIN_ASSEMBLY, speed_factor: 1.35, preemptive: false,
+         param_limits: {fin_pitch_m: [0.015, 0.030]}}
   - resource_id: FIXTURE
     resource_type: FIXTURE
     current_tool: null
     available_tools: []
     capabilities: [CONFIGURE_COMB, REMOVE_OLD_COMB, REMOVE_OLD_PRESS, APPLY_PRESS, LOCK_FIXTURE]
+    process_capabilities:
+      - name: COMB_CONFIGURATION
+      - name: PRESS_APPLICATION
+      - name: FIXTURE_LOCKING
+      - name: COMB_REMOVAL_AFTER_BRAZE
+      - name: PRESS_REMOVAL_AFTER_BRAZE
   - resource_id: TRANSFER_S1_S2A
     resource_type: TRANSFER
     current_tool: null
@@ -96,33 +150,68 @@ resources:
       - ROUTE_PASS
       - ROUTE_REWORK
       - ROUTE_SCRAP
+    process_capabilities:
+      - name: TRAY_OUTFEED
+      - name: ELEVATOR_POSITIONING
+      - name: RACK_LOADING
+      - name: RACK_LAYER_LOCKING
+      - name: RACK_UNLOADING
+      - name: DISPOSITION_ROUTING_PASS
+      - name: DISPOSITION_ROUTING_REWORK
+      - name: DISPOSITION_ROUTING_SCRAP
   - resource_id: ELEVATOR
     resource_type: TRANSFER
     current_tool: null
     available_tools: []
     capabilities: [MOVE_ELEVATOR, UNLOAD_RACK_LAYER, SAFE_HOME_TRANSFER]
+    process_capabilities:
+      - name: ELEVATOR_POSITIONING
+      - name: RACK_UNLOADING
   - resource_id: TRANSFER_FORK
     resource_type: TRANSFER
     current_tool: null
     available_tools: []
     capabilities: [LOAD_RACK_LAYER, UNLOAD_RACK_LAYER, SAFE_HOME_TRANSFER]
+    process_capabilities:
+      - name: RACK_LOADING
+      - name: RACK_UNLOADING
   - resource_id: RACK_LAYER_01
     resource_type: RACK_LAYER
     current_tool: null
     available_tools: []
     capabilities: [LOCK_RACK_LAYER]
+    process_capabilities:
+      - name: RACK_LAYER_LOCKING
   - resource_id: RACK_LAYER_02
     resource_type: RACK_LAYER
     current_tool: null
     available_tools: []
     capabilities: [LOCK_RACK_LAYER]
+    process_capabilities:
+      - name: RACK_LAYER_LOCKING
   - resource_id: RACK_LAYER_03
     resource_type: RACK_LAYER
     current_tool: null
     available_tools: []
     capabilities: [LOCK_RACK_LAYER]
+    process_capabilities:
+      - name: RACK_LAYER_LOCKING
   - resource_id: FURNACE
     resource_type: FURNACE
     current_tool: null
     available_tools: []
     capabilities: [BATCH_READY, RUN_FURNACE, FURNACE_INTERLOCK_CHECK]
+    process_capabilities:
+      - name: FURNACE_BATCH_GATE
+      - {name: FURNACE_BRAZING, preemptive: false}
+  # 固定视觉门架：焊料检测 OR 分支 FIXED_GANTRY 的承载资源。声明它使
+  # “不占用机械臂的检测路线”成为真实候选，而不是纸面选项。
+  - resource_id: FIXED_VISION_GANTRY
+    resource_type: SENSOR
+    current_tool: fixed_camera
+    available_tools: [fixed_camera]
+    tool_classes:
+      fixed_camera: FIXED_CAMERA
+    capabilities: [INSPECT_BRAZING]
+    process_capabilities:
+      - name: FIXED_VISION_BRAZING

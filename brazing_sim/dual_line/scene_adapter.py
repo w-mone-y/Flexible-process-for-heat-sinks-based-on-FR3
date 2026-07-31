@@ -14,6 +14,7 @@ from ..motion import HOME_QPOS
 from ..profiles import quintic_time_scaling
 from .process_geometry import TRAY_PAYLOAD_ORIGIN_Z_M, V2ProcessGeometry
 from .robot_projector import V2RobotMotionProjector
+from .fault_visuals import V2FaultVisualizer
 from .tray_flow import TrayOwner
 
 if TYPE_CHECKING:
@@ -25,7 +26,9 @@ _V1_COMB_POST_HALF_Y_M = 0.008
 _V1_COMB_GUIDE_HALF_X_M = 0.045
 _V1_COMB_LONGITUDINAL_CLEARANCE_M = 0.008
 _V1_COMB_LATERAL_CLEARANCE_M = 0.010
-_BRANCH_B_WEST_CLEAR_X_M = 0.05
+_BRANCH_B_CORNER_CLEAR_X_M = 0.15
+_BRANCH_B_WEST_CLEAR_X_M = 0.115
+_BRANCH_B_CORRIDOR_ENTRY_Y_M = -0.475
 _BRANCH_B_SOUTH_CLEAR_Y_M = -1.22
 
 
@@ -40,6 +43,7 @@ class _CarrierMotion:
     remaining_targets: deque[np.ndarray]
     segment_index: int
     segment_count: int
+    paused_at: float | None = None
 
 
 @dataclass(slots=True)
@@ -97,6 +101,9 @@ class DualLineSceneAdapter:
         # while allowing regression and batch rehearsals to compress wall
         # time without changing routes, ownership, or stop points.
         self._motion_speed_scale = 1.0
+        # Mirrors fault state into the rendered scene.  Owns the only MuJoCo
+        # dependency in V2's fault stack.
+        self.fault_visuals = V2FaultVisualizer(self)
         self._camera_renderer = None
         self._tray_ids = tuple(f"V2_TRAY_{index:02d}" for index in range(1, 7))
         self._body_names = {tray_id: tray_id.lower() for tray_id in self._tray_ids}
@@ -381,7 +388,14 @@ class DualLineSceneAdapter:
         )
         self._set_component_visible(tray_id, "base_plate", base_visible)
         fin_count = int(unit.fin_count)
-        if stage == "DISPENSING":
+        active_dispensing = runtime.operations.get("ARM2")
+        local_rework = bool(
+            stage == "DISPENSING"
+            and active_dispensing is not None
+            and active_dispensing.unit_id == unit.unit_id
+            and active_dispensing.recovery_strategy == "LOCAL_BRAZING_REWORK"
+        )
+        if stage == "DISPENSING" and not local_rework:
             progress = self._robots.operation_progress(
                 "ARM2",
                 unit.unit_id,
@@ -406,7 +420,7 @@ class DualLineSceneAdapter:
                         reverse=pass_index % 2 == 1,
                     )
         else:
-            material_visible = stage not in {
+            material_visible = local_rework or stage not in {
                 "QUEUED",
                 "BASE_LOADING",
                 "WAITING_S2A",
@@ -582,13 +596,36 @@ class DualLineSceneAdapter:
 
         branch_stations = {TrayOwner.INSTALL_A, TrayOwner.INSTALL_B}
         branch_waits = {TrayOwner.MERGE_A_WAIT, TrayOwner.MERGE_B_WAIT}
+        if source_owner is TrayOwner.S4 and target_owner in branch_stations:
+            # Camera-confirmed fin rework returns through the exact outbound
+            # corridor in reverse, staying on the 0.225 m transport plane.
+            if target_owner is TrayOwner.INSTALL_B:
+                return (
+                    np.asarray([1.55, _BRANCH_B_SOUTH_CLEAR_Y_M, float(start[2])]),
+                    np.asarray([_BRANCH_B_WEST_CLEAR_X_M, _BRANCH_B_SOUTH_CLEAR_Y_M, float(start[2])]),
+                    np.asarray([_BRANCH_B_WEST_CLEAR_X_M, _BRANCH_B_CORRIDOR_ENTRY_Y_M, float(start[2])]),
+                    np.asarray([_BRANCH_B_CORNER_CLEAR_X_M, float(final_target[1]), float(start[2])]),
+                    final_target.copy(),
+                )
+            return (
+                np.asarray([1.40, 0.50, float(start[2])]),
+                final_target.copy(),
+            )
         if source_owner in branch_stations and target_owner in branch_waits:
             if source_owner is TrayOwner.INSTALL_B:
                 return (
                     np.asarray(
                         [
-                            _BRANCH_B_WEST_CLEAR_X_M,
+                            _BRANCH_B_CORNER_CLEAR_X_M,
                             float(start[1]),
+                            float(start[2]),
+                        ],
+                        dtype=float,
+                    ),
+                    np.asarray(
+                        [
+                            _BRANCH_B_WEST_CLEAR_X_M,
+                            _BRANCH_B_CORRIDOR_ENTRY_Y_M,
                             float(start[2]),
                         ],
                         dtype=float,
@@ -605,6 +642,14 @@ class DualLineSceneAdapter:
                 )
             return (final_target.copy(),)
         if source_owner in branch_waits and target_owner is TrayOwner.MERGE:
+            if source_owner is TrayOwner.MERGE_B_WAIT:
+                # Stay east of Arm3 until the pallet is level with S4, then
+                # enter the inspection centre horizontally.  The former direct
+                # diagonal crossed Arm3 link3 with the complete comb/press load.
+                return (
+                    np.asarray([float(start[0]), float(final_target[1]), float(start[2])]),
+                    final_target.copy(),
+                )
             return (final_target.copy(),)
         if target_owner is TrayOwner.FURNACE:
             front_lift_low = np.asarray([2.75, 0.0, 0.225])
@@ -626,11 +671,26 @@ class DualLineSceneAdapter:
             )
         return (final_target.copy(),)
 
-    def _advance_motion(self, tray_id: str, now: float) -> None:
+    @staticmethod
+    def _motion_elapsed(motion: _CarrierMotion, now: float) -> float:
+        reference = float(motion.paused_at) if motion.paused_at is not None else float(now)
+        return max(0.0, reference - motion.started_at)
+
+    def _advance_motion(self, tray_id: str, now: float, *, paused: bool = False) -> None:
         motion = self._motions.get(tray_id)
         if motion is None:
             return
-        elapsed = max(0.0, now - motion.started_at)
+        if paused:
+            if motion.paused_at is None:
+                motion.paused_at = float(now)
+            return
+        if motion.paused_at is not None:
+            # Exclude the physical fault hold from the trajectory's elapsed
+            # time.  Otherwise the carrier would teleport to the point it would
+            # have reached while its lift/pusher was visibly stopped.
+            motion.started_at += max(0.0, float(now) - motion.paused_at)
+            motion.paused_at = None
+        elapsed = self._motion_elapsed(motion, now)
         fraction = min(1.0, elapsed / motion.duration_s)
         blend = quintic_time_scaling(fraction)
         self.data.mocap_pos[self._mocap_ids[tray_id]] = motion.start + blend * (motion.target - motion.start)
@@ -690,12 +750,23 @@ class DualLineSceneAdapter:
             )
 
     def _sync_furnace_mechanisms(self, runtime: "DualLineRuntime") -> None:
-        self.data.ctrl[self._actuators["v2_furnace_front_door_actuator"]] = (
-            0.56 if runtime.furnace.state.front_door_open else 0.0
+        door_hold = next(
+            (
+                operation
+                for operation in runtime.operations.values()
+                if operation.resource == "FURNACE_DOOR"
+                and (operation.fault_hold_remaining_s > 0.0 or operation.manual_hold_fault_ids)
+            ),
+            None,
         )
-        self.data.ctrl[self._actuators["v2_furnace_rear_door_actuator"]] = (
-            0.56 if runtime.furnace.state.rear_door_open else 0.0
-        )
+        front_target = 0.56 if runtime.furnace.state.front_door_open else 0.0
+        rear_target = 0.56 if runtime.furnace.state.rear_door_open else 0.0
+        if door_hold is not None and door_hold.kind.startswith("FURNACE_FRONT_"):
+            front_target = float(self.data.qpos[self._mechanism_qpos["v2_furnace_front_door_joint"]])
+        if door_hold is not None and door_hold.kind.startswith("FURNACE_REAR_"):
+            rear_target = float(self.data.qpos[self._mechanism_qpos["v2_furnace_rear_door_joint"]])
+        self.data.ctrl[self._actuators["v2_furnace_front_door_actuator"]] = front_target
+        self.data.ctrl[self._actuators["v2_furnace_rear_door_actuator"]] = rear_target
         self.data.ctrl[self._actuators["v2_finished_output_gate_actuator"]] = (
             0.50 if runtime.output_gate_open else 0.0
         )
@@ -728,7 +799,7 @@ class DualLineSceneAdapter:
                     1.0,
                     max(
                         0.0,
-                        (float(self.data.time) - motion.started_at) / max(motion.duration_s, 1.0e-9),
+                        self._motion_elapsed(motion, float(self.data.time)) / max(motion.duration_s, 1.0e-9),
                     ),
                 )
                 if motion.segment_index == 2:
@@ -747,7 +818,7 @@ class DualLineSceneAdapter:
                     1.0,
                     max(
                         0.0,
-                        (float(self.data.time) - motion.started_at) / max(motion.duration_s, 1.0e-9),
+                        self._motion_elapsed(motion, float(self.data.time)) / max(motion.duration_s, 1.0e-9),
                     ),
                 )
                 if motion.segment_index == 1:
@@ -793,7 +864,7 @@ class DualLineSceneAdapter:
             if route is None:
                 continue
             actuator_name, maximum = route
-            elapsed = max(0.0, now - motion.started_at)
+            elapsed = self._motion_elapsed(motion, now)
             fraction = min(1.0, elapsed / motion.duration_s)
             self.data.ctrl[self._route_actuators[actuator_name]] = maximum * quintic_time_scaling(fraction)
 
@@ -802,6 +873,7 @@ class DualLineSceneAdapter:
         self._motion_speed_scale = 3.0 if runtime.fast else 1.0
         if runtime is not self._bound_runtime or logical_now + 1.0e-9 < self._last_runtime_time:
             self._inspection_records.clear()
+            self.fault_visuals.reset()
         self._bound_runtime = runtime
         runtime.set_execution_gate(self)
         self._last_runtime_time = logical_now
@@ -842,11 +914,55 @@ class DualLineSceneAdapter:
                 if not self._pending_owners[tray_id] or self._pending_owners[tray_id][-1] is not owner:
                     self._pending_owners[tray_id].append(owner)
             self._last_owner[tray_id] = owner
-            self._advance_motion(tray_id, now)
+            unit_operation = next(
+                (
+                    operation
+                    for operation in runtime.operations.values()
+                    if unit is not None
+                    and operation.unit_id == unit.unit_id
+                    and operation.kind in {"FURNACE_LOAD_TRAY", "FURNACE_UNLOAD_TRAY"}
+                    and (operation.fault_hold_remaining_s > 0.0 or operation.manual_hold_fault_ids)
+                ),
+                None,
+            )
+            self._advance_motion(
+                tray_id,
+                now,
+                paused=unit_operation is not None,
+            )
             self._start_next_motion(runtime, tray_id, now)
         self._sync_furnace_mechanisms(runtime)
         self._sync_route_mechanisms()
         self._robots.sync(runtime)
+        # Apply fault geometry last: normal product/robot projection establishes
+        # the correct current pose first, then the latent defect modifies only
+        # its exact bead/fin.  This prevents normal visibility sync from erasing
+        # the defect one line later.
+        physical_faults = []
+        for defect in runtime.faults.physical_faults.values():
+            state = defect.as_dict()
+            operation = next(
+                (
+                    item
+                    for item in runtime.operations.values()
+                    if item.recovery
+                    and item.unit_id == defect.unit_id
+                    and item.recovery_target_index == defect.operation_index
+                ),
+                None,
+            )
+            if operation is not None:
+                state["repair_progress"] = self._robots.operation_progress(
+                    operation.resource,
+                    operation.unit_id,
+                    operation.kind,
+                )
+            physical_faults.append(state)
+        self.fault_visuals.sync(
+            [record.as_dict() for record in runtime.faults.faults.values()],
+            [unit.as_dict() for unit in runtime.units.values()],
+            physical_faults,
+        )
         self.mujoco.mj_forward(self.model, self.data)
 
     def step_physics(self, duration_s: float) -> None:
@@ -857,6 +973,7 @@ class DualLineSceneAdapter:
         for _ in range(steps):
             self._robots.control_tick(float(self.model.opt.timestep))
             self.mujoco.mj_step(self.model, self.data)
+            self._robots.enforce_paused_state()
 
     def tray_position(self, tray_id: str) -> np.ndarray:
         """Return the authoritative carrier position for route planning/UI."""
@@ -883,7 +1000,7 @@ class DualLineSceneAdapter:
 
         result: dict[str, dict[str, object]] = {}
         for tray_id, motion in sorted(self._motions.items()):
-            elapsed = max(0.0, float(self.data.time) - motion.started_at)
+            elapsed = self._motion_elapsed(motion, float(self.data.time))
             # Runtime simulation time and MuJoCo time advance together in the
             # application. During isolated adapter tests the mocap position is
             # the authoritative source, so derive progress geometrically.
