@@ -20,6 +20,7 @@
 <p>
   <a href="#quick-start"><strong>快速体验</strong></a> ·
   <a href="#version-choice">版本选择</a> ·
+  <a href="#animations">动态演示</a> ·
   <a href="#screenshots">真实画面</a> ·
   <a href="#flexibility">柔性能力</a> ·
   <a href="#benchmark">效率数据</a> ·
@@ -37,6 +38,7 @@
 |---|---|
 | ▶️ **第一次运行项目** | [三步启动 Viewer](#quick-start) |
 | 🔀 **体验多订单双支路 V2** | [选择 V2 并运行 A/B/C](#version-choice) |
+| 🎥 **先看机械臂怎么动** | [三段加速真实工艺动图](#animations) |
 | 🎬 **先看真实仿真效果** | [V1 / V2 实际画面对照](#screenshots) |
 | 🧩 **看懂项目如何体现“柔性”** | [柔性能力全景](#flexibility) |
 | 📈 **查看效率是否真的提升** | [V1 / V2 实测数据](#benchmark) |
@@ -123,6 +125,58 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
                                                      → 固定焊后检测
                                                      → 成品出口
 ```
+
+<a id="animations"></a>
+
+## 🎥 动态工艺速览
+
+> 下面的动图由真实 V2 运行时离屏采集，不是手动摆放模型或概念动画。
+> 为了让 GitHub 页面上的演示更紧凑，它们使用 `--fast` 演示节拍并抽帧加速；
+> **动图速度不用于 KPI 或真实生产节拍结论**。
+
+### 💧 Arm2 蛇形钎料涂覆
+
+<p align="center">
+  <img src="docs/images/readme/v2_dispensing_process.gif" alt="Arm2 双喷嘴沿参数化蛇形路径逐条涂覆钎料" width="800">
+</p>
+
+👉 喷嘴沿奇偶路径交替反向扫描，黄色钎料会随喷头前进逐段增长，
+已完成的路径保持在基板上，而不是一次性闪现出完整线条。
+
+### 🤖 Arm1 + Arm3 双支路并行安装
+
+<p align="center">
+  <img src="docs/images/readme/v2_parallel_install_process.gif" alt="Arm1 与 Arm3 在 S3A 和 S3B 两张托盘上并行安装翅片" width="800">
+</p>
+
+👉 左右两张托盘拥有独立的梳齿、翅片和任务状态。Arm3 遇到检测任务时保持
+检测优先；它处于空闲窗口时，才与 Arm1 分担逐片安装，因此这是调度结果，
+而不是两台机械臂的固定同步动画。
+
+### 🩹 钎料漏涂的“检出 → 返回 → 局部补涂”
+
+<p align="center">
+  <img src="docs/images/readme/v2_fault_recovery_process.gif" alt="S2B 检出钎料局部漏涂后托盘返回 S2A 由 Arm2 局部补涂" width="800">
+</p>
+
+👉 缺口先在涂覆阶段形成，到 S2B 检测后才进入恢复分支。返程中其他完好钎料
+继续保留，Arm2 只处理缺失区段，完成后再送往检测，体现“局部返工”而不是
+把整张基板重置后重播。
+
+<details>
+<summary><strong>🛠️ 开发者：如何重新生成这些动图？</strong></summary>
+
+```bash
+python scripts/capture_readme_gifs.py
+```
+
+采集脚本会根据 `DISPENSING`、双 `INSTALL_FIN` 和恢复任务的真实运行时状态
+自动确定起止时刻，最后使用 FFmpeg 生成 800×450、96 色的循环 GIF。
+这使 README 中的演示能随动作逻辑迭代而重新生成。
+
+</details>
+
+<p align="right"><a href="#top">回到顶部 ↑</a></p>
 
 <a id="screenshots"></a>
 
