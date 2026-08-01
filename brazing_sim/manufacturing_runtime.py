@@ -164,7 +164,6 @@ MANUAL_FAULT_TASK_TYPES: dict[FaultType, frozenset[TaskType]] = {
     FaultType.BRAZING_MISSING: frozenset({TaskType.INSPECT_BRAZING}),
     FaultType.BRAZING_PATH_DEVIATION: frozenset({TaskType.INSPECT_BRAZING}),
     FaultType.FIN_PICK_FAILED: frozenset({TaskType.PICK_FIN}),
-    FaultType.FIN_INSERT_FAILED: frozenset({TaskType.INSTALL_FIN}),
     FaultType.FIN_GEOMETRY_FAILED: frozenset({TaskType.INSPECT_FINS}),
     FaultType.ARM_UNAVAILABLE: frozenset(TaskType),
     FaultType.ELEVATOR_TIMEOUT: frozenset({TaskType.MOVE_ELEVATOR}),
@@ -787,7 +786,7 @@ class ManufacturingRuntime:
         if task.task_type is TaskType.PICK_FIN:
             return FaultType.FIN_PICK_FAILED
         if task.task_type in {TaskType.INSTALL_FIN, TaskType.INSPECT_FINS}:
-            return FaultType.FIN_INSERT_FAILED
+            return FaultType.FIN_GEOMETRY_FAILED
         if task.task_type is TaskType.MOVE_ELEVATOR:
             return FaultType.ELEVATOR_TIMEOUT
         if task.task_type in {TaskType.LOAD_RACK_LAYER, TaskType.UNLOAD_RACK_LAYER}:

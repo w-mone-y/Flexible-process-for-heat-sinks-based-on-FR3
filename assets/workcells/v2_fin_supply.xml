@@ -5,17 +5,10 @@
     <geom contype="0" conaffinity="0" density="0" group="1"/>
   </default>
   <asset>
-    <material name="rail_mat" rgba="0.15 0.18 0.22 1"/>
     <material name="fin_mat" rgba="0.73 0.76 0.80 1"/>
   </asset>
   <worldbody>
     <body name="magazine">
-      <geom name="magazine_back" type="box" size="0.175 0.115 0.010"
-            pos="0 0 0.002" material="rail_mat"/>
-      <geom name="magazine_front_rail" type="box" size="0.175 0.008 0.018"
-            pos="0 -0.112 0.008" material="rail_mat"/>
-      <geom name="magazine_rear_rail" type="box" size="0.175 0.008 0.018"
-            pos="0 0.112 0.008" material="rail_mat"/>
       <geom name="raw_fin_01" type="box" size="0.150 0.001 0.030" pos="0 -0.0950 0.030" material="fin_mat"/>
       <geom name="raw_fin_02" type="box" size="0.150 0.001 0.030" pos="0 -0.0777 0.030" material="fin_mat"/>
       <geom name="raw_fin_03" type="box" size="0.150 0.001 0.030" pos="0 -0.0605 0.030" material="fin_mat"/>

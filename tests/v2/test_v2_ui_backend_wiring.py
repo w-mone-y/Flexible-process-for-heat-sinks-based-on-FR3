@@ -16,10 +16,48 @@ from brazing_sim.dual_line.application import V2ControlSurface
 from brazing_sim.dual_line.presentation import V2StatePresenter
 from brazing_sim.dual_line.runtime import DualLineRuntime
 from brazing_sim.dual_line.tray_flow import TrayOwner
+from brazing_sim.ui import manual_review_popup_state
 
 
 def _state(runtime: DualLineRuntime) -> dict:
     return V2StatePresenter().present(runtime.snapshot(), simulation_speed=1.0, actual_rtf=1.0)
+
+
+def test_manual_review_popup_changes_from_waiting_to_success() -> None:
+    waiting = manual_review_popup_state(
+        {
+            "sim_time": 3.0,
+            "manual_review_notices": [
+                {
+                    "recovery_id": "R1",
+                    "fault_label_zh": "机械臂暂时离线",
+                    "status": "MANUAL_REVIEW",
+                    "message": "发生机械臂暂时离线故障❌，需进行人工审核🔩🔧，请稍作等待⏰",
+                    "complete_at": 10.0,
+                }
+            ],
+        }
+    )
+    assert waiting == {
+        "recovery_id": "R1",
+        "status": "MANUAL_REVIEW",
+        "message": "发生机械臂暂时离线故障❌，需进行人工审核🔩🔧，请稍作等待⏰\n预计剩余 7.0 秒",
+    }
+
+    succeeded = manual_review_popup_state(
+        {
+            "sim_time": 10.0,
+            "manual_review_notices": [
+                {
+                    "recovery_id": "R1",
+                    "status": "SUCCEEDED",
+                    "message": "修复成功✅",
+                    "complete_at": 10.0,
+                }
+            ],
+        }
+    )
+    assert succeeded == {"recovery_id": "R1", "status": "SUCCEEDED", "message": "修复成功✅"}
 
 
 @pytest.fixture(scope="module")

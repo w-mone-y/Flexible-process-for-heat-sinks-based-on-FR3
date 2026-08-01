@@ -146,7 +146,7 @@ def test_rack_layer_fault_reassigns_only_pending_unit() -> None:
 @pytest.mark.parametrize(
     ("task_type", "fault_type", "details"),
     [
-        ("INSTALL_FIN", FaultType.FIN_INSERT_FAILED, {"fin_id": "fin_01"}),
+        ("INSPECT_FINS", FaultType.FIN_GEOMETRY_FAILED, {"fin_id": "fin_01"}),
         ("MOVE_ELEVATOR", FaultType.ELEVATOR_TIMEOUT, {}),
         ("RUN_FURNACE", FaultType.FURNACE_DOOR_INTERLOCK, {}),
     ],

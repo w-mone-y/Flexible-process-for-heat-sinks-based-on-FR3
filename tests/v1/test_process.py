@@ -34,6 +34,12 @@ def test_happy_path_passes() -> None:
     assert coordinator.task_history.index(load) < coordinator.task_history.index(unload)
 
 
+def test_removed_fin_insert_fault_is_rejected_by_v1_coordinator() -> None:
+    coordinator = ProcessCoordinator(fast=True)
+    with pytest.raises(ValueError, match="unsupported fault type"):
+        coordinator.inject_fault("fin_insert", "fin_02")
+
+
 def test_material_pass_installs_comb_before_fin_assembly() -> None:
     coordinator = ProcessCoordinator(fast=True)
     coordinator.start_order("A", now=0.0, order_id="return-dispenser")
@@ -92,9 +98,9 @@ def test_material_fault_exists_before_arm3_inspection_starts() -> None:
     assert path.longest_gap_m > 0.0
 
 
-def test_fin_fault_exists_before_arm3_geometry_inspection_starts() -> None:
+def test_fin_pose_fault_exists_before_arm3_geometry_inspection_starts() -> None:
     coordinator = ProcessCoordinator(fast=True)
-    fault = coordinator.inject_fault("fin_insert", "fin_02")
+    fault = coordinator.inject_fault("fin_pose", "fin_02")
     product = coordinator.start_order("A", now=0.0, order_id="fault-before-fin-scan")
     now = 0.0
     while now < 25.0 and not fault.applied:
@@ -122,7 +128,6 @@ def test_fin_fault_exists_before_arm3_geometry_inspection_starts() -> None:
     [
         ("fin_pose", "fin_02", "fin"),
         ("fin_pick", "fin_02", "fin"),
-        ("fin_insert", "fin_02", "fin"),
         ("brazing_gap", "slot_02_left", "material"),
         ("brazing_deviation", "slot_02_left", "material"),
     ],

@@ -101,7 +101,9 @@ _PRESET_FIXTURE = {
 
 # Stages during which the tray's comb is fitted and the press is engaged.
 _COMB_INSTALLED_FROM = "WAITING_INSTALL"
-_PRESS_ENGAGED_FROM = "WAITING_S4"
+# S4 inspects the unpressed fin array.  Clamp bars engage only after that
+# camera operation has passed and the unit enters the furnace-buffer route.
+_PRESS_ENGAGED_FROM = "WAITING_BUFFER"
 _PRESS_RELEASED_FROM = "POST_BRAZE_INSPECTION"
 
 

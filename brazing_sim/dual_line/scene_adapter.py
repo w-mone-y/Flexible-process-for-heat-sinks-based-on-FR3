@@ -14,7 +14,11 @@ from ..motion import HOME_QPOS
 from ..profiles import quintic_time_scaling
 from .process_geometry import TRAY_PAYLOAD_ORIGIN_Z_M, V2ProcessGeometry
 from .robot_projector import V2RobotMotionProjector
-from .fault_visuals import V2FaultVisualizer
+from .fault_visuals import (
+    BRAZING_DEVIATION_REAPPLY_START,
+    BRAZING_DEVIATION_REMOVAL_END,
+    V2FaultVisualizer,
+)
 from .tray_flow import TrayOwner
 
 if TYPE_CHECKING:
@@ -209,6 +213,7 @@ class DualLineSceneAdapter:
             self.model,
             self.data,
             set_component_visible=self._set_component_visible,
+            restore_component_pose=self._restore_component_pose,
         )
 
     def _set_all_hidden(self) -> None:
@@ -235,6 +240,16 @@ class DualLineSceneAdapter:
         geom_id = self._component_geom_ids.get((tray_id, component))
         if geom_id is not None:
             self._set_geom_visible(geom_id, visible)
+
+    def _restore_component_pose(self, tray_id: str, component: str) -> None:
+        """Restore one tray component before a repaired visual handoff."""
+
+        geom_id = self._component_geom_ids.get((tray_id, component))
+        if geom_id is None:
+            return
+        self.model.geom_pos[geom_id] = self._original_geom_pos[geom_id]
+        self.model.geom_quat[geom_id] = self._original_geom_quat[geom_id]
+        self.model.geom_size[geom_id] = self._original_geom_size[geom_id]
 
     @staticmethod
     def _unit_for_tray(runtime: "DualLineRuntime", tray_id: str):
@@ -388,12 +403,16 @@ class DualLineSceneAdapter:
         )
         self._set_component_visible(tray_id, "base_plate", base_visible)
         fin_count = int(unit.fin_count)
-        active_dispensing = runtime.operations.get("ARM2")
-        local_rework = bool(
-            stage == "DISPENSING"
-            and active_dispensing is not None
-            and active_dispensing.unit_id == unit.unit_id
-            and active_dispensing.recovery_strategy == "LOCAL_BRAZING_REWORK"
+        # A detected braze defect belongs to the pallet for the whole physical
+        # recovery loop: S2B return, S2A queueing, local touch-up and S2B
+        # reinspection.  Tying this context only to the short Arm2 operation
+        # made the return interval look like a brand-new 0%-complete dispense
+        # pass, so every sound bead disappeared until Arm2 started moving.
+        local_rework = any(
+            defect.unit_id == unit.unit_id
+            and defect.status == "DETECTED"
+            and defect.visual_type in {"BRAZING_MISSING", "BRAZING_PATH_DEVIATION"}
+            for defect in runtime.faults.physical_faults.values()
         )
         if stage == "DISPENSING" and not local_rework:
             progress = self._robots.operation_progress(
@@ -468,13 +487,24 @@ class DualLineSceneAdapter:
             int(unit.fins_installed),
             self._robots.pending_installed_fin_index(unit.unit_id),
         )
+        missing_pick_indices = {
+            int(defect.operation_index)
+            for defect in runtime.faults.physical_faults.values()
+            if defect.unit_id == unit.unit_id
+            and defect.operation_index is not None
+            and defect.fault_type.value == "FIN_PICK_FAILED"
+            and defect.status in {"MANIFESTED", "DETECTED"}
+        }
+        pending_repaired_index = self._robots.pending_installed_fin_index(unit.unit_id)
         for index in range(1, visible_fin_count + 1):
-            self._set_component_visible(tray_id, f"fin_{index:02d}", True)
+            missing_from_failed_pick = index in missing_pick_indices and pending_repaired_index != index
+            self._set_component_visible(
+                tray_id,
+                f"fin_{index:02d}",
+                not missing_from_failed_pick
+                and not self._robots.rework_fin_owned_by_proxy(unit.unit_id, index),
+            )
         press_visible = stage in {
-            "WAITING_MERGE",
-            "MERGING",
-            "WAITING_S4",
-            "PRE_BRAZE_INSPECTION",
             "WAITING_BUFFER",
             "FURNACE_BUFFER",
             "FURNACE_LOADING",
@@ -952,11 +982,38 @@ class DualLineSceneAdapter:
                 None,
             )
             if operation is not None:
-                state["repair_progress"] = self._robots.operation_progress(
-                    operation.resource,
-                    operation.unit_id,
-                    operation.kind,
+                repaired_fin_committed = bool(
+                    operation.kind == "INSTALL_FIN"
+                    and defect.operation_index is not None
+                    and self._robots.pending_installed_fin_index(defect.unit_id)
+                    == int(defect.operation_index)
                 )
+                repair_progress = (
+                    1.0
+                    if repaired_fin_committed
+                    else self._robots.operation_progress(
+                        operation.resource,
+                        operation.unit_id,
+                        operation.kind,
+                    )
+                )
+                state["repair_progress"] = repair_progress
+                if defect.visual_type == "BRAZING_PATH_DEVIATION":
+                    state["removal_progress"] = float(
+                        np.clip(
+                            repair_progress / BRAZING_DEVIATION_REMOVAL_END,
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    state["reapply_progress"] = float(
+                        np.clip(
+                            (repair_progress - BRAZING_DEVIATION_REAPPLY_START)
+                            / (1.0 - BRAZING_DEVIATION_REAPPLY_START),
+                            0.0,
+                            1.0,
+                        )
+                    )
             physical_faults.append(state)
         self.fault_visuals.sync(
             [record.as_dict() for record in runtime.faults.faults.values()],

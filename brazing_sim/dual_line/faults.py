@@ -3,7 +3,7 @@
 Ported from V1's ``manufacturing_runtime`` + ``recovery`` pair, but rebuilt on
 V2's substrate.  Three things carry over unchanged because they earned it:
 
-*   **The catalogue** (:mod:`brazing_sim.fault_catalog`) — 14 fault codes with
+*   **The catalogue** (:mod:`brazing_sim.fault_catalog`) — operator fault codes with
     Chinese labels and payload validation, entirely scene-independent.
 *   **The fault/recovery data model** (:mod:`brazing_sim.recovery.fault_models`).
 *   **Deferred arming.**  V1's best idea: an operator injects a fault *before*
@@ -35,7 +35,6 @@ FAULT_MANIFEST_KINDS: dict[FaultType, frozenset[str]] = {
     FaultType.BRAZING_MISSING: frozenset({"DISPENSING"}),
     FaultType.BRAZING_PATH_DEVIATION: frozenset({"DISPENSING"}),
     FaultType.FIN_PICK_FAILED: frozenset({"INSTALL_FIN"}),
-    FaultType.FIN_INSERT_FAILED: frozenset({"INSTALL_FIN"}),
     FaultType.FIN_GEOMETRY_FAILED: frozenset({"INSTALL_FIN"}),
     FaultType.FURNACE_PROFILE: frozenset({"FURNACE_FRONT_CLOSE"}),
 }
@@ -44,7 +43,6 @@ FAULT_DETECTION_KINDS: dict[FaultType, frozenset[str]] = {
     FaultType.BRAZING_MISSING: frozenset({"MATERIAL_INSPECTION"}),
     FaultType.BRAZING_PATH_DEVIATION: frozenset({"MATERIAL_INSPECTION"}),
     FaultType.FIN_PICK_FAILED: frozenset({"PRE_BRAZE_INSPECTION"}),
-    FaultType.FIN_INSERT_FAILED: frozenset({"PRE_BRAZE_INSPECTION"}),
     FaultType.FIN_GEOMETRY_FAILED: frozenset({"PRE_BRAZE_INSPECTION"}),
     FaultType.FURNACE_PROFILE: frozenset({"POST_BRAZE_INSPECTION"}),
 }
@@ -86,19 +84,20 @@ FAULT_OPERATION_KINDS: dict[FaultType, frozenset[str]] = {
 _STRATEGIES: dict[FaultType, tuple[str, str | None, int]] = {
     FaultType.BRAZING_MISSING: ("LOCAL_BRAZING_REWORK", "MATERIAL_INSPECTION", 2),
     FaultType.BRAZING_PATH_DEVIATION: ("LOCAL_BRAZING_REWORK", "MATERIAL_INSPECTION", 2),
-    FaultType.FIN_PICK_FAILED: ("FIN_REINSTALL", "FIN_INSTALLATION", 2),
-    FaultType.FIN_INSERT_FAILED: ("FIN_REINSTALL", "FIN_INSTALLATION", 2),
+    FaultType.FIN_PICK_FAILED: ("MANUAL_REVIEW", None, 0),
     FaultType.FIN_GEOMETRY_FAILED: ("FIN_REINSTALL", "PRE_BRAZE_INSPECTION", 2),
     # Logistics/interlock faults hold the unit rather than rewinding a stage.
     FaultType.ELEVATOR_TIMEOUT: ("TRANSFER_SAFE_HOME_RETRY", None, 1),
     FaultType.FORK_TIMEOUT: ("TRANSFER_SAFE_HOME_RETRY", None, 1),
     FaultType.FURNACE_DOOR_INTERLOCK: ("FURNACE_INTERLOCK_RECHECK", None, 1),
     FaultType.FURNACE_PROFILE: ("MANUAL_REVIEW", None, 0),
-    FaultType.ARM_UNAVAILABLE: ("RESOURCE_REALLOCATION", None, 1),
+    FaultType.ARM_UNAVAILABLE: ("MANUAL_REVIEW", None, 0),
     FaultType.RACK_LAYER_UNAVAILABLE: ("RACK_LAYER_REALLOCATION", None, 1),
     FaultType.CONTACT_SAFETY_STOP: ("MANUAL_REVIEW", None, 0),
     FaultType.TRAY_STATE_INCONSISTENT: ("MANUAL_REVIEW", None, 0),
 }
+
+SIMULATED_MANUAL_REVIEW_SECONDS = 10.0
 
 # Extra work a rework costs, as a multiple of the reworked operation's nominal
 # duration.  Restarting the interrupted operation alone is not enough: a braze
@@ -265,6 +264,9 @@ class V2RecoveryPlan:
     created_at: float = 0.0
     completed_at: float | None = None
     message: str = ""
+    fault_label_zh: str = ""
+    manual_review_started_at: float | None = None
+    manual_review_complete_at: float | None = None
     # Set once the runtime has rewound the unit's stage machine, so a plan whose
     # rollback target equals the unit's current stage is not applied twice.
     rollback_applied: bool = False
@@ -291,6 +293,9 @@ class V2RecoveryPlan:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "message": self.message,
+            "fault_label_zh": self.fault_label_zh,
+            "manual_review_started_at": self.manual_review_started_at,
+            "manual_review_complete_at": self.manual_review_complete_at,
         }
 
 
@@ -361,6 +366,8 @@ class V2FaultController:
                 severity=request.severity,
                 auto_recover=request.auto_recover,
                 duration_s=request.duration_s,
+                label_zh=request.label_zh,
+                visual_type=request.visual_type,
             )
             request.status = "FIRED"
             request.lifecycle_status = "FIRED"
@@ -439,6 +446,8 @@ class V2FaultController:
                 severity=request.severity,
                 auto_recover=request.auto_recover,
                 duration_s=request.duration_s,
+                label_zh=request.label_zh,
+                visual_type=request.visual_type,
             )
             defect.status = "DETECTED"
             defect.detected_at = float(now)
@@ -490,6 +499,8 @@ class V2FaultController:
                     severity=request.severity,
                     auto_recover=request.auto_recover,
                     duration_s=request.duration_s,
+                    label_zh=request.label_zh,
+                    visual_type=request.visual_type,
                 )
                 request.status = "FIRED"
                 request.lifecycle_status = "DETECTED"
@@ -577,6 +588,8 @@ class V2FaultController:
         severity: str = "recoverable",
         auto_recover: bool = True,
         duration_s: float | None = None,
+        label_zh: str = "",
+        visual_type: str = "",
     ) -> FaultRecord:
         """Record a fault and plan its recovery."""
 
@@ -599,6 +612,8 @@ class V2FaultController:
                 "unit_id": unit_id,
                 "auto_recover": bool(auto_recover),
                 "duration_s": duration_s,
+                "label_zh": str(label_zh or resolved.value),
+                "visual_type": str(visual_type or resolved.value).strip().upper(),
             },
         )
         self.faults[record.fault_id] = record
@@ -606,8 +621,11 @@ class V2FaultController:
         # Safety faults always require an explicit operator verification.  An
         # ``auto_recover`` checkbox or a timeout must never clear a contact stop
         # or inconsistent tray ownership behind the operator's back.
+        simulated_manual_review = self._uses_simulated_manual_review(record)
         deadline = (
-            float(now) + float(duration_s) if auto_recover and duration_s and record.recoverable else None
+            float(now) + float(duration_s)
+            if auto_recover and duration_s and record.recoverable and not simulated_manual_review
+            else None
         )
         if resolved is FaultType.ARM_UNAVAILABLE:
             self.isolated_resources[(target or source).upper()] = deadline
@@ -632,6 +650,16 @@ class V2FaultController:
         strategy, rollback, retry_limit = _STRATEGIES.get(record.fault_type, ("MANUAL_REVIEW", None, 0))
         unit_id = record.details.get("unit_id")
         target = str(record.details.get("target", ""))
+        visual_type = str(record.details.get("visual_type", record.fault_type.value)).upper()
+
+        # FIN_POSE is the first catalogue item and keeps its automatic Arm3
+        # correction.  The sixth item uses the same typed runtime fault but is
+        # deliberately presented as FIN_GEOMETRY_FAILED and now goes to the
+        # simulated human review requested by the operator.
+        if record.fault_type is FaultType.FIN_GEOMETRY_FAILED and visual_type == "FIN_POSE":
+            strategy, rollback, retry_limit = "FIN_REINSTALL", "PRE_BRAZE_INSPECTION", 2
+        elif self._uses_simulated_manual_review(record):
+            strategy, rollback, retry_limit = "MANUAL_REVIEW", None, 0
 
         # Per-(strategy, unit, target) retry ceiling, as in V1: after the limit
         # the fault stops being auto-recoverable and goes to a human.
@@ -651,6 +679,8 @@ class V2FaultController:
         if not record.recoverable:
             strategy, rollback = "MANUAL_REVIEW", None
 
+        simulated_manual_review = strategy == "MANUAL_REVIEW" and self._uses_simulated_manual_review(record)
+        fault_label_zh = str(record.details.get("label_zh") or record.fault_type.value)
         self._recovery_sequence += 1
         plan = V2RecoveryPlan(
             recovery_id=f"V2REC_{self._recovery_sequence:04d}",
@@ -662,11 +692,71 @@ class V2FaultController:
             status=(RecoveryStatus.MANUAL_REVIEW if strategy == "MANUAL_REVIEW" else RecoveryStatus.RUNNING),
             retry_limit=max(1, retry_limit),
             created_at=float(now),
-            message="" if strategy != "MANUAL_REVIEW" else "已达重试上限或需要人工确认",
+            message=(
+                ""
+                if strategy != "MANUAL_REVIEW"
+                else f"发生{fault_label_zh}故障❌，需进行人工审核🔩🔧，请稍作等待⏰"
+            ),
+            fault_label_zh=fault_label_zh,
+            manual_review_started_at=(float(now) if strategy == "MANUAL_REVIEW" else None),
+            manual_review_complete_at=(
+                float(now) + SIMULATED_MANUAL_REVIEW_SECONDS if simulated_manual_review else None
+            ),
         )
         self.plans[plan.recovery_id] = plan
         record.recovery_id = plan.recovery_id
         return plan
+
+    @staticmethod
+    def _uses_simulated_manual_review(record: FaultRecord) -> bool:
+        visual_type = str(record.details.get("visual_type", record.fault_type.value)).upper()
+        return record.fault_type in {
+            FaultType.FURNACE_PROFILE,
+            FaultType.FIN_PICK_FAILED,
+            FaultType.ARM_UNAVAILABLE,
+        } or (record.fault_type is FaultType.FIN_GEOMETRY_FAILED and visual_type != "FIN_POSE")
+
+    def service_manual_reviews(self, now: float) -> list[V2RecoveryPlan]:
+        """Complete the explicitly simulated ten-second human repair window."""
+
+        completed: list[V2RecoveryPlan] = []
+        for plan in self.plans.values():
+            deadline = plan.manual_review_complete_at
+            if (
+                plan.status is not RecoveryStatus.MANUAL_REVIEW
+                or deadline is None
+                or float(now) + 1.0e-9 < deadline
+            ):
+                continue
+            record = self.faults.get(plan.fault_id)
+            if record is None:
+                continue
+            if record.fault_type is FaultType.ARM_UNAVAILABLE:
+                resource = str(record.details.get("target") or record.source).upper()
+                self.isolated_resources.pop(resource, None)
+            record.recovered = True
+            plan.status = RecoveryStatus.SUCCEEDED
+            plan.completed_at = float(now)
+            plan.message = "修复成功✅"
+            for request in self.pending.values():
+                if request.fault_id != record.fault_id:
+                    continue
+                request.status = "RECOVERED"
+                request.lifecycle_status = "RECOVERED"
+                request.recovered_at = float(now)
+            for defect in self.physical_faults.values():
+                if defect.fault_id != record.fault_id:
+                    continue
+                defect.status = "RECOVERED"
+                defect.repaired_at = float(now)
+                defect.recovered_at = float(now)
+                request = self.pending.get(defect.request_id)
+                if request is not None:
+                    request.status = "RECOVERED"
+                    request.lifecycle_status = "RECOVERED"
+                    request.recovered_at = float(now)
+            completed.append(plan)
+        return completed
 
     # ---------------------------------------------------------------- recovery
     def recover_resource(self, resource_id: str, now: float) -> bool:
@@ -675,6 +765,21 @@ class V2FaultController:
         resource = str(resource_id).upper()
         if resource not in self.isolated_resources:
             return False
+        for record in self.faults.values():
+            if (
+                record.fault_type is not FaultType.ARM_UNAVAILABLE
+                or record.recovered
+                or str(record.details.get("target", record.source)).upper() != resource
+            ):
+                continue
+            plan = self.plans.get(record.recovery_id or "")
+            if (
+                plan is not None
+                and plan.status is RecoveryStatus.MANUAL_REVIEW
+                and plan.manual_review_complete_at is not None
+                and float(now) + 1.0e-9 < plan.manual_review_complete_at
+            ):
+                return False
         del self.isolated_resources[resource]
         for record in self.faults.values():
             if (
@@ -923,7 +1028,8 @@ class V2FaultController:
             plan.status = RecoveryStatus.RUNNING
         elif verb == "manual_review":
             plan.status = RecoveryStatus.MANUAL_REVIEW
-            plan.message = "操作员转人工"
+            if plan.manual_review_complete_at is None:
+                plan.message = "操作员转人工"
         else:
             return False
         return True
@@ -978,6 +1084,18 @@ class V2FaultController:
         self._recovery_sequence = 0
 
     def snapshot(self) -> dict[str, Any]:
+        notices = [
+            {
+                "recovery_id": plan.recovery_id,
+                "fault_label_zh": plan.fault_label_zh,
+                "status": plan.status.value,
+                "message": plan.message,
+                "started_at": plan.manual_review_started_at,
+                "complete_at": plan.manual_review_complete_at,
+            }
+            for plan in self.plans.values()
+            if plan.manual_review_started_at is not None
+        ]
         return {
             "faults_v2": [record.as_dict() for record in self.faults.values()],
             "recoveries": [plan.as_dict() for plan in self.plans.values()],
@@ -989,6 +1107,7 @@ class V2FaultController:
                 "active": self.cell_hold_active,
                 "recover_at": self.cell_hold_until,
             },
+            "manual_review_notices": notices,
             "fault_count": len(self.faults),
             "recovered_fault_count": sum(1 for record in self.faults.values() if record.recovered),
         }

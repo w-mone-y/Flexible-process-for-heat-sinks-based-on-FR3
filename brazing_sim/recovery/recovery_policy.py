@@ -129,7 +129,6 @@ class RecoveryPolicy:
             tasks = [rework, inspect]
         elif fault.fault_type in {
             FaultType.FIN_PICK_FAILED,
-            FaultType.FIN_INSERT_FAILED,
             FaultType.FIN_GEOMETRY_FAILED,
         }:
             strategy = "FIN_REINSTALL"

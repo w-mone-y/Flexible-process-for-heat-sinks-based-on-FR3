@@ -136,6 +136,27 @@ def unique_order_id(preferred: str, unavailable: Iterable[str] = ()) -> str:
         number += 1
 
 
+def manual_review_popup_state(state: dict[str, Any]) -> dict[str, str] | None:
+    """Select and format the current nonblocking manual-review popup."""
+
+    notices = [item for item in state.get("manual_review_notices", ()) if isinstance(item, dict)]
+    active = [item for item in notices if item.get("status") == "MANUAL_REVIEW"]
+    succeeded = [item for item in notices if item.get("status") == "SUCCEEDED"]
+    if active:
+        item = active[-1]
+    elif succeeded:
+        item = succeeded[-1]
+    else:
+        return None
+    recovery_id = str(item.get("recovery_id", ""))
+    status = str(item.get("status", ""))
+    message = str(item.get("message", ""))
+    if status == "MANUAL_REVIEW" and item.get("complete_at") is not None:
+        remaining = max(0.0, float(item["complete_at"]) - float(state.get("sim_time", 0.0)))
+        message = f"{message}\n预计剩余 {remaining:.1f} 秒"
+    return {"recovery_id": recovery_id, "status": status, "message": message}
+
+
 def _place_task_graph_node(item: Any, x: float, y: float) -> None:
     """Move a node whose rectangle geometry is local to the item origin."""
 
@@ -217,6 +238,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             QHBoxLayout,
             QLabel,
             QLineEdit,
+            QMessageBox,
             QPushButton,
             QSpinBox,
             QTabWidget,
@@ -539,6 +561,9 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self._submitted_order_ids: set[str] = set()
             self._table_signatures: dict[int, tuple[tuple[str, ...], ...]] = {}
             self.segment_buttons: dict[str, Any] = {}
+            self._manual_review_dialog: Any | None = None
+            self._manual_review_recovery_id = ""
+            self._manual_review_success_seen: set[str] = set()
 
             controls = QGroupBox("单段流程控制")
             row = QHBoxLayout(controls)
@@ -1344,16 +1369,23 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 "CONTACT_SAFETY_STOP",
                 "TRAY_STATE_INCONSISTENT",
             }
+            simulated_manual_review = bool(definition.simulated_manual_review)
             severity_index = self.fault_severity_input.findData("severe" if safety_fault else "recoverable")
             if severity_index >= 0:
                 self.fault_severity_input.setCurrentIndex(severity_index)
-            self.fault_auto_recover.setChecked(not safety_fault)
+            self.fault_auto_recover.setChecked(not safety_fault and not simulated_manual_review)
             self.fault_hint.setText(
                 f"触发说明：{definition.hint_zh}\n"
-                "提示：点击后先进入等待；生产工序会形成可见缺陷，相机完成检测后才启动返工与复检。"
+                + (
+                    "提示：故障触发或被相机检出后，将弹出人工审核窗口并用10秒仿真时间模拟修复。"
+                    if simulated_manual_review
+                    else "提示：点击后先进入等待；生产工序会形成可见缺陷，相机完成检测后才启动返工与复检。"
+                )
             )
-            self.fault_duration_input.setEnabled(definition.supports_duration)
-            self.fault_auto_recover.setEnabled(definition.runtime_fault is not None and not safety_fault)
+            self.fault_duration_input.setEnabled(definition.supports_duration and not simulated_manual_review)
+            self.fault_auto_recover.setEnabled(
+                definition.runtime_fault is not None and not safety_fault and not simulated_manual_review
+            )
             self.recover_selected_arm.setEnabled(definition.target_kind == "arm")
             self._fault_target_signature = ()
             self._refresh_fault_targets(self.latest_state)
@@ -1512,10 +1544,40 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             except Exception as exc:
                 self.result.setText(f"request failed: {exc}")
 
+        def _sync_manual_review_popup(self, state: dict[str, Any]) -> None:
+            popup = manual_review_popup_state(state)
+            if popup is None:
+                if self._manual_review_dialog is not None:
+                    self._manual_review_dialog.close()
+                    self._manual_review_dialog = None
+                    self._manual_review_recovery_id = ""
+                return
+            recovery_id = popup["recovery_id"]
+            succeeded = popup["status"] == "SUCCEEDED"
+            if succeeded and recovery_id in self._manual_review_success_seen:
+                return
+            if self._manual_review_dialog is None or self._manual_review_recovery_id != recovery_id:
+                if self._manual_review_dialog is not None:
+                    self._manual_review_dialog.close()
+                self._manual_review_dialog = QMessageBox(self)
+                self._manual_review_dialog.setWindowTitle("人工审核")
+                self._manual_review_dialog.setWindowModality(Qt.WindowModal)
+                self._manual_review_recovery_id = recovery_id
+                self._manual_review_dialog.show()
+            self._manual_review_dialog.setText(popup["message"])
+            if succeeded:
+                self._manual_review_dialog.setIcon(QMessageBox.Information)
+                self._manual_review_dialog.setStandardButtons(QMessageBox.Ok)
+                self._manual_review_success_seen.add(recovery_id)
+            else:
+                self._manual_review_dialog.setIcon(QMessageBox.Warning)
+                self._manual_review_dialog.setStandardButtons(QMessageBox.NoButton)
+
         def refresh(self) -> None:
             try:
                 state = get_json(base_url + "/state", timeout=0.5)
                 self.latest_state = state
+                self._sync_manual_review_popup(state)
                 capabilities = state.get("ui_capabilities", {})
                 segment_capabilities = (
                     capabilities.get("segments", {}) if isinstance(capabilities, dict) else {}

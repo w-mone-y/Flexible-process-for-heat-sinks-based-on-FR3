@@ -281,6 +281,59 @@ def test_v2_gripper_stops_at_the_current_fin_thickness(
         adapter.close()
 
 
+def test_v2_both_fin_grippers_release_visibly_without_touching_adjacent_fins() -> None:
+    """Both branches open clearly in-slot while retaining neighbour clearance."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("C", order_id="RELEASE_ARM1_C")
+        runtime.submit_order("A", order_id="RELEASE_ARM3_A")
+        observed: dict[str, float] = {}
+        for _ in range(18_000):
+            runtime.tick(0.01)
+            adapter.sync(runtime)
+            adapter.step_physics(0.01)
+            for arm_name in ("arm1", "arm3"):
+                if arm_name in observed:
+                    continue
+                operation = runtime.operations.get(arm_name.upper())
+                state = adapter.robot_motion_snapshot()[arm_name]
+                if (
+                    operation is None
+                    or operation.kind != "INSTALL_FIN"
+                    or state["fin_index"] != 2
+                    or not state["release_verified"]
+                ):
+                    continue
+                expected_gap_m = float(state["fin_thickness_m"]) + 0.0020
+                assert float(state["finger_inner_gap_m"]) == pytest.approx(
+                    expected_gap_m,
+                    abs=0.00025,
+                )
+                unit = runtime.units[operation.unit_id]
+                assert unit.tray_id is not None
+                neighbour_id = int(adapter.model.geom(f"{unit.tray_id.lower()}_fin_01").id)
+                clearances = [
+                    _signed_aabb_clearance_m(
+                        adapter,
+                        int(adapter.model.geom(f"v2_{arm_name}_gripper_{side}").id),
+                        neighbour_id,
+                    )
+                    for side in ("left", "right")
+                ]
+                minimum_clearance_m = min(clearances)
+                assert minimum_clearance_m >= 0.0035
+                observed[arm_name] = minimum_clearance_m
+            if len(observed) == 2:
+                break
+
+        assert set(observed) == {"arm1", "arm3"}
+    finally:
+        adapter.close()
+
+
 def test_v2_base_pick_changes_colour_and_uses_a_vertical_sampled_descent() -> None:
     """Mirror V1's suction feedback and slow, pose-locked final placement."""
 

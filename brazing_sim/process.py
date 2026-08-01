@@ -84,7 +84,6 @@ class FaultSpec:
         if self.fault_type not in {
             "fin_pose",
             "fin_pick",
-            "fin_insert",
             "brazing_gap",
             "brazing_deviation",
             "furnace_profile",
@@ -437,7 +436,7 @@ class ProcessCoordinator:
         fault = (
             fault_type if isinstance(fault_type, FaultSpec) else FaultSpec(str(fault_type), target, severity)
         )
-        if fault.fault_type in {"fin_pose", "fin_pick", "fin_insert"} and not fault.target.startswith("fin_"):
+        if fault.fault_type in {"fin_pose", "fin_pick"} and not fault.target.startswith("fin_"):
             raise ValueError("fin fault target must be fin_XX")
         if fault.fault_type in {"brazing_gap", "brazing_deviation"} and not fault.target.startswith(
             ("slot_", "fin_")
@@ -834,7 +833,7 @@ class ProcessCoordinator:
         for fault in self.faults:
             if not fault.armed or fault.applied or fault.fault_type != kind:
                 continue
-            if kind in {"fin_pose", "fin_pick", "fin_insert"}:
+            if kind in {"fin_pose", "fin_pick"}:
                 if target_id is not None and fault.target != target_id:
                     continue
                 fin = next((item for item in self.product.active_fins if item.fin_id == fault.target), None)
@@ -844,10 +843,6 @@ class ProcessCoordinator:
                     offset = 0.050 if fault.severity == "recoverable" else 0.090
                     angle = 0.0
                     fin.root_gap_m = 0.020
-                elif kind == "fin_insert":
-                    offset = 0.009 if fault.severity == "recoverable" else 0.016
-                    angle = 10.0 if fault.severity == "recoverable" else 18.0
-                    fin.root_gap_m = 0.008 if fault.severity == "recoverable" else 0.016
                 else:
                     offset = 0.006 if fault.severity == "recoverable" else 0.012
                     angle = 6.0 if fault.severity == "recoverable" else 12.0
@@ -927,7 +922,7 @@ class ProcessCoordinator:
                 # Assembly faults originate at the corresponding Arm1 action.
                 # Arm3 later observes this already-existing physical defect;
                 # inspection must never be the moment that creates it.
-                for fault_kind in ("fin_pose", "fin_pick", "fin_insert"):
+                for fault_kind in ("fin_pose", "fin_pick"):
                     self._apply_armed_fault(fault_kind, target_id=fin_id)
         elif kind is TaskType.PRE_INSPECT:
             result = self.quality.pre_inspection(self.product, now)

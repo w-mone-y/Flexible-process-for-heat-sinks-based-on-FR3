@@ -13,6 +13,7 @@ from ..layout import SHALLOW_U_LAYOUT
 from ..motion import HOME_QPOS, ArmController, Pose, matrix_to_quat, pose_from_site
 from ..profiles import quintic_time_scaling
 from ..tools import QuickChangeToolManager, ToolSpec
+from .fault_visuals import FIN_POSE_LATERAL_OFFSET_M
 from .process_geometry import TRAY_PAYLOAD_ORIGIN_Z_M, V2ProcessGeometry
 
 if TYPE_CHECKING:
@@ -80,6 +81,10 @@ class _JointPlan:
     tray_id: str | None = None
     fin_index: int | None = None
     installed_fin_revealed: bool = False
+    rework_fin: bool = False
+    repair_fin: bool = False
+    manifested_fault_type: str = ""
+    grasp_failed: bool = False
     next_tool: str | None = None
 
 
@@ -127,7 +132,12 @@ class V2RobotMotionProjector:
     BASE_TRANSFER_SPEED_M_S = 0.18
     BASE_PLACE_SPEED_M_S = 0.035
     QUINTIC_PEAK_RATE = 1.875
-    FIN_RELEASE_CLEARANCE_M = 0.0008
+    # Open 1 mm per finger after insertion.  This is visibly larger than the
+    # former 0.4 mm stroke, while the narrowed fingers retain ample clearance
+    # to the 15 mm-pitch C product's neighbouring fins.
+    FIN_RELEASE_CLEARANCE_M = 0.0020
+    FIN_PICK_FAILURE_EXTRA_GAP_M = 0.006
+    LATERAL_FIN_FAULT_TYPES = frozenset({"FIN_POSE", "FIN_GEOMETRY_FAILED"})
     FINGER_CONTACT_TOLERANCE_M = 0.000075
     FIN_INSERT_SPEED_M_S = 0.025
     ARM1_TOOL_CHANGE_SEED = np.asarray(
@@ -166,6 +176,7 @@ class V2RobotMotionProjector:
         data: Any,
         *,
         set_component_visible: Callable[[str, str, bool], None] | None = None,
+        restore_component_pose: Callable[[str, str], None] | None = None,
     ) -> None:
         import mujoco
 
@@ -173,6 +184,7 @@ class V2RobotMotionProjector:
         self.model = model
         self.data = data
         self._set_component_visible = set_component_visible
+        self._restore_component_pose = restore_component_pose
         self._paused_arms: set[str] = set()
         self._paused_joint_positions: dict[str, np.ndarray] = {}
         self.controllers = {arm: ArmController(model, data, arm) for arm in ("arm1", "arm2", "arm3")}
@@ -368,6 +380,11 @@ class V2RobotMotionProjector:
         self._plans: dict[str, _JointPlan | None] = {arm: None for arm in self.controllers}
         self._active_operation: dict[str, str] = {arm: "" for arm in self.controllers}
         self._target_label: dict[str, str] = {arm: "等待任务" for arm in self.controllers}
+        # Exact latent fin defects currently present on a tray.  The cache is
+        # refreshed from runtime truth every scene sync so physical grasp
+        # behaviour can differ from a successful nominal operation without
+        # coupling the scene-independent fault controller to MuJoCo.
+        self._active_fin_faults: dict[tuple[str, int], str] = {}
 
     def _make_proxy(
         self,
@@ -446,13 +463,16 @@ class V2RobotMotionProjector:
         self,
         proxy_key: str,
         position: np.ndarray,
+        quaternion: np.ndarray | None = None,
     ) -> None:
         proxy = self._proxies[proxy_key]
         self.data.eq_active[proxy.grasp_weld_id] = 0
         self.data.eq_active[proxy.feed_weld_id] = 0
         address = proxy.qpos_address
         self.data.qpos[address : address + 3] = np.asarray(position, dtype=float)
-        self.data.qpos[address + 3 : address + 7] = (1.0, 0.0, 0.0, 0.0)
+        self.data.qpos[address + 3 : address + 7] = (
+            (1.0, 0.0, 0.0, 0.0) if quaternion is None else np.asarray(quaternion, dtype=float)
+        )
         self.data.qvel[proxy.dof_address : proxy.dof_address + 6] = 0.0
         self.mujoco.mj_forward(self.model, self.data)
         self._write_weld_relative(
@@ -536,6 +556,39 @@ class V2RobotMotionProjector:
         geom = self.data.geom(f"v2_fin_{branch}_raw_fin_{index:02d}")
         return np.asarray(geom.xpos, dtype=float).copy()
 
+    def _installed_fin_pose(self, unit: "V2UnitState") -> Pose:
+        if unit.tray_id is None:
+            raise RuntimeError(f"{unit.unit_id}翅片返工缺少托盘")
+        geom = self.data.geom(f"{unit.tray_id.lower()}_fin_{self._active_fin_index(unit):02d}")
+        return Pose(
+            np.asarray(geom.xpos, dtype=float).copy(),
+            matrix_to_quat(np.asarray(geom.xmat, dtype=float).reshape(3, 3)),
+        )
+
+    def _fin_install_goal(
+        self,
+        unit: "V2UnitState",
+        geometry: V2ProcessGeometry,
+        *,
+        origin: np.ndarray,
+        rotation: np.ndarray,
+    ) -> np.ndarray:
+        """Return the physical insertion target, including a latent slot miss."""
+
+        index = self._active_fin_index(unit)
+        goal = geometry.world_fin_target(
+            index - 1,
+            origin=origin,
+            rotation=rotation,
+        )
+        fault_type = self._active_fin_faults.get((unit.unit_id, index), "")
+        if fault_type in self.LATERAL_FIN_FAULT_TYPES:
+            goal = goal + rotation @ np.asarray(
+                [0.0, FIN_POSE_LATERAL_OFFSET_M, 0.0],
+                dtype=float,
+            )
+        return goal
+
     def _configure_nozzle_spacing(self, spacing_m: float) -> None:
         half_spacing = 0.5 * float(spacing_m)
         for side, sign in (("left", -1.0), ("right", 1.0)):
@@ -564,6 +617,14 @@ class V2RobotMotionProjector:
             raise RuntimeError("翅片释放缺少托盘可见所有权目标")
         if self._set_component_visible is None:
             raise RuntimeError("翅片释放缺少场景可见性适配器")
+        if plan.repair_fin and self._restore_component_pose is not None:
+            # A repaired fin is handed directly to the authored tray slot.
+            # Clear any still-rendered latent-defect offset before alpha is
+            # enabled so the release frame cannot sink, rise or snap.
+            self._restore_component_pose(
+                plan.tray_id,
+                f"fin_{plan.fin_index:02d}",
+            )
         self._set_component_visible(
             plan.tray_id,
             f"fin_{plan.fin_index:02d}",
@@ -601,6 +662,41 @@ class V2RobotMotionProjector:
             for plan in self._plans.values()
         )
 
+    def rework_fin_owned_by_proxy(self, unit_id: str, fin_index: int) -> bool:
+        """Whether the existing tray fin is currently represented by the arm proxy."""
+
+        for plan in self._plans.values():
+            if (
+                plan is None
+                or not plan.rework_fin
+                or plan.operation_key != f"{unit_id}:INSTALL_FIN"
+                or plan.fin_index != int(fin_index)
+                or plan.proxy_key is None
+            ):
+                continue
+            return bool(self._proxies[plan.proxy_key].visible)
+        return False
+
+    def _sync_active_fin_faults(self, runtime: "DualLineRuntime") -> None:
+        self._active_fin_faults = {
+            (defect.unit_id, int(defect.operation_index)): defect.fault_type.value
+            for defect in runtime.faults.physical_faults.values()
+            if defect.operation_index is not None
+            and defect.status in {"MANIFESTED", "DETECTED"}
+            and defect.fault_type.value.startswith("FIN_")
+        }
+
+    def _restore_failed_pick_to_source(self, plan: _JointPlan) -> None:
+        if plan.proxy_key is None or plan.fin_index is None:
+            raise RuntimeError("翅片抓取失败缺少原料代理所有权")
+        arm_name = plan.proxy_key.removesuffix("_fin")
+        branch = "a" if arm_name == "arm1" else "b"
+        # The fixed blank and temporary proxy occupy the same authored pose.
+        # Reveal the fixed blank first, then hide/release the proxy so the fin
+        # never follows the arm and never flashes out of the source magazine.
+        self._set_raw_fin_visible(branch, plan.fin_index, True)
+        self._release_proxy(plan)
+
     def _set_raw_fin_visible(self, branch: str, index: int, visible: bool) -> None:
         geom = self.model.geom(f"v2_fin_{branch}_raw_fin_{index:02d}")
         rgba = self._raw_fin_rgba[(branch, index)].copy()
@@ -613,6 +709,8 @@ class V2RobotMotionProjector:
         operation_kind: str,
         geometry: V2ProcessGeometry,
         unit: "V2UnitState",
+        *,
+        recovering_failed_pick: bool = False,
     ) -> None:
         if operation_kind == "BASE_LOADING":
             self.model.geom("v2_arm1_raw_base_proxy_geom").size[:3] = (
@@ -643,10 +741,15 @@ class V2RobotMotionProjector:
             # The proxy replaces the blank being picked in the same sync.
             # The remaining fixed blanks therefore show exactly the V1 kit
             # count without a duplicate at the active pickup slot.
+            failed_pick_waiting = (
+                self._active_fin_faults.get((unit.unit_id, index)) == "FIN_PICK_FAILED"
+                and not recovering_failed_pick
+            )
+            future_blank = not recovering_failed_pick and picked_index < index <= int(unit.fin_count)
             self._set_raw_fin_visible(
                 branch,
                 index,
-                picked_index < index <= int(unit.fin_count),
+                future_blank or failed_pick_waiting,
             )
         self.model.geom(f"v2_{arm_name}_raw_fin_proxy_geom").size[:3] = half_size
         self.mujoco.mj_forward(self.model, self.data)
@@ -817,6 +920,122 @@ class V2RobotMotionProjector:
                 )
         return tuple(waypoints)
 
+    def _fin_rework_waypoints(
+        self,
+        *,
+        source: np.ndarray,
+        goal: np.ndarray,
+        source_yaw: float,
+        goal_yaw: float,
+        safe_z: float,
+    ) -> tuple[_Waypoint, ...]:
+        """Reseat one existing S3B fin without visiting the raw-fin magazine."""
+
+        source = np.asarray(source, dtype=float)
+        goal = np.asarray(goal, dtype=float)
+        routing_z = max(float(safe_z), float(source[2]) + 0.105, float(goal[2]) + 0.105)
+        source_safe = np.asarray([source[0], source[1], routing_z], dtype=float)
+        goal_safe = np.asarray([goal[0], goal[1], routing_z], dtype=float)
+        waypoints: list[_Waypoint] = [
+            _Waypoint(
+                _top_down_pose(source_safe, yaw=source_yaw),
+                "S3B 缺陷翅片原槽位正上方对准",
+                interaction="open",
+            )
+        ]
+
+        pickup_distance = float(source_safe[2] - source[2])
+        pickup_samples = max(2, int(math.ceil(pickup_distance / 0.003)))
+        for index in range(1, pickup_samples + 1):
+            fraction = index / pickup_samples
+            position = source_safe + fraction * (source - source_safe)
+            waypoints.append(
+                _Waypoint(
+                    _top_down_pose(position, yaw=source_yaw),
+                    "S3B 缓慢纯Z下降夹取偏位翅片",
+                    stop=index == pickup_samples,
+                    interaction="grasp" if index == pickup_samples else "",
+                    cartesian_speed_m_s=self.FIN_INSERT_SPEED_M_S,
+                )
+            )
+
+        lift_samples = max(2, int(math.ceil(pickup_distance / 0.003)))
+        for index in range(1, lift_samples + 1):
+            fraction = index / lift_samples
+            position = source + fraction * (source_safe - source)
+            waypoints.append(
+                _Waypoint(
+                    _top_down_pose(position, yaw=source_yaw),
+                    "S3B 夹紧缺陷翅片后纯Z抬升",
+                    stop=False,
+                    cartesian_speed_m_s=self.FIN_INSERT_SPEED_M_S,
+                )
+            )
+
+        correction_distance = float(np.linalg.norm(goal_safe - source_safe))
+        yaw_distance = abs(float(goal_yaw - source_yaw))
+        correction_samples = max(
+            2,
+            int(math.ceil(correction_distance / 0.005)),
+            int(math.ceil(yaw_distance / math.radians(1.0))),
+        )
+        for index in range(1, correction_samples + 1):
+            fraction = index / correction_samples
+            position = source_safe + fraction * (goal_safe - source_safe)
+            yaw = source_yaw + fraction * (goal_yaw - source_yaw)
+            waypoints.append(
+                _Waypoint(
+                    _top_down_pose(position, yaw=yaw),
+                    "S3B 安全高度渐进纠偏并重新对准原槽位",
+                    stop=index == correction_samples,
+                )
+            )
+
+        descent_distance = float(goal_safe[2] - goal[2])
+        descent_samples = max(2, int(math.ceil(descent_distance / 0.0015)))
+        for index in range(1, descent_samples + 1):
+            fraction = index / descent_samples
+            position = goal_safe + fraction * (goal - goal_safe)
+            waypoints.append(
+                _Waypoint(
+                    _top_down_pose(position, yaw=goal_yaw),
+                    "S3B 重新对准后保持XY和角度纯Z回插",
+                    stop=index == descent_samples or index % 4 == 0,
+                    cartesian_speed_m_s=self.FIN_INSERT_SPEED_M_S,
+                )
+            )
+        waypoints.append(
+            _Waypoint(
+                _top_down_pose(goal, yaw=goal_yaw),
+                "S3B 原槽位复位完成并小行程松爪",
+                interaction="release",
+            )
+        )
+        for index in range(1, descent_samples + 1):
+            fraction = index / descent_samples
+            position = goal + fraction * (goal_safe - goal)
+            waypoints.append(
+                _Waypoint(
+                    _top_down_pose(position, yaw=goal_yaw),
+                    "S3B 修复后保持姿态纯Z撤离",
+                    stop=index == descent_samples,
+                )
+            )
+        park_position = np.asarray(self.ARM3_BRANCH_CLEAR_PARK_M, dtype=float)
+        park_distance = float(np.linalg.norm(park_position - goal_safe))
+        park_samples = max(2, int(math.ceil(park_distance / 0.010)))
+        for index in range(1, park_samples + 1):
+            fraction = index / park_samples
+            position = goal_safe + fraction * (park_position - goal_safe)
+            waypoints.append(
+                _Waypoint(
+                    _top_down_pose(position, yaw=goal_yaw),
+                    "S3B 翅片纠偏完成后退出托盘物流区",
+                    stop=index == park_samples,
+                )
+            )
+        return tuple(waypoints)
+
     def _operation_waypoints(
         self,
         arm_name: str,
@@ -921,8 +1140,9 @@ class V2RobotMotionProjector:
                 self._fin_waypoints(
                     unit,
                     source=self._raw_fin_position(arm_name, unit),
-                    goal=geometry.world_fin_target(
-                        self._active_fin_index(unit) - 1,
+                    goal=self._fin_install_goal(
+                        unit,
+                        geometry,
                         origin=origin,
                         rotation=rotation,
                     ),
@@ -948,6 +1168,37 @@ class V2RobotMotionProjector:
             pass_indices = (
                 (max(0, (local_target - 1) // 2),) if local_target is not None else range(unit.fin_count)
             )
+
+            def append_dense_path(
+                start: np.ndarray,
+                end: np.ndarray,
+                *,
+                approach_label: str,
+                start_label: str,
+                travel_label: str,
+                finish_label: str,
+            ) -> None:
+                hover = start + rotation @ np.asarray([0.0, 0.0, 0.045 if points else 0.080])
+                points.append(_Waypoint(_top_down_pose(hover, yaw=yaw), approach_label))
+                points.append(_Waypoint(_top_down_pose(start, yaw=yaw), start_label))
+                # V1 uses a dense 3 mm Cartesian chain for every bead.  This
+                # keeps the centre TCP and both physical nozzle tips on one
+                # authored straight line instead of asking the joint servo to
+                # approximate a line between sparse 10 mm targets.
+                sample_count = max(2, int(math.ceil(float(np.linalg.norm(end - start)) / 0.003)))
+                for sample_index in range(1, sample_count + 1):
+                    fraction = sample_index / sample_count
+                    position = start + fraction * (end - start)
+                    points.append(
+                        _Waypoint(
+                            _top_down_pose(position, yaw=yaw),
+                            travel_label,
+                            stop=sample_index == sample_count,
+                        )
+                    )
+                lift = end + rotation @ np.asarray([0.0, 0.0, 0.035])
+                points.append(_Waypoint(_top_down_pose(lift, yaw=yaw), finish_label))
+
             for pass_index in pass_indices:
                 dispense_pass = geometry.world_dispense_pass(
                     pass_index,
@@ -963,57 +1214,48 @@ class V2RobotMotionProjector:
                         start = start + 0.36 * (end - start)
                 elif pass_index % 2:
                     start, end = end, start
-                hover = start + rotation @ np.asarray([0.0, 0.0, 0.045 if points else 0.080])
-                points.append(
-                    _Waypoint(
-                        _top_down_pose(hover, yaw=yaw),
-                        (
+                if local_target is not None and operation.recovery_fault_type == "BRAZING_PATH_DEVIATION":
+                    append_dense_path(
+                        start,
+                        end,
+                        approach_label=f"S2A {local_target:02d}号偏轨钎料清除安全接近",
+                        start_label=f"S2A {local_target:02d}号偏轨钎料清除起点对准",
+                        travel_label=f"S2A {local_target:02d}号偏轨钎料从一端向另一端逐段清除",
+                        finish_label=f"S2A {local_target:02d}号偏轨钎料清除完成后抬枪",
+                    )
+                    append_dense_path(
+                        start,
+                        end,
+                        approach_label=f"S2A {local_target:02d}号目标焊道重新涂覆安全接近",
+                        start_label=f"S2A {local_target:02d}号目标焊道重新涂覆起点对准",
+                        travel_label=f"S2A {local_target:02d}号目标焊道从一端向另一端重新涂覆",
+                        finish_label=f"S2A {local_target:02d}号目标焊道重新涂覆完成后抬枪",
+                    )
+                else:
+                    append_dense_path(
+                        start,
+                        end,
+                        approach_label=(
                             f"S2A {local_target:02d}号焊道局部补涂安全接近"
                             if local_target is not None
                             else f"S2A 第{pass_index + 1}道安全接近"
                         ),
-                    )
-                )
-                points.append(
-                    _Waypoint(
-                        _top_down_pose(start, yaw=yaw),
-                        (
+                        start_label=(
                             f"S2A {local_target:02d}号焊道缺口起点精确对准（关闭非目标喷嘴）"
                             if local_target is not None
                             else f"S2A 第{pass_index + 1}道起点精确对准"
                         ),
-                    )
-                )
-                # V1 uses a dense 3 mm Cartesian chain for every bead.  This
-                # keeps the centre TCP and both physical nozzle tips on one
-                # authored straight line instead of asking the joint servo to
-                # approximate a line between sparse 10 mm targets.
-                sample_count = max(2, int(math.ceil(float(np.linalg.norm(end - start)) / 0.003)))
-                for sample_index in range(1, sample_count + 1):
-                    fraction = sample_index / sample_count
-                    position = start + fraction * (end - start)
-                    points.append(
-                        _Waypoint(
-                            _top_down_pose(position, yaw=yaw),
-                            (
-                                f"S2A {local_target:02d}号焊道局部连续补涂"
-                                if local_target is not None
-                                else f"S2A 第{pass_index + 1}道双喷嘴连续涂覆"
-                            ),
-                            stop=sample_index == sample_count,
-                        )
-                    )
-                lift = end + rotation @ np.asarray([0.0, 0.0, 0.035])
-                points.append(
-                    _Waypoint(
-                        _top_down_pose(lift, yaw=yaw),
-                        (
+                        travel_label=(
+                            f"S2A {local_target:02d}号焊道局部连续补涂"
+                            if local_target is not None
+                            else f"S2A 第{pass_index + 1}道双喷嘴连续涂覆"
+                        ),
+                        finish_label=(
                             f"S2A {local_target:02d}号焊道补涂完成后抬枪"
                             if local_target is not None
                             else f"S2A 第{pass_index + 1}道完成后抬枪"
                         ),
                     )
-                )
             return "arm2_dispenser", tuple(points)
         if arm_name == "arm3" and operation.kind == "MATERIAL_INSPECTION":
             geometry = V2ProcessGeometry.for_preset(unit.preset)
@@ -1052,17 +1294,49 @@ class V2RobotMotionProjector:
         if arm_name == "arm3" and operation.kind == "INSTALL_FIN":
             geometry = V2ProcessGeometry.for_preset(unit.preset)
             origin, rotation, tray_yaw = self._tray_frame(unit)
+            nominal_goal = geometry.world_fin_target(
+                self._active_fin_index(unit) - 1,
+                origin=origin,
+                rotation=rotation,
+            )
+            if (
+                operation.recovery_strategy == "FIN_REINSTALL"
+                and operation.recovery_fault_type != "FIN_PICK_FAILED"
+            ):
+                installed = self._installed_fin_pose(unit)
+                fin_rotation = installed.rotation
+                fin_yaw = math.atan2(float(fin_rotation[1, 0]), float(fin_rotation[0, 0]))
+                # A parallel gripper is pi-periodic.  Select the source
+                # orientation closest to the certified S3B insertion yaw so
+                # the correction is the small measured defect, never a 180°
+                # wrist spin.
+                yaw_delta = (fin_yaw - tray_yaw + 0.5 * math.pi) % math.pi - 0.5 * math.pi
+                source_yaw = tray_yaw + yaw_delta
+                return (
+                    "arm3_gripper",
+                    self._fin_rework_waypoints(
+                        source=installed.position,
+                        # Recovery must target the authored comb slot, not the
+                        # deliberately offset latent-fault insertion goal.
+                        goal=nominal_goal,
+                        source_yaw=source_yaw,
+                        goal_yaw=tray_yaw,
+                        safe_z=0.54,
+                    ),
+                )
+            goal = self._fin_install_goal(
+                unit,
+                geometry,
+                origin=origin,
+                rotation=rotation,
+            )
             source = self._raw_fin_position(arm_name, unit)
             return (
                 "arm3_gripper",
                 self._fin_waypoints(
                     unit,
                     source=source,
-                    goal=geometry.world_fin_target(
-                        self._active_fin_index(unit) - 1,
-                        origin=origin,
-                        rotation=rotation,
-                    ),
+                    goal=goal,
                     station_name="S3B",
                     safe_z=0.54,
                     # Arm3 faces the opposite branch, so π is the mirrored
@@ -1318,7 +1592,24 @@ class V2RobotMotionProjector:
     ) -> _JointPlan:
         controller = self.controllers[arm_name]
         geometry = V2ProcessGeometry.for_preset(unit.preset)
-        self._configure_raw_payload(arm_name, operation.kind, geometry, unit)
+        recovering_failed_pick = bool(
+            operation.kind == "INSTALL_FIN"
+            and operation.recovery_strategy == "FIN_REINSTALL"
+            and operation.recovery_fault_type == "FIN_PICK_FAILED"
+        )
+        rework_fin = bool(
+            operation.kind == "INSTALL_FIN"
+            and operation.recovery_strategy == "FIN_REINSTALL"
+            and not recovering_failed_pick
+        )
+        if not rework_fin:
+            self._configure_raw_payload(
+                arm_name,
+                operation.kind,
+                geometry,
+                unit,
+                recovering_failed_pick=recovering_failed_pick,
+            )
         if arm_name == "arm2" and operation.kind == "DISPENSING":
             self._configure_nozzle_spacing(geometry.nozzle_spacing_m)
         tool_name, waypoints = self._operation_waypoints(arm_name, operation, unit)
@@ -1335,10 +1626,29 @@ class V2RobotMotionProjector:
             self._prepare_proxy(proxy_key, supply)
         elif operation.kind == "INSTALL_FIN":
             proxy_key = f"{arm_name}_fin"
-            self._prepare_proxy(
-                proxy_key,
-                self._raw_fin_position(arm_name, unit),
-            )
+            if rework_fin:
+                installed = self._installed_fin_pose(unit)
+                self._prepare_proxy(
+                    proxy_key,
+                    installed.position,
+                    installed.quaternion,
+                )
+                if unit.tray_id is None or self._set_component_visible is None:
+                    raise RuntimeError("翅片原槽位返工缺少托盘可见性适配器")
+                # The proxy takes over the exact existing fin pose in the same
+                # scene sync.  Hiding only this target avoids both duplication
+                # and the one-frame disappearance produced by replacing the
+                # whole installed-fin set.
+                self._set_component_visible(
+                    unit.tray_id,
+                    f"fin_{self._active_fin_index(unit):02d}",
+                    False,
+                )
+            else:
+                self._prepare_proxy(
+                    proxy_key,
+                    self._raw_fin_position(arm_name, unit),
+                )
         fin_thickness_m = float(geometry.fin_size_m[1]) if operation.kind == "INSTALL_FIN" else None
         fin_clamp_position_m = (
             self._fin_clamp_position(arm_name, fin_thickness_m) if fin_thickness_m is not None else None
@@ -1429,7 +1739,11 @@ class V2RobotMotionProjector:
         first_goal = start if not goals else goals[0]
         points_per_pass = (
             (
-                len(waypoints)
+                (
+                    len(waypoints) // 2
+                    if operation.recovery_fault_type == "BRAZING_PATH_DEVIATION"
+                    else len(waypoints)
+                )
                 if operation.recovery_strategy == "LOCAL_BRAZING_REWORK"
                 else len(waypoints) // unit.fin_count
             )
@@ -1496,6 +1810,8 @@ class V2RobotMotionProjector:
             fin_clamp_position_m=fin_clamp_position_m,
             tray_id=(unit.tray_id if operation.kind in {"BASE_LOADING", "INSTALL_FIN"} else None),
             fin_index=(self._active_fin_index(unit) if operation.kind == "INSTALL_FIN" else None),
+            rework_fin=rework_fin,
+            repair_fin=bool(operation.kind == "INSTALL_FIN" and operation.recovery),
         )
 
     def _start_continuous_path(
@@ -1700,13 +2016,23 @@ class V2RobotMotionProjector:
         if interaction not in {"open", "grasp", "release"}:
             return True
         closing = interaction == "grasp"
+        pick_failure = bool(
+            closing and plan.manifested_fault_type == "FIN_PICK_FAILED" and not plan.rework_fin
+        )
         if interaction == "open":
             target = 0.0
             duration = self.GRIPPER_RELEASE_SECONDS
         elif closing:
             if plan.fin_clamp_position_m is None:
                 raise RuntimeError("翅片夹紧缺少厚度驱动的夹爪目标")
-            target = plan.fin_clamp_position_m
+            target = (
+                max(
+                    0.0,
+                    plan.fin_clamp_position_m - 0.5 * self.FIN_PICK_FAILURE_EXTRA_GAP_M,
+                )
+                if pick_failure
+                else plan.fin_clamp_position_m
+            )
             duration = self.GRIPPER_CLOSE_SECONDS
         else:
             # As in V1, release with only a small finger stroke while still
@@ -1714,9 +2040,13 @@ class V2RobotMotionProjector:
             # pose, preventing a finger from sweeping through adjacent fins.
             if plan.fin_clamp_position_m is None:
                 raise RuntimeError("翅片释放缺少厚度驱动的夹爪目标")
-            target = max(
-                0.0,
-                plan.fin_clamp_position_m - 0.5 * self.FIN_RELEASE_CLEARANCE_M,
+            target = (
+                0.0
+                if plan.grasp_failed
+                else max(
+                    0.0,
+                    plan.fin_clamp_position_m - 0.5 * self.FIN_RELEASE_CLEARANCE_M,
+                )
             )
             duration = self.GRIPPER_RELEASE_SECONDS
         positions = np.asarray(
@@ -1750,18 +2080,27 @@ class V2RobotMotionProjector:
         if float(np.max(np.abs(positions - target))) > self.FINGER_CONTACT_TOLERANCE_M:
             return False
         if closing:
-            self._grasp_proxy(plan)
-            plan.grasp_verified = True
+            if pick_failure:
+                plan.grasp_failed = True
+                self._restore_failed_pick_to_source(plan)
+            else:
+                self._grasp_proxy(plan)
+                plan.grasp_verified = True
         elif interaction == "release":
-            # Make the tray-owned fin visible before the temporary grasp proxy
-            # is hidden.  Both occupy the same authored pose, so this is an
-            # atomic visual ownership handoff rather than a one-frame pop.
-            self._reveal_installed_fin(plan)
-            self._release_proxy(plan)
+            if plan.grasp_failed:
+                self._restore_failed_pick_to_source(plan)
+            else:
+                # Make the tray-owned fin visible before the temporary grasp
+                # proxy is hidden.  Both occupy the same authored pose, so this
+                # is an atomic visual ownership handoff rather than a one-frame
+                # pop.
+                self._reveal_installed_fin(plan)
+                self._release_proxy(plan)
             plan.release_verified = True
         return True
 
     def sync(self, runtime: "DualLineRuntime") -> None:
+        self._sync_active_fin_faults(runtime)
         for arm_name, controller in self.controllers.items():
             operation = runtime.operations.get(arm_name.upper())
             resource_paused = not runtime.faults.resource_available(arm_name.upper())
@@ -1833,6 +2172,40 @@ class V2RobotMotionProjector:
                     fast=bool(runtime.fast),
                 )
                 plan = self._plans[arm_name]
+            if (
+                plan is not None
+                and operation.kind == "INSTALL_FIN"
+                and not operation.recovery
+                and plan.fin_index is not None
+            ):
+                manifested = self._active_fin_faults.get(
+                    (operation.unit_id, plan.fin_index),
+                    "",
+                )
+                if manifested:
+                    newly_manifested = not plan.manifested_fault_type
+                    if (
+                        newly_manifested
+                        and manifested in self.LATERAL_FIN_FAULT_TYPES
+                        and not plan.grasp_verified
+                        and not plan.interaction_started
+                    ):
+                        # The runtime starts the physical operation one tick
+                        # before its latent defect request can match it.  The
+                        # first plan therefore targets the nominal slot.  At
+                        # this point the fin is still at the magazine, so it is
+                        # safe to rebuild from the measured arm pose and author
+                        # the complete carry/descent path toward the offset
+                        # slot miss instead of moving the settled fin later.
+                        unit = runtime.units[operation.unit_id]
+                        self._plans[arm_name] = self._build_plan(
+                            arm_name,
+                            operation,
+                            unit,
+                            fast=bool(runtime.fast),
+                        )
+                        plan = self._plans[arm_name]
+                    plan.manifested_fault_type = manifested
             if plan is not None and plan.failure:
                 self._target_label[arm_name] = plan.failure
             elif plan is not None and plan.complete:
@@ -1946,7 +2319,8 @@ class V2RobotMotionProjector:
         interaction_verified = bool(
             plan is not None
             and (
-                kind not in {"BASE_LOADING", "INSTALL_FIN"} or (plan.grasp_verified and plan.release_verified)
+                kind not in {"BASE_LOADING", "INSTALL_FIN"}
+                or ((plan.grasp_verified or plan.grasp_failed) and plan.release_verified)
             )
         )
         if plan is not None and plan.proxy_key is not None:
@@ -2140,9 +2514,13 @@ class V2RobotMotionProjector:
                     self._target_label[arm_name]
                     if arm_name in self._paused_arms
                     else (
-                        plan.waypoints[min(plan.waypoint_index, len(plan.waypoints) - 1)].label_zh
-                        if plan is not None and not plan.failure and not plan.complete
-                        else self._target_label[arm_name]
+                        "S3B 抓取失败：夹爪保持大间隙并空载前往槽位"
+                        if plan is not None and plan.grasp_failed and not plan.release_verified
+                        else (
+                            plan.waypoints[min(plan.waypoint_index, len(plan.waypoints) - 1)].label_zh
+                            if plan is not None and not plan.failure and not plan.complete
+                            else self._target_label[arm_name]
+                        )
                     )
                 ),
                 "joint_positions": np.asarray(
@@ -2171,6 +2549,8 @@ class V2RobotMotionProjector:
                 "progress": progress,
                 "physical_complete": complete,
                 "grasp_verified": False if plan is None else plan.grasp_verified,
+                "grasp_failed": False if plan is None else plan.grasp_failed,
+                "manifested_fault_type": "" if plan is None else plan.manifested_fault_type,
                 "release_verified": False if plan is None else plan.release_verified,
                 "finger_inner_gap_m": finger_inner_gap_m,
                 "fin_thickness_m": None if plan is None else plan.fin_thickness_m,

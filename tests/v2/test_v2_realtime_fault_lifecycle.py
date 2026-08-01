@@ -96,10 +96,10 @@ def test_brazing_rework_is_scoped_to_the_exact_path_not_the_whole_board() -> Non
     assert repair.duration_s < runtime.durations.dispensing
 
 
-def test_exact_fin_target_does_not_manifest_on_an_earlier_fin() -> None:
+def test_exact_fin_pose_target_does_not_manifest_on_an_earlier_fin() -> None:
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("A", order_id="TARGET_FIN")
-    runtime.inject_fault("FIN_INSERT_FAILED", target="fin_03")
+    runtime.inject_fault("FIN_POSE", target="fin_03")
 
     for _ in range(2_000):
         runtime.tick(0.02)
@@ -121,9 +121,7 @@ def test_exact_fin_target_does_not_manifest_on_an_earlier_fin() -> None:
     (
         ("BRAZING_MISSING", "path_02", "S2B", "S2A"),
         ("BRAZING_PATH_DEVIATION", "path_03", "S2B", "S2A"),
-        ("FIN_PICK_FAILED", "fin_02", "S4", None),
-        ("FIN_INSERT_FAILED", "fin_03", "S4", None),
-        ("FIN_GEOMETRY_FAILED", "fin_04", "S4", None),
+        ("FIN_POSE", "fin_04", "S4", None),
     ),
 )
 def test_quality_rework_physically_returns_to_the_process_station(

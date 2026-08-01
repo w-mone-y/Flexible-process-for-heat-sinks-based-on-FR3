@@ -12,6 +12,7 @@ from brazing_sim.dual_line import (
     TrayOwner,
     V2ProcessGeometry,
 )
+from brazing_sim.recovery.fault_models import RecoveryStatus
 
 ROOT = Path(__file__).resolve().parents[2]
 V2_XML = ROOT / "scenes" / "production" / "brazing_line_v2.xml"
@@ -155,7 +156,9 @@ def test_offline_arm_freezes_its_physical_joint_path_until_recovered() -> None:
         assert float(held["progress"]) == pytest.approx(before_progress)
         assert "故障隔离" in str(held["target_zh"])
 
-        assert runtime.recover_resource("ARM1")
+        assert not runtime.recover_resource("ARM1")
+        runtime.tick(10.0)
+        assert runtime.faults.resource_available("ARM1")
         adapter.sync(runtime)
         for _ in range(10):
             adapter.step_physics(0.01)
@@ -225,6 +228,311 @@ def test_local_brazing_rework_preserves_all_existing_beads_on_return() -> None:
                 assert all(visible), "局部补涂开始时已有焊道不能整批消失"
                 break
         assert observed_rework, "没有观察到托盘返回 S2A 后的局部补涂阶段"
+    finally:
+        adapter.close()
+
+
+def test_local_brazing_rework_preserves_beads_during_s2b_to_s2a_return() -> None:
+    """Detected material stays on the pallet for every physical return frame."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="LOCAL_BRAZE_RETURN")
+        runtime.inject_fault("BRAZING_MISSING", target="path_02")
+        unit = runtime.units["LOCAL_BRAZE_RETURN_UNIT_01"]
+        return_started = False
+        return_frames = 0
+        for _ in range(8_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            return_started |= any(event["type"] == "RECOVERY_RETURN_STARTED" for event in runtime.events)
+            if not return_started or unit.tray_id is None:
+                continue
+            local_repair_running = any(
+                operation.unit_id == unit.unit_id and operation.kind == "DISPENSING" and operation.recovery
+                for operation in runtime.operations.values()
+            )
+            if local_repair_running:
+                break
+            return_frames += 1
+            assert all(
+                adapter.component_visible(unit.tray_id, f"braze_{index:02d}")
+                for index in range(1, 2 * unit.fin_count + 1)
+            ), "S2B返回S2A途中不得把已涂焊道投影为零进度"
+        assert return_frames > 2, "没有采样到S2B到S2A的实体返程"
+    finally:
+        adapter.close()
+
+
+def test_deviated_braze_arm2_removes_before_reapplying_the_target_path() -> None:
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    labels: list[str] = []
+    try:
+        runtime.submit_order("A", order_id="DEVIATION_REMOVE_REAPPLY")
+        runtime.inject_fault("BRAZING_PATH_DEVIATION", target="path_03")
+        for _ in range(8_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            operation = runtime.operations.get("ARM2")
+            if (
+                operation is not None
+                and operation.recovery
+                and operation.recovery_fault_type == "BRAZING_PATH_DEVIATION"
+            ):
+                label = str(adapter.robot_motion_snapshot()["arm2"]["target_zh"])
+                if label and (not labels or labels[-1] != label):
+                    labels.append(label)
+            if labels and any("重新涂覆" in label for label in labels):
+                break
+        removal_index = next(index for index, label in enumerate(labels) if "清除" in label)
+        reapply_index = next(index for index, label in enumerate(labels) if "重新涂覆" in label)
+        assert removal_index < reapply_index
+    finally:
+        adapter.close()
+
+
+def test_fin_pose_rework_keeps_press_off_and_uses_arm3_in_slot_reseat() -> None:
+    """S4 inspects before pressing; Arm3 reseats the existing defective fin."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="FIN_RESEAT")
+        runtime.inject_fault("FIN_POSE", target="fin_04")
+        unit = runtime.units["FIN_RESEAT_UNIT_01"]
+        saw_s4_inspection = False
+        saw_return = False
+        rework_started = False
+        saw_rework_release = False
+        target_local_poses: list[tuple[np.ndarray, np.ndarray]] = []
+        recovery_labels: set[str] = set()
+        rework_held_positions: list[np.ndarray] = []
+        rework_release_position: np.ndarray | None = None
+        last_defect_world_position: np.ndarray | None = None
+        proxy_takeover_position: np.ndarray | None = None
+        for _ in range(12_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            if unit.tray_id is None:
+                continue
+            if any(
+                operation.unit_id == unit.unit_id and operation.kind == "PRE_BRAZE_INSPECTION"
+                for operation in runtime.operations.values()
+            ):
+                saw_s4_inspection = True
+                assert not adapter.component_visible(unit.tray_id, "front_press")
+                assert not adapter.component_visible(unit.tray_id, "rear_press")
+            saw_return |= any(event["type"] == "RECOVERY_RETURN_STARTED" for event in runtime.events)
+            operation = runtime.operations.get("ARM3")
+            recovery_running = bool(
+                operation is not None
+                and operation.unit_id == unit.unit_id
+                and operation.kind == "INSTALL_FIN"
+                and operation.recovery
+            )
+            if recovery_running:
+                rework_started = True
+            if saw_return and not rework_started:
+                geom = adapter.model.geom(f"{unit.tray_id.lower()}_fin_04")
+                target_local_poses.append(
+                    (
+                        np.asarray(geom.pos, dtype=float).copy(),
+                        np.asarray(geom.quat, dtype=float).copy(),
+                    )
+                )
+                assert all(
+                    adapter.component_visible(unit.tray_id, f"fin_{index:02d}")
+                    for index in range(1, unit.fin_count + 1)
+                )
+                last_defect_world_position = np.asarray(
+                    adapter.data.geom(f"{unit.tray_id.lower()}_fin_04").xpos,
+                    dtype=float,
+                ).copy()
+            if recovery_running:
+                arm3_state = adapter.robot_motion_snapshot()["arm3"]
+                recovery_labels.add(str(arm3_state["target_zh"]))
+                if proxy_takeover_position is None:
+                    proxy_takeover_position = np.asarray(
+                        adapter.data.geom("v2_arm3_raw_fin_proxy_geom").xpos,
+                        dtype=float,
+                    ).copy()
+                if arm3_state["workpiece_held"]:
+                    rework_held_positions.append(
+                        np.asarray(
+                            adapter.data.geom("v2_arm3_raw_fin_proxy_geom").xpos,
+                            dtype=float,
+                        ).copy()
+                    )
+                if arm3_state["release_verified"]:
+                    saw_rework_release = True
+                    rework_release_position = np.asarray(
+                        adapter.data.geom(f"{unit.tray_id.lower()}_fin_04").xpos,
+                        dtype=float,
+                    ).copy()
+            if runtime.complete and adapter.transport_settled:
+                break
+
+        assert saw_s4_inspection
+        assert saw_return
+        assert len(target_local_poses) > 2
+        first_position, first_quaternion = target_local_poses[0]
+        for position, quaternion in target_local_poses[1:]:
+            np.testing.assert_allclose(position, first_position, atol=1.0e-9)
+            np.testing.assert_allclose(quaternion, first_quaternion, atol=1.0e-9)
+        assert recovery_labels
+        assert saw_rework_release
+        assert last_defect_world_position is not None
+        assert proxy_takeover_position is not None
+        assert rework_held_positions
+        assert rework_release_position is not None
+        np.testing.assert_allclose(
+            proxy_takeover_position,
+            last_defect_world_position,
+            atol=0.001,
+        )
+        correction_travel_m = max(
+            float(np.linalg.norm(position[:2] - proxy_takeover_position[:2]))
+            for position in rework_held_positions
+        )
+        assert correction_travel_m >= 0.008
+        np.testing.assert_allclose(
+            rework_held_positions[-1],
+            rework_release_position,
+            atol=0.0015,
+        )
+        assert not any("原料位" in label for label in recovery_labels)
+        assert any("原槽位" in label or "纠偏" in label for label in recovery_labels)
+        returned = next(event for event in runtime.events if event["type"] == "RECOVERY_RETURN_STARTED")
+        assert returned["target"] == "INSTALL_B"
+        assert runtime.complete
+        assert runtime.snapshot()["manual_fault_requests"][0]["status"] == "RECOVERED"
+    finally:
+        adapter.close()
+
+
+def test_fin_pose_fault_descends_at_offset_and_hands_off_without_teleport() -> None:
+    """The latent pose defect must exist while the held fin is descending."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="FIN_OFFSET_DESCENT")
+        runtime.inject_fault("FIN_POSE", target="fin_04")
+        unit = runtime.units["FIN_OFFSET_DESCENT_UNIT_01"]
+        saw_offset_descent = False
+        saw_continuous_handoff = False
+        last_held_position: np.ndarray | None = None
+        for _ in range(8_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            if unit.tray_id is None:
+                continue
+            active = next(
+                (
+                    (resource.lower(), operation)
+                    for resource, operation in runtime.operations.items()
+                    if operation.unit_id == unit.unit_id
+                    and operation.kind == "INSTALL_FIN"
+                    and not operation.recovery
+                ),
+                None,
+            )
+            if active is None:
+                continue
+            arm_name, _operation = active
+            state = adapter.robot_motion_snapshot()[arm_name]
+            if state["fin_index"] != 4:
+                continue
+            installed = np.asarray(
+                adapter.data.geom(f"{unit.tray_id.lower()}_fin_04").xpos,
+                dtype=float,
+            ).copy()
+            proxy = np.asarray(
+                adapter.data.geom(f"v2_{arm_name}_raw_fin_proxy_geom").xpos,
+                dtype=float,
+            ).copy()
+            if state["workpiece_held"]:
+                last_held_position = proxy
+                if "纯Z下降" in str(state["target_zh"]):
+                    saw_offset_descent = True
+                    np.testing.assert_allclose(proxy[:2], installed[:2], atol=0.0015)
+                    assert proxy[2] >= installed[2] - 0.001
+            if state["release_verified"] and adapter.component_visible(unit.tray_id, "fin_04"):
+                assert last_held_position is not None
+                np.testing.assert_allclose(last_held_position, installed, atol=0.0015)
+                saw_continuous_handoff = True
+                break
+
+        assert saw_offset_descent
+        assert saw_continuous_handoff
+    finally:
+        adapter.close()
+
+
+def test_arm3_pick_failure_is_missing_at_s4_then_restored_by_manual_review() -> None:
+    """The failed wide-gap grasp remains physical until the ten-second review."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="FIN_PICK_REAL")
+        runtime.inject_fault("FIN_PICK_FAILED", target="fin_02")
+        unit = runtime.units["FIN_PICK_REAL_UNIT_01"]
+        saw_empty_carry = False
+        saw_missing_at_s4 = False
+        saw_manual_review = False
+        saw_manual_restore = False
+        for _ in range(16_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            if unit.tray_id is None:
+                continue
+            operation = runtime.operations.get("ARM3")
+            state = adapter.robot_motion_snapshot()["arm3"]
+            initial_target_operation = bool(
+                operation is not None
+                and operation.unit_id == unit.unit_id
+                and operation.kind == "INSTALL_FIN"
+                and not operation.recovery
+                and state["fin_index"] == 2
+            )
+            if initial_target_operation and "抓取失败" in str(state["target_zh"]):
+                saw_empty_carry = True
+                assert not state["grasp_verified"]
+                assert state["grasp_failed"]
+                assert not state["workpiece_held"]
+                assert float(state["finger_inner_gap_m"]) > float(state["fin_thickness_m"]) + 0.004
+                assert adapter.model.geom("v2_fin_b_raw_fin_02").rgba[3] > 0.5
+            if operation is not None and operation.kind == "PRE_BRAZE_INSPECTION" and not saw_missing_at_s4:
+                saw_missing_at_s4 = True
+                assert not adapter.component_visible(unit.tray_id, "fin_02")
+            if runtime.faults.plans:
+                plan = next(iter(runtime.faults.plans.values()))
+                saw_manual_review |= plan.status is RecoveryStatus.MANUAL_REVIEW
+                if plan.status is RecoveryStatus.SUCCEEDED:
+                    saw_manual_restore |= adapter.component_visible(unit.tray_id, "fin_02")
+            if runtime.complete and adapter.transport_settled:
+                break
+
+        assert saw_empty_carry
+        assert saw_missing_at_s4
+        assert saw_manual_review
+        assert saw_manual_restore
+        assert not any(event["type"] == "RECOVERY_RETURN_STARTED" for event in runtime.events)
+        assert runtime.complete
+        assert runtime.snapshot()["manual_fault_requests"][0]["status"] == "RECOVERED"
     finally:
         adapter.close()
 

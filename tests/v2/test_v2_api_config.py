@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+import pytest
+
 from brazing_sim.api import SharedState, start_http_server, validate_http_command
 from brazing_sim.fault_catalog import MANUAL_FAULT_CATALOG
 from brazing_sim.flexible import load_order_plans
@@ -54,8 +56,8 @@ def test_order_plan_and_v2_control_commands_validate() -> None:
         "fault_type": "ARM_UNAVAILABLE",
         "target": "ARM2",
         "severity": "recoverable",
-        "auto_recover": True,
-        "duration_s": 8.0,
+        "auto_recover": False,
+        "duration_s": None,
         "label_zh": "机械臂暂时离线",
     }
     safety = validate_http_command(
@@ -69,6 +71,15 @@ def test_order_plan_and_v2_control_commands_validate() -> None:
     assert safety["auto_recover"] is False
     assert safety["duration_s"] is None
     assert {"FIN_POSE", "BRAZING_MISSING", "FURNACE_PROFILE", "FORK_TIMEOUT"} <= set(MANUAL_FAULT_CATALOG)
+
+
+def test_removed_fin_insert_fault_is_not_exposed_or_accepted() -> None:
+    assert "FIN_INSERT_FAILED" not in MANUAL_FAULT_CATALOG
+    with pytest.raises(ValueError, match="unknown manual fault type"):
+        validate_http_command(
+            "/faults/inject",
+            {"fault_type": "FIN_INSERT_FAILED", "target": "fin_02"},
+        )
 
 
 def test_v2_get_views_use_shared_snapshot() -> None:

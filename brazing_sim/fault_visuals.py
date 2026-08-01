@@ -33,7 +33,6 @@ class PhysicalFaultVisualizer:
             "BRAZING_PATH_DEVIATION",
             "FURNACE_PROFILE",
             "FIN_PICK_FAILED",
-            "FIN_INSERT_FAILED",
             "FIN_GEOMETRY_FAILED",
             "ARM_UNAVAILABLE",
             "RACK_LAYER_UNAVAILABLE",

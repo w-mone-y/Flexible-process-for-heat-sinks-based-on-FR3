@@ -16,6 +16,7 @@ class ManualFaultDefinition:
     physical_fault: str | None = None
     runtime_fault: str | None = None
     supports_duration: bool = False
+    simulated_manual_review: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -27,6 +28,7 @@ class ManualFaultDefinition:
             "physical_fault": self.physical_fault,
             "runtime_fault": self.runtime_fault,
             "supports_duration": self.supports_duration,
+            "simulated_manual_review": self.simulated_manual_review,
         }
 
 
@@ -36,7 +38,7 @@ _DEFINITIONS = (
         "翅片位置/倾斜偏差",
         "物理质量故障",
         "fin",
-        "翅片会在MuJoCo中真实平移并倾斜；Arm3检出后由Arm1调整并复检。",
+        "目标翅片保持安装高度但横向错过梳齿槽；S4检出后原样返回S3B，由Arm3夹起、垂直抬升、纠偏回插并复检。",
         physical_fault="fin_pose",
         runtime_fault="FIN_GEOMETRY_FAILED",
     ),
@@ -66,42 +68,36 @@ _DEFINITIONS = (
         "下一热循环的热区异常变色；焊后相机检出后隔离产品并转人工工艺评审，不自动二次过炉。",
         physical_fault="furnace_profile",
         runtime_fault="FURNACE_PROFILE",
+        simulated_manual_review=True,
     ),
     ManualFaultDefinition(
         "FIN_PICK_FAILED",
         "翅片抓取失败",
         "机器人/工艺故障",
         "fin",
-        "目标翅片会明显留在Table1而不出现在槽内，Arm3检出后Arm1返回重抓。",
+        "Arm3夹爪故意保留大于翅片厚度的间隙并空载前往槽位；S4检出缺片后进入10秒人工审核并模拟修复。",
         physical_fault="fin_pick",
         runtime_fault="FIN_PICK_FAILED",
-    ),
-    ManualFaultDefinition(
-        "FIN_INSERT_FAILED",
-        "翅片插装失败",
-        "机器人/工艺故障",
-        "fin",
-        "目标翅片会以抬高、偏位和倾斜姿态卡在槽口，Arm1重新插装并复检。",
-        physical_fault="fin_insert",
-        runtime_fault="FIN_INSERT_FAILED",
+        simulated_manual_review=True,
     ),
     ManualFaultDefinition(
         "FIN_GEOMETRY_FAILED",
         "翅片几何检测失败",
         "机器人/工艺故障",
         "fin",
-        "等待翅片检测阶段触发，Arm1重新安装后由Arm3复检。",
+        "目标翅片保持安装高度但横向错槽；S4检出后进入10秒人工审核并模拟修复。",
         physical_fault="fin_pose",
         runtime_fault="FIN_GEOMETRY_FAILED",
+        simulated_manual_review=True,
     ),
     ManualFaultDefinition(
         "ARM_UNAVAILABLE",
         "机械臂暂时离线",
         "设备故障",
         "arm",
-        "指定机械臂停在当前姿态并整机变红；可定时自动恢复或在资源页手动恢复。",
+        "指定机械臂停在当前姿态并整机变红；进入10秒人工审核，完成后解除隔离并继续原任务。",
         runtime_fault="ARM_UNAVAILABLE",
-        supports_duration=True,
+        simulated_manual_review=True,
     ),
     ManualFaultDefinition(
         "RACK_LAYER_UNAVAILABLE",
@@ -193,9 +189,10 @@ def validate_manual_fault_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if severity not in {"recoverable", "severe"}:
         raise ValueError("severity must be recoverable or severe")
     safety_fault = fault_type in {"CONTACT_SAFETY_STOP", "TRAY_STATE_INCONSISTENT"}
-    auto_recover = False if safety_fault else bool(payload.get("auto_recover", True))
+    forced_manual = safety_fault or definition.simulated_manual_review
+    auto_recover = False if forced_manual else bool(payload.get("auto_recover", True))
     duration = payload.get("duration_s", 8.0 if definition.supports_duration else None)
-    if safety_fault:
+    if forced_manual:
         duration = None
     if duration is not None:
         duration = float(duration)

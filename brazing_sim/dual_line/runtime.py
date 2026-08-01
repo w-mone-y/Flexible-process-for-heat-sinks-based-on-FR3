@@ -409,7 +409,11 @@ class DualLineRuntime:
     def _waiting_units(self, *stages: UnitStage) -> list[V2UnitState]:
         allowed = set(stages)
         return sorted(
-            (unit for unit in self.units.values() if unit.stage in allowed),
+            (
+                unit
+                for unit in self.units.values()
+                if unit.stage in allowed and not self._unit_waiting_for_manual_review(unit.unit_id)
+            ),
             key=lambda unit: (
                 -int(unit.urgent),
                 -unit.priority,
@@ -417,6 +421,12 @@ class DualLineRuntime:
                 unit.stage_started_at,
                 unit.unit_id,
             ),
+        )
+
+    def _unit_waiting_for_manual_review(self, unit_id: str) -> bool:
+        return any(
+            plan.unit_id == unit_id and plan.status is RecoveryStatus.MANUAL_REVIEW
+            for plan in self.faults.plans.values()
         )
 
     def _owner_free(self, owner: TrayOwner) -> bool:
@@ -1368,6 +1378,24 @@ class DualLineRuntime:
     def _service_faults(self) -> None:
         """Fire armed requests, apply rollbacks and release auto-recoveries."""
 
+        for plan in self.faults.service_manual_reviews(self.sim_time):
+            record = self.faults.faults[plan.fault_id]
+            if record.fault_type.value == "ARM_UNAVAILABLE":
+                self._event(
+                    "RESOURCE_RECOVERED",
+                    resource=str(record.details.get("target") or record.source).upper(),
+                )
+            elif record.fault_type.value == "FURNACE_PROFILE" and plan.unit_id:
+                unit = self.units.get(plan.unit_id)
+                if unit is not None and unit.stage is UnitStage.POST_BRAZE_INSPECTION:
+                    self._set_stage(unit, UnitStage.WAITING_OUTPUT)
+            self._event(
+                "MANUAL_REVIEW_COMPLETED",
+                recovery_id=plan.recovery_id,
+                fault_id=record.fault_id,
+                fault_type=record.fault_type.value,
+                message=plan.message,
+            )
         for resource in self.faults.service_auto_recovery(self.sim_time):
             self._event("RESOURCE_RECOVERED", resource=resource)
         manifested = self.faults.manifest_matching(
@@ -1509,11 +1537,32 @@ class DualLineRuntime:
                         strategy=plan.strategy,
                     )
                 elif plan.strategy == "FIN_REINSTALL" and owner is TrayOwner.S4:
-                    target_owner = (
-                        TrayOwner.INSTALL_B if unit.branch is InstallBranch.ARM3_B else TrayOwner.INSTALL_A
-                    )
+                    # Quality reseating is an Arm3 camera+gripper skill.  Keep
+                    # the defective assembly intact at S4 until S3B is free,
+                    # then return the same pallet to that dedicated correction
+                    # station.  Reusing the original branch could send the job
+                    # to Arm1 and replay the normal magazine-pick sequence.
+                    target_branch = InstallBranch.ARM3_B
+                    target_owner = TrayOwner.INSTALL_B
                     if not (self._owner_free(target_owner) and self._target_available(target_owner)):
                         continue
+                    previous_branch = unit.branch
+                    if previous_branch is not target_branch:
+                        if previous_branch is not None:
+                            self.install_branch_counts[previous_branch] = max(
+                                0,
+                                self.install_branch_counts[previous_branch] - 1,
+                            )
+                        self.install_branch_counts[target_branch] += 1
+                        unit.branch = target_branch
+                        self._event(
+                            "INSTALL_REASSIGNED",
+                            unit_id=unit.unit_id,
+                            tray_id=unit.tray_id,
+                            previous_branch=(None if previous_branch is None else previous_branch.value),
+                            branch=target_branch.value,
+                            reason_zh="焊前视觉检出翅片偏位，转入S3B由Arm3原槽位纠偏",
+                        )
                     self._handoff(
                         unit,
                         TrayOwner.S4,
@@ -1604,7 +1653,7 @@ class DualLineRuntime:
             severity=severity,
             auto_recover=auto_recover,
             duration_s=duration_s,
-            label_zh=label_zh,
+            label_zh=label_zh or (requested_type if definition is None else definition.label_zh),
             visual_type=requested_type,
             now=self.sim_time,
         )

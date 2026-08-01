@@ -145,12 +145,14 @@ def test_unknown_fault_types_are_ignored_without_error():
     assert visualizer.active_effects == ()
 
 
-def test_latent_fin_fault_moves_only_the_selected_fin_before_detection():
+@pytest.mark.parametrize("visual_type", ("FIN_POSE", "FIN_GEOMETRY_FAILED"))
+def test_latent_fin_pose_fault_is_lateral_only_before_detection(visual_type: str):
     adapter = _StubAdapter()
     visualizer = V2FaultVisualizer(adapter)
     target = int(adapter.model.geom("v2_tray_01_fin_03").id)
     neighbour = int(adapter.model.geom("v2_tray_01_fin_02").id)
     target_before = adapter.model.geom_pos[target].copy()
+    target_quaternion_before = adapter.model.geom_quat[target].copy()
     neighbour_before = adapter.model.geom_pos[neighbour].copy()
 
     visualizer.sync(
@@ -160,14 +162,18 @@ def test_latent_fin_fault_moves_only_the_selected_fin_before_detection():
             {
                 "defect_id": "D1",
                 "unit_id": "U1",
-                "visual_type": "FIN_POSE",
+                "visual_type": visual_type,
                 "fault_type": "FIN_GEOMETRY_FAILED",
                 "target": "fin_03",
                 "status": "MANIFESTED",
             }
         ],
     )
-    assert not np.allclose(adapter.model.geom_pos[target], target_before)
+    displacement = adapter.model.geom_pos[target] - target_before
+    assert displacement[0] == pytest.approx(0.0)
+    assert abs(float(displacement[1])) >= 0.010
+    assert displacement[2] == pytest.approx(0.0)
+    assert np.allclose(adapter.model.geom_quat[target], target_quaternion_before)
     assert np.allclose(adapter.model.geom_pos[neighbour], neighbour_before)
 
     visualizer.sync([], [{"unit_id": "U1", "tray_id": "V2_TRAY_01"}], [])
@@ -225,6 +231,45 @@ def test_local_braze_repair_fills_only_the_missing_target_progressively():
     assert np.allclose(adapter.model.geom_size[neighbour], full_neighbour)
 
 
+def test_deviated_braze_is_removed_end_to_end_before_nominal_reapplication() -> None:
+    adapter = _StubAdapter()
+    visualizer = V2FaultVisualizer(adapter)
+    target = int(adapter.model.geom("v2_tray_01_braze_03").id)
+    neighbour = int(adapter.model.geom("v2_tray_01_braze_02").id)
+    home_position = adapter.model.geom_pos[target].copy()
+    full_size = adapter.model.geom_size[target].copy()
+    neighbour_position = adapter.model.geom_pos[neighbour].copy()
+    neighbour_size = adapter.model.geom_size[neighbour].copy()
+    defect = {
+        "defect_id": "D_DEVIATION",
+        "unit_id": "U1",
+        "visual_type": "BRAZING_PATH_DEVIATION",
+        "fault_type": "BRAZING_PATH_DEVIATION",
+        "target": "path_03",
+        "status": "DETECTED",
+        "removal_progress": 0.5,
+        "reapply_progress": 0.0,
+    }
+    units = [{"unit_id": "U1", "tray_id": "V2_TRAY_01"}]
+
+    visualizer.sync([], units, [defect])
+    assert 0.0 < adapter.model.geom_size[target, 1] < full_size[1]
+    assert adapter.model.geom_pos[target, 1] == pytest.approx(home_position[1] + 0.012)
+    assert np.allclose(adapter.model.geom_pos[neighbour], neighbour_position)
+    assert np.allclose(adapter.model.geom_size[neighbour], neighbour_size)
+
+    defect["removal_progress"] = 1.0
+    defect["reapply_progress"] = 0.5
+    visualizer.sync([], units, [defect])
+    assert adapter.model.geom_pos[target, 1] == pytest.approx(home_position[1])
+    assert adapter.model.geom_size[target, 1] == pytest.approx(0.5 * full_size[1])
+
+    defect["reapply_progress"] = 1.0
+    visualizer.sync([], units, [defect])
+    assert np.allclose(adapter.model.geom_pos[target], home_position)
+    assert np.allclose(adapter.model.geom_size[target], full_size)
+
+
 def test_fault_geometry_does_not_accumulate_across_repeated_ui_frames():
     adapter = _StubAdapter()
     visualizer = V2FaultVisualizer(adapter)
@@ -249,7 +294,7 @@ def test_fault_geometry_does_not_accumulate_across_repeated_ui_frames():
     assert np.allclose(adapter.model.geom_pos[target], first_position)
 
 
-def test_fin_reinstall_progress_corrects_only_the_failed_fin():
+def test_fin_pose_reinstall_progress_corrects_only_the_failed_fin():
     adapter = _StubAdapter()
     visualizer = V2FaultVisualizer(adapter)
     target = int(adapter.model.geom("v2_tray_01_fin_03").id)
@@ -259,8 +304,8 @@ def test_fin_reinstall_progress_corrects_only_the_failed_fin():
     defect = {
         "defect_id": "D5",
         "unit_id": "U1",
-        "visual_type": "FIN_INSERT_FAILED",
-        "fault_type": "FIN_INSERT_FAILED",
+        "visual_type": "FIN_POSE",
+        "fault_type": "FIN_GEOMETRY_FAILED",
         "target": "fin_03",
         "status": "DETECTED",
         "repair_progress": 0.5,

@@ -31,7 +31,6 @@ FAULT_CASES = (
     ("BRAZING_MISSING", "slot_02_left", {}),
     ("BRAZING_PATH_DEVIATION", "path_03", {}),
     ("FIN_PICK_FAILED", "fin_01", {}),
-    ("FIN_INSERT_FAILED", "fin_02", {}),
     ("FIN_GEOMETRY_FAILED", "fin_03", {}),
     ("ARM_UNAVAILABLE", "ARM2", {"duration_s": 5.0}),
     ("ELEVATOR_TIMEOUT", "", {"duration_s": 4.0}),
@@ -86,6 +85,12 @@ def test_path_targets_accept_both_v1_and_v2_naming():
         validate_http_command("/faults/inject", {"fault_type": "BRAZING_MISSING", "target": "bogus_02"})
 
 
+def test_removed_fin_insert_fault_cannot_be_armed_directly() -> None:
+    runtime = DualLineRuntime(fast=True)
+    with pytest.raises(ValueError, match="FIN_INSERT_FAILED"):
+        runtime.inject_fault("FIN_INSERT_FAILED", target="fin_02")
+
+
 # --------------------------------------------------------------- arming model
 
 
@@ -115,6 +120,52 @@ def test_equipment_faults_fire_immediately():
     request = runtime.inject_fault("ARM_UNAVAILABLE", target="ARM2", auto_recover=False)
     assert request["status"] == "FIRED"
     assert not runtime.faults.resource_available("ARM2")
+
+
+@pytest.mark.parametrize("resource", ("ARM1", "ARM2", "ARM3"))
+def test_arm_offline_uses_a_ten_second_simulated_manual_review(resource: str) -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.inject_fault("ARM_UNAVAILABLE", target=resource)
+    plan = next(iter(runtime.faults.plans.values()))
+    assert plan.status is RecoveryStatus.MANUAL_REVIEW
+    notice = runtime.snapshot()["manual_review_notices"][0]
+    assert notice["message"] == "发生机械臂暂时离线故障❌，需进行人工审核🔩🔧，请稍作等待⏰"
+
+    runtime.tick(9.99)
+    assert not runtime.faults.resource_available(resource)
+    assert plan.status is RecoveryStatus.MANUAL_REVIEW
+
+    runtime.tick(0.02)
+    assert runtime.faults.resource_available(resource)
+    assert plan.status is RecoveryStatus.SUCCEEDED
+    assert runtime.snapshot()["manual_review_notices"][0]["message"] == "修复成功✅"
+
+
+@pytest.mark.parametrize("fault", ("FIN_PICK_FAILED", "FIN_GEOMETRY_FAILED"))
+def test_fifth_and_sixth_faults_enter_manual_review_after_camera_detection(fault: str) -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id=f"MANUAL_{fault}")
+    runtime.inject_fault(fault, target="fin_02")
+    for _ in range(2_000):
+        runtime.tick(0.02)
+        if runtime.faults.plans:
+            break
+    plan = next(iter(runtime.faults.plans.values()))
+    assert plan.status is RecoveryStatus.MANUAL_REVIEW
+    assert plan.manual_review_complete_at == pytest.approx(plan.created_at + 10.0)
+
+
+def test_fin_pose_alias_keeps_its_existing_automatic_reseat() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="POSE_STAYS_AUTOMATIC")
+    runtime.inject_fault("FIN_POSE", target="fin_02")
+    for _ in range(2_000):
+        runtime.tick(0.02)
+        if runtime.faults.plans:
+            break
+    plan = next(iter(runtime.faults.plans.values()))
+    assert plan.status is RecoveryStatus.RUNNING
+    assert plan.strategy == "FIN_REINSTALL"
 
 
 def test_armed_requests_that_never_match_are_marked_missed():
@@ -172,7 +223,7 @@ def test_faults_are_planned_with_a_named_strategy(fault, target, kwargs):
     "fault,target,kwargs",
     (
         ("BRAZING_MISSING", "slot_02_left", {}),
-        ("FIN_INSERT_FAILED", "fin_02", {}),
+        ("FIN_GEOMETRY_FAILED", "fin_02", {}),
         ("ARM_UNAVAILABLE", "ARM2", {"duration_s": 5.0}),
         ("ELEVATOR_TIMEOUT", "", {"duration_s": 4.0}),
         ("FURNACE_DOOR_INTERLOCK", "", {"duration_s": 4.0}),
@@ -201,10 +252,10 @@ def test_quality_rework_rewinds_the_stage_machine():
     assert snapshot["recoveries"][0]["status"] == RecoveryStatus.SUCCEEDED.value
 
 
-def test_fin_rework_redoes_only_the_failed_fin():
+def test_fin_pose_rework_redoes_only_the_failed_fin():
     """Rolling back must not discard the fins already installed."""
 
-    runtime, _ = _run("FIN_INSERT_FAILED", "fin_02")
+    runtime, _ = _run("FIN_POSE", "fin_02")
     rollback = next(e for e in runtime.events if e["type"] == "RECOVERY_ROLLBACK")
     installs = [
         event
@@ -242,7 +293,7 @@ def test_isolated_resource_cannot_start_work():
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("A", order_id="ISO", quantity=1)
     runtime.inject_fault("ARM_UNAVAILABLE", target="ARM2", auto_recover=False)
-    for _ in range(600):
+    for _ in range(180):
         runtime.tick(0.05)
     assert "ARM2" not in runtime.operations, "被隔离的资源不得接受新任务"
     dispensing = [
@@ -251,14 +302,22 @@ def test_isolated_resource_cannot_start_work():
         if event["type"] == "OPERATION_STARTED" and event.get("kind") == "DISPENSING"
     ]
     assert not dispensing, "Arm2 离线期间不应开始涂覆"
+    for _ in range(40):
+        runtime.tick(0.05)
+    assert any(
+        event["type"] == "OPERATION_STARTED" and event.get("kind") == "DISPENSING" for event in runtime.events
+    ), "10秒人工审核结束后Arm2应继续原订单"
 
 
-def test_auto_recovery_releases_the_resource_on_time():
+def test_arm_manual_review_releases_the_resource_after_ten_seconds():
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("A", order_id="AUTO", quantity=1)
     runtime.inject_fault("ARM_UNAVAILABLE", target="ARM2", duration_s=3.0)
     assert not runtime.faults.resource_available("ARM2")
-    while runtime.sim_time < 3.5:
+    while runtime.sim_time < 9.9:
+        runtime.tick(0.05)
+    assert not runtime.faults.resource_available("ARM2")
+    while runtime.sim_time < 10.1:
         runtime.tick(0.05)
     assert runtime.faults.resource_available("ARM2")
     assert any(event["type"] == "RESOURCE_RECOVERED" for event in runtime.events)
@@ -281,11 +340,13 @@ def test_active_arm_operation_is_frozen_while_that_arm_is_offline():
     assert runtime.operations["ARM2"].remaining_s == pytest.approx(before)
 
 
-def test_manual_recovery_requires_an_isolated_resource():
+def test_manual_arm_review_cannot_be_bypassed_before_its_deadline():
     runtime = DualLineRuntime(fast=True)
     assert runtime.recover_resource("ARM2") is False
     runtime.inject_fault("ARM_UNAVAILABLE", target="ARM2", auto_recover=False)
-    assert runtime.recover_resource("ARM2") is True
+    assert runtime.recover_resource("ARM2") is False
+    runtime.tick(10.0)
+    assert runtime.faults.resource_available("ARM2")
 
 
 def test_rack_layer_isolation_is_reported():
@@ -340,7 +401,7 @@ def test_operator_retry_releases_a_verified_safety_hold(fault, isolated_resource
         assert isolated_resource not in runtime.faults.isolated_resources
 
 
-def test_furnace_profile_defect_stays_quarantined_for_manual_review():
+def test_furnace_profile_is_released_after_the_simulated_manual_review():
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("A", order_id="PROFILE_QUARANTINE", quantity=1)
     runtime.inject_fault("FURNACE_PROFILE", target="furnace", severity="severe")
@@ -351,10 +412,17 @@ def test_furnace_profile_defect_stays_quarantined_for_manual_review():
     plan = next(iter(runtime.faults.plans.values()))
     unit = runtime.units["PROFILE_QUARANTINE_UNIT_01"]
     assert plan.status is RecoveryStatus.MANUAL_REVIEW
-    for _ in range(200):
+    for _ in range(190):
         runtime.tick(0.05)
     assert unit.stage is UnitStage.POST_BRAZE_INSPECTION
     assert not any(event["type"] == "UNIT_COMPLETED" for event in runtime.events)
+    for _ in range(30_000):
+        runtime.tick(0.05)
+        if runtime.complete:
+            break
+    assert plan.status is RecoveryStatus.SUCCEEDED
+    assert plan.message == "修复成功✅"
+    assert runtime.complete
 
 
 def test_quarantined_quality_fault_cannot_be_retried_as_fake_automatic_recovery():
@@ -499,7 +567,9 @@ def test_console_commands_reach_the_runtime():
 
     recovery_id = state["recoveries"][0]["recovery_id"]
     surface.process({"type": "recovery_action", "recovery_id": recovery_id, "action": "manual_review"})
-    surface.process({"type": "resource_recover", "resource_id": "ARM2"})
+    with pytest.raises(ValueError):
+        surface.process({"type": "resource_recover", "resource_id": "ARM2"})
+    runtime.tick(10.0)
     state = V2StatePresenter().present(runtime.snapshot(), simulation_speed=1.0, actual_rtf=1.0)
     assert state["resources_v2"]["ARM2"]["status"] != "FAULTED"
 

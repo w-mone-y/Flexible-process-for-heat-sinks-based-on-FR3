@@ -21,6 +21,10 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+FIN_POSE_LATERAL_OFFSET_M = 0.012
+BRAZING_DEVIATION_REMOVAL_END = 0.45
+BRAZING_DEVIATION_REAPPLY_START = 0.55
+
 # Per-fault geometry selectors for the V2 scene.  ``prefixes`` matches geom names,
 # ``bodies`` matches owning body names, ``exact`` matches a full geom name.
 # ``{arm}`` and ``{layer}`` are substituted from the fault's target.
@@ -60,7 +64,6 @@ _FAULT_GEOMETRY: dict[str, dict[str, tuple[str, ...]]] = {
     "BRAZING_MISSING": {"prefixes": ("v2_tray_{tray}_",)},
     "BRAZING_PATH_DEVIATION": {"prefixes": ("v2_tray_{tray}_",)},
     "FIN_PICK_FAILED": {"prefixes": ("v2_tray_{tray}_",)},
-    "FIN_INSERT_FAILED": {"prefixes": ("v2_tray_{tray}_",)},
     "FIN_GEOMETRY_FAILED": {"prefixes": ("v2_tray_{tray}_",)},
 }
 
@@ -258,6 +261,14 @@ class V2FaultVisualizer:
             geom_ids = self._matching_geoms(prefixes=("v2_furnace_hot_zone",))
             self._tint(effect_id, geom_ids, self.ACTIVE_RED)
             return effect_id if geom_ids else None
+        if visual_type not in {
+            "BRAZING_MISSING",
+            "BRAZING_PATH_DEVIATION",
+            "FIN_POSE",
+            "FIN_PICK_FAILED",
+            "FIN_GEOMETRY_FAILED",
+        }:
+            return None
         geom_id = self._physical_geom(defect, tray_id)
         if geom_id is None:
             return None
@@ -280,24 +291,60 @@ class V2FaultVisualizer:
             self.model.geom_size[geom_id, 1] = max(1.0e-6, half_length * filled_fraction)
             self.model.geom_pos[geom_id, 0] -= half_length * (1.0 - filled_fraction)
         elif visual_type == "BRAZING_PATH_DEVIATION":
-            self.model.geom_pos[geom_id, 1] += 0.012 * remaining
+            removal_progress = float(
+                np.clip(
+                    defect.get(
+                        "removal_progress",
+                        repair_progress / BRAZING_DEVIATION_REMOVAL_END,
+                    ),
+                    0.0,
+                    1.0,
+                )
+            )
+            reapply_progress = float(
+                np.clip(
+                    defect.get(
+                        "reapply_progress",
+                        (repair_progress - BRAZING_DEVIATION_REAPPLY_START)
+                        / (1.0 - BRAZING_DEVIATION_REAPPLY_START),
+                    ),
+                    0.0,
+                    1.0,
+                )
+            )
+            half_length = float(appearance.size[1])
+            if removal_progress < 1.0 - 1.0e-9:
+                # Keep the deviated bead at its faulty lateral position while
+                # shrinking it continuously from one end to the other.
+                fraction = 1.0 - removal_progress
+                self.model.geom_pos[geom_id, 0] += half_length * removal_progress
+                self.model.geom_pos[geom_id, 1] += 0.012
+                self.model.geom_size[geom_id, 1] = max(1.0e-6, half_length * fraction)
+                self.model.geom_matid[geom_id] = -1
+                self.model.geom_rgba[geom_id, :3] = self.ACTIVE_RED
+            else:
+                # Removal has finished. Grow a fresh bead along the nominal
+                # authored path; neighbouring paths are never touched.
+                self.model.geom_matid[geom_id] = appearance.material_id
+                self.model.geom_rgba[geom_id] = appearance.rgba
+                self.model.geom_pos[geom_id, 0] -= half_length * (1.0 - reapply_progress)
+                self.model.geom_size[geom_id, 1] = max(
+                    1.0e-6,
+                    half_length * reapply_progress,
+                )
+                if reapply_progress <= 1.0e-9:
+                    self.model.geom_rgba[geom_id, 3] = 0.0
+        elif visual_type in {"FIN_POSE", "FIN_GEOMETRY_FAILED"}:
+            # A pose/slot mismatch stays at the authored installation height:
+            # it missed the comb slot laterally, but was not lifted above the
+            # product and did not rotate.  The Arm3 repair actor will pick this
+            # exact displaced pose and correct it at safe height.
+            self.model.geom_pos[geom_id, 1] += FIN_POSE_LATERAL_OFFSET_M * remaining
             self.model.geom_matid[geom_id] = -1
-            self.model.geom_rgba[geom_id, :3] = self.ACTIVE_RED
+            self.model.geom_rgba[geom_id, :3] = self.RECOVERING_AMBER
         elif visual_type == "FIN_PICK_FAILED":
             # The fin is absent from the comb slot while the tray continues.
             self.model.geom_pos[geom_id, 2] -= 0.18 * remaining
-        else:
-            # Insert/pose faults remain obvious to both the viewer and camera:
-            # the selected fin is raised, shifted and tilted—not the whole tray.
-            angle = np.deg2rad(11.0) * remaining
-            self.model.geom_pos[geom_id, 1] += 0.012 * remaining
-            self.model.geom_pos[geom_id, 2] += 0.018 * remaining
-            self.model.geom_quat[geom_id] = np.asarray(
-                [np.cos(angle / 2.0), 0.0, 0.0, np.sin(angle / 2.0)],
-                dtype=float,
-            )
-            self.model.geom_matid[geom_id] = -1
-            self.model.geom_rgba[geom_id, :3] = self.RECOVERING_AMBER
         return effect_id
 
     def sync(
@@ -326,7 +373,6 @@ class V2FaultVisualizer:
                 "BRAZING_MISSING",
                 "BRAZING_PATH_DEVIATION",
                 "FIN_PICK_FAILED",
-                "FIN_INSERT_FAILED",
                 "FIN_GEOMETRY_FAILED",
             }:
                 # Workpiece faults are represented by their exact physical

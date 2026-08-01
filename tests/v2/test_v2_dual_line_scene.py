@@ -915,8 +915,22 @@ def test_v2_arm3_fin_gripper_is_the_same_parallel_gripper_as_arm1(model) -> None
     )
     for side in ("left", "right"):
         np.testing.assert_allclose(
+            model.geom(f"v2_arm1_gripper_{side}").size,
+            (0.0032, 0.0020, 0.0400),
+            atol=1.0e-9,
+        )
+        np.testing.assert_allclose(
+            model.geom(f"v2_arm1_gripper_{side}_pad").size,
+            (0.0035, 0.0012, 0.0340),
+            atol=1.0e-9,
+        )
+        np.testing.assert_allclose(
             model.geom(f"v2_arm3_gripper_{side}").size,
             model.geom(f"v2_arm1_gripper_{side}").size,
+        )
+        np.testing.assert_allclose(
+            model.geom(f"v2_arm3_gripper_{side}_pad").size,
+            model.geom(f"v2_arm1_gripper_{side}_pad").size,
         )
         np.testing.assert_allclose(
             model.joint(f"v2_arm3_{side}_finger_joint").axis,
@@ -956,6 +970,38 @@ def test_v2_fin_supply_and_installation_tables_have_visible_planar_clearance(
     # oversized 230 mm service aisle.
     required_clearance = 0.075 if fin_table == "v2_fin_table_b" else 0.15
     assert planar_clearance >= required_clearance
+
+
+@pytest.mark.parametrize(
+    ("branch", "table_top", "expected_half_extents"),
+    (
+        ("a", "v2_fin_table_a_top", (0.22, 0.14)),
+        ("b", "v2_fin_table_b_top", (0.18, 0.14)),
+    ),
+)
+def test_v2_fin_supply_tables_are_flat_full_dark_surfaces_without_side_rails(
+    model,
+    branch: str,
+    table_top: str,
+    expected_half_extents: tuple[float, float],
+) -> None:
+    """The raw-fin table is one full flat dark surface, never a raised trough."""
+
+    mujoco = pytest.importorskip("mujoco")
+    for component in ("magazine_front_rail", "magazine_rear_rail", "magazine_back"):
+        assert (
+            mujoco.mj_name2id(
+                model,
+                mujoco.mjtObj.mjOBJ_GEOM,
+                f"v2_fin_{branch}_{component}",
+            )
+            == -1
+        )
+    top = model.geom(table_top)
+    np.testing.assert_allclose(top.size[:2], expected_half_extents, atol=1.0e-9)
+    material_id = int(top.matid)
+    assert material_id == int(model.material("v2_fin_supply_surface_mat").id)
+    assert max(float(value) for value in model.mat_rgba[material_id, :3]) <= 0.24
 
 
 def test_v2_arm3_camera_is_visibly_side_mounted_on_the_gripper_base(model) -> None:

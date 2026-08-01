@@ -1074,7 +1074,7 @@ class BrazingApplication:
         for index, fault in enumerate(self.coordinator.faults):
             if not fault.applied or index in self.visualized_faults:
                 continue
-            if fault.fault_type in {"fin_pose", "fin_pick", "fin_insert"}:
+            if fault.fault_type in {"fin_pose", "fin_pick"}:
                 fin = next((item for item in product.active_fins if item.fin_id == fault.target), None)
                 if fin is not None:
                     registry = self.scene.registry

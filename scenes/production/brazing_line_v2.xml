@@ -69,6 +69,7 @@
     <material name="v2_inspect_mat" rgba="0.43 0.72 0.56 1"/>
     <material name="v2_install_a_mat" rgba="0.67 0.53 0.79 1"/>
     <material name="v2_install_b_mat" rgba="0.48 0.66 0.82 1"/>
+    <material name="v2_fin_supply_surface_mat" rgba="0.15 0.18 0.22 1"/>
     <material name="v2_belt_mat" rgba="0.035 0.045 0.055 1"/>
     <material name="v2_frame_mat" rgba="0.22 0.25 0.29 1"/>
     <material name="v2_tray_mat" rgba="0.08 0.23 0.38 1"/>
@@ -189,20 +190,20 @@
         <joint name="v2_arm1_left_finger_joint" type="slide"
                axis="0 -1 0" range="0 0.0202" damping="6"/>
         <geom name="v2_arm1_gripper_left" type="box"
-              size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+              size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
               contype="4" conaffinity="2"/>
         <geom class="visual" name="v2_arm1_gripper_left_pad" type="box"
-              size="0.0048 0.0012 0.034" pos="0 -0.0038 0"
+              size="0.0035 0.0012 0.034" pos="0 -0.0038 0"
               material="v2_belt_mat"/>
       </body>
       <body name="v2_arm1_gripper_right_body" pos="0 -0.026 0.058">
         <joint name="v2_arm1_right_finger_joint" type="slide"
                axis="0 1 0" range="0 0.0202" damping="6"/>
         <geom name="v2_arm1_gripper_right" type="box"
-              size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+              size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
               contype="4" conaffinity="2"/>
         <geom class="visual" name="v2_arm1_gripper_right_pad" type="box"
-              size="0.0048 0.0012 0.034" pos="0 0.0038 0"
+              size="0.0035 0.0012 0.034" pos="0 0.0038 0"
               material="v2_belt_mat"/>
       </body>
       <site name="v2_arm1_parallel_gripper_mount_site"
@@ -403,20 +404,20 @@
           <joint name="v2_arm3_left_finger_joint" type="slide"
                  axis="0 -1 0" range="0 0.0202" damping="6"/>
           <geom name="v2_arm3_gripper_left" type="box"
-                size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+                size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
                 contype="4" conaffinity="2"/>
           <geom class="visual" name="v2_arm3_gripper_left_pad" type="box"
-                size="0.0048 0.0012 0.034" pos="0 -0.0038 0"
+                size="0.0035 0.0012 0.034" pos="0 -0.0038 0"
                 material="v2_belt_mat"/>
         </body>
         <body name="v2_arm3_right_finger" pos="0 -0.026 0.058">
           <joint name="v2_arm3_right_finger_joint" type="slide"
                  axis="0 1 0" range="0 0.0202" damping="6"/>
           <geom name="v2_arm3_gripper_right" type="box"
-                size="0.0045 0.003 0.040" rgba="0.72 0.75 0.79 1"
+                size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
                 contype="4" conaffinity="2"/>
           <geom class="visual" name="v2_arm3_gripper_right_pad" type="box"
-                size="0.0048 0.0012 0.034" pos="0 0.0038 0"
+                size="0.0035 0.0012 0.034" pos="0 0.0038 0"
                 material="v2_belt_mat"/>
         </body>
         <site name="v2_arm3_gripper_tcp" pos="0 0 0.090" size="0.005"
@@ -482,7 +483,7 @@
     <body name="v2_fin_table_a" pos="0.45 1.05 0">
       <geom class="structure" name="v2_fin_table_a_top"
             size="0.22 0.14 0.025" pos="0 0 0.225"
-            material="v2_install_a_mat"/>
+            material="v2_fin_supply_surface_mat"/>
       <geom class="structure" size="0.025 0.025 0.10" pos="-0.17 -0.09 0.10"/>
       <geom class="structure" size="0.025 0.025 0.10" pos="0.17 -0.09 0.10"/>
       <geom class="structure" size="0.025 0.025 0.10" pos="-0.17 0.09 0.10"/>
@@ -512,7 +513,7 @@
     <body name="v2_fin_table_b" pos="0.55 -0.85 0">
       <geom class="structure" name="v2_fin_table_b_top"
             size="0.18 0.14 0.025" pos="0 0 0.225"
-            material="v2_install_b_mat"/>
+            material="v2_fin_supply_surface_mat"/>
       <geom class="structure" size="0.025 0.025 0.10" pos="-0.14 -0.09 0.10"/>
       <geom class="structure" size="0.025 0.025 0.10" pos="0.14 -0.09 0.10"/>
       <geom class="structure" size="0.025 0.025 0.10" pos="-0.14 0.09 0.10"/>
