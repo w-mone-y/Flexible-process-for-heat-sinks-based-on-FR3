@@ -42,8 +42,9 @@
 | 🧩 **准备修改场景或代码** | [文档与源码导航](#documentation) · [项目目录说明](docs/architecture/项目目录说明.md) |
 | ✅ **验证修改没有破坏流程** | [测试与质量门槛](#quality) |
 
-> **只想最快看到效果？** 安装依赖后运行 `mjpython brazing_line_v2.py`，再从 Qt
-> 控制台加入 A/B/C 普通订单即可。
+> **只想最快看到效果？** macOS/Linux 运行 `mjpython brazing_line_v2.py`；Windows
+> 运行 `powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1`，再从 Qt 控制台加入
+> A/B/C 普通订单即可。
 
 ## 👀 30 秒看懂这个项目
 
@@ -183,7 +184,7 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 
 | 入口 | 适合场景 | 一条命令 |
 |---|---|---|
-| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | `mjpython brazing_line_v2.py` |
+| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | macOS/Linux: `mjpython brazing_line_v2.py`；Windows: `powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1` |
 | **V1 稳定线** | 完整故障注入、自动恢复、单段演示和旧入口兼容 | `mjpython brazing_line.py` |
 | **精细视觉版** | 截图、录屏和展示 | `mjpython brazing_line_cinematic.py --order A` |
 | **YAML 柔性订单** | 配置驱动、自定义计划、dry-run 和调度实验 | `python run_flexible_order.py --order config/orders/order_001.yaml --dry-run` |
@@ -195,6 +196,7 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 - NumPy、PyYAML
 - PySide6（可选，用于 Qt 规划控制台）
 - macOS 图形模式建议使用 `mjpython`
+- Windows V2 使用 Conda 环境 `wy`，启动脚本不会调用全局 Python，也不会安装依赖
 
 ### 2. 三步启动
 
@@ -209,6 +211,29 @@ make install-dev
 # 3. 启动推荐的 V2 Viewer + Qt 控制台
 mjpython brazing_line_v2.py
 ```
+
+### Windows V2 启动
+
+Windows V2 固定通过已有的 Conda 环境 `wy` 运行。PowerShell 当前 PATH 没有 `conda` 时，
+脚本也会尝试常见的 Conda 安装位置；找不到环境或运行库时只报告错误，不执行安装。
+
+```powershell
+# 在仓库根目录执行；首次使用可只对当前进程放宽脚本策略
+powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1
+
+# 带订单运行 Viewer + Qt 控制台
+powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --orders A,B,C --fast
+
+# 只运行 V2 headless，不创建 Viewer 或 Qt 窗口
+powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --headless --orders A,B,C --fast
+```
+
+Windows Viewer 的交互约定：左键拖动旋转，右键或中键拖动平移，鼠标滚轮或捏合缩放，
+触摸板两指滑动前后左右平移；方向键/WASD 也可平移，`R` 恢复初始视角。滚轮/捏合向上
+为放大，向下为缩小。
+
+若提示缺少 `mujoco`、`PySide6` 或其他模块，请确认模块安装在 `wy` 环境中，并用
+`conda run -n wy python -c "import mujoco, PySide6"` 检查；不要改用全局 Python。
 
 ### 3. 启动稳定 V1
 

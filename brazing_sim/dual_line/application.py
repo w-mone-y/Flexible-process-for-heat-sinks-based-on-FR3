@@ -237,7 +237,8 @@ class V2BrazingApplication:
         if not self.args.no_ui:
             command = [
                 sys.executable,
-                str(Path(__file__).resolve().parents[2] / "brazing_line_v2.py"),
+                "-m",
+                "brazing_sim.dual_line.cli",
                 "--ui-client",
                 "--host",
                 str(self.args.host),
@@ -497,6 +498,13 @@ class V2BrazingApplication:
         return 0 if self.runtime.complete and self.scene.transport_settled else 2
 
     def run_viewer(self) -> int:
+        if sys.platform == "win32":
+            from .windows_viewer import run_windows_viewer
+
+            result = run_windows_viewer(self)
+            self.publish(viewer_running=False)
+            return result
+
         import mujoco.viewer
 
         model, data = self.scene.model, self.scene.data

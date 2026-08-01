@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ..domain import BrazingRecipe, OrderSpec
+from ..paths import CONFIG_DIR
 from .geometry import MAX_FINS, MAX_PATHS, generate_geometry
 from .loader import (
     FlexibleConfigError,
@@ -17,8 +18,7 @@ from .loader import (
 )
 from .models import OrderConfig, ProcessPlan, ProductConfig, RackAssignment, RackConfig
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_ROOT = PROJECT_ROOT / "config"
+DEFAULT_CONFIG_ROOT = CONFIG_DIR
 
 
 def allocate_rack(
