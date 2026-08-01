@@ -14,7 +14,7 @@ from ..motion import HOME_QPOS, ArmController, Pose, matrix_to_quat, pose_from_s
 from ..profiles import quintic_time_scaling
 from ..tools import QuickChangeToolManager, ToolSpec
 from .fault_visuals import FIN_POSE_LATERAL_OFFSET_M
-from .process_geometry import TRAY_PAYLOAD_ORIGIN_Z_M, V2ProcessGeometry
+from .process_geometry import V2ProcessGeometry
 
 if TYPE_CHECKING:
     from .runtime import DualLineRuntime, V2UnitState
@@ -86,6 +86,7 @@ class _JointPlan:
     manifested_fault_type: str = ""
     grasp_failed: bool = False
     next_tool: str | None = None
+    base_grasp_start_position: np.ndarray | None = None
 
 
 @dataclass(slots=True)
@@ -128,6 +129,9 @@ class V2RobotMotionProjector:
     # perimeter while keeping the camera and gripper clear of the raw-fin rack.
     ARM3_BRANCH_CLEAR_PARK_M = (1.00, -0.95, 0.55)
     BASE_SUCTION_ENGAGE_SECONDS = 0.34
+    # The S1 pickup site is authored 4 mm above the standard base top.  Keep
+    # that physical suction standoff constant while the base thickness varies.
+    BASE_SUCTION_STANDOFF_M = 0.004
     BASE_SUCTION_RELEASE_SECONDS = 0.26
     BASE_TRANSFER_SPEED_M_S = 0.18
     BASE_PLACE_SPEED_M_S = 0.035
@@ -499,6 +503,34 @@ class V2RobotMotionProjector:
         self.data.eq_active[proxy.grasp_weld_id] = 1
         self.data.eq_active[proxy.feed_weld_id] = 0
         proxy.held = True
+        self.mujoco.mj_forward(self.model, self.data)
+
+    def _align_base_proxy_with_suction(self, plan: _JointPlan, fraction: float) -> None:
+        """Smoothly draw the supplied base onto the real measured suction TCP."""
+
+        if plan.proxy_key != "arm1_base":
+            return
+        proxy = self._proxies[plan.proxy_key]
+        if plan.base_grasp_start_position is None:
+            plan.base_grasp_start_position = np.asarray(
+                self.data.body(proxy.body_id).xpos,
+                dtype=float,
+            ).copy()
+        tcp = pose_from_site(self.data, "v2_arm1_suction_tcp")
+        half_thickness = float(self.model.geom_size[proxy.geom_id, 2])
+        target = tcp.position + tcp.rotation[:, 2] * (self.BASE_SUCTION_STANDOFF_M + half_thickness)
+        amount = quintic_time_scaling(float(np.clip(fraction, 0.0, 1.0)))
+        position = plan.base_grasp_start_position + amount * (target - plan.base_grasp_start_position)
+        self.data.eq_active[proxy.feed_weld_id] = 0
+        self.data.qpos[proxy.qpos_address : proxy.qpos_address + 3] = position
+        self.data.qvel[proxy.dof_address : proxy.dof_address + 6] = 0.0
+        self.mujoco.mj_forward(self.model, self.data)
+        self._write_weld_relative(
+            proxy.feed_weld_id,
+            proxy.feed_body_id,
+            proxy.body_id,
+        )
+        self.data.eq_active[proxy.feed_weld_id] = 1
         self.mujoco.mj_forward(self.model, self.data)
 
     def _release_proxy(self, plan: _JointPlan) -> None:
@@ -1043,7 +1075,7 @@ class V2RobotMotionProjector:
         unit: "V2UnitState",
     ) -> tuple[str, tuple[_Waypoint, ...]]:
         if arm_name == "arm1" and operation.kind == "BASE_LOADING":
-            geometry = V2ProcessGeometry.for_preset(unit.preset)
+            geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, yaw = self._tray_frame(
                 unit,
                 expected_dock_site="v2_station_s1_dock",
@@ -1052,7 +1084,7 @@ class V2RobotMotionProjector:
                 [
                     0.0,
                     0.0,
-                    TRAY_PAYLOAD_ORIGIN_Z_M + 0.5 * geometry.base_size_m[2],
+                    geometry.base_top_z_m + self.BASE_SUCTION_STANDOFF_M,
                 ],
                 dtype=float,
             )
@@ -1133,7 +1165,7 @@ class V2RobotMotionProjector:
                 ),
             )
         if arm_name == "arm1" and operation.kind == "INSTALL_FIN":
-            geometry = V2ProcessGeometry.for_preset(unit.preset)
+            geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, _tray_yaw = self._tray_frame(unit)
             return (
                 "arm1_gripper",
@@ -1156,7 +1188,7 @@ class V2RobotMotionProjector:
                 ),
             )
         if arm_name == "arm2" and operation.kind == "DISPENSING":
-            geometry = V2ProcessGeometry.for_preset(unit.preset)
+            geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, yaw = self._tray_frame(unit)
             points: list[_Waypoint] = []
             local_target = (
@@ -1258,14 +1290,14 @@ class V2RobotMotionProjector:
                     )
             return "arm2_dispenser", tuple(points)
         if arm_name == "arm3" and operation.kind == "MATERIAL_INSPECTION":
-            geometry = V2ProcessGeometry.for_preset(unit.preset)
+            geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, yaw = self._tray_frame(unit)
             return (
                 "arm3_camera",
                 (
                     _Waypoint(
                         top_down_inspection_pose(
-                            origin + rotation @ np.asarray([0.0, 0.0, TRAY_PAYLOAD_ORIGIN_Z_M]),
+                            origin + rotation @ np.asarray([0.0, 0.0, geometry.base_center_z_m]),
                             product_length_m=geometry.base_size_m[0],
                             product_width_m=geometry.base_size_m[1],
                             product_yaw_rad=yaw,
@@ -1275,14 +1307,14 @@ class V2RobotMotionProjector:
                 ),
             )
         if arm_name == "arm3" and operation.kind == "PRE_BRAZE_INSPECTION":
-            geometry = V2ProcessGeometry.for_preset(unit.preset)
+            geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, yaw = self._tray_frame(unit)
             return (
                 "arm3_camera",
                 (
                     _Waypoint(
                         top_down_inspection_pose(
-                            origin + rotation @ np.asarray([0.0, 0.0, TRAY_PAYLOAD_ORIGIN_Z_M]),
+                            origin + rotation @ np.asarray([0.0, 0.0, geometry.base_center_z_m]),
                             product_length_m=geometry.base_size_m[0],
                             product_width_m=geometry.base_size_m[1],
                             product_yaw_rad=yaw,
@@ -1292,7 +1324,7 @@ class V2RobotMotionProjector:
                 ),
             )
         if arm_name == "arm3" and operation.kind == "INSTALL_FIN":
-            geometry = V2ProcessGeometry.for_preset(unit.preset)
+            geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, tray_yaw = self._tray_frame(unit)
             nominal_goal = geometry.world_fin_target(
                 self._active_fin_index(unit) - 1,
@@ -1591,7 +1623,7 @@ class V2RobotMotionProjector:
         fast: bool,
     ) -> _JointPlan:
         controller = self.controllers[arm_name]
-        geometry = V2ProcessGeometry.for_preset(unit.preset)
+        geometry = V2ProcessGeometry.for_unit(unit)
         recovering_failed_pick = bool(
             operation.kind == "INSTALL_FIN"
             and operation.recovery_strategy == "FIN_REINSTALL"
@@ -1622,7 +1654,7 @@ class V2RobotMotionProjector:
                 self.data.site("v2_base_supply_pickup_site").xpos,
                 dtype=float,
             ).copy()
-            supply[2] -= 0.008
+            supply[2] -= self.BASE_SUCTION_STANDOFF_M + 0.5 * geometry.base_size_m[2]
             self._prepare_proxy(proxy_key, supply)
         elif operation.kind == "INSTALL_FIN":
             proxy_key = f"{arm_name}_fin"
@@ -1992,6 +2024,7 @@ class V2RobotMotionProjector:
                     plan.interaction_elapsed_s / self.BASE_SUCTION_ENGAGE_SECONDS,
                 )
                 self._set_arm1_suction_fraction(quintic_time_scaling(fraction))
+                self._align_base_proxy_with_suction(plan, fraction)
                 if fraction < 1.0:
                     return False
                 self._grasp_proxy(plan)

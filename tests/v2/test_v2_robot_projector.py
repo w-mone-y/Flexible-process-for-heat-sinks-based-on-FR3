@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from brazing_sim.dual_line import DualLineRuntime, DualLineSceneAdapter
+from brazing_sim.flexible import build_custom_plan
 from brazing_sim.motion import HOME_QPOS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -446,6 +447,69 @@ def test_v2_carried_base_uses_the_short_direct_aisle_to_s1() -> None:
         # and placement centreline while Y advances monotonically toward S1.
         assert float(np.ptp(transfer[:, 0])) <= 0.010
         assert float(np.max(np.diff(transfer[:, 1]))) <= 0.002
+    finally:
+        adapter.close()
+
+
+def test_thin_base_descends_to_support_without_penetration_or_release_float() -> None:
+    """The in-flight proxy and settled pool must share one thickness-aware pose."""
+
+    pytest.importorskip("mujoco")
+    plan = build_custom_plan(
+        order_id="THIN_BASE_HANDOFF",
+        quantity=1,
+        priority=10,
+        product={
+            "base_size_m": [0.36, 0.22, 0.002],
+            "fin_size_m": [0.30, 0.002, 0.06],
+            "fin_count": 5,
+            "fin_pitch_m": 0.02,
+            "path_margin_m": 0.015,
+            "path_width_m": 0.004,
+            "nozzle_spacing_m": 0.005,
+            "nozzle_tip_height_m": 0.004,
+            "material_speed_m_s": 0.04,
+            "target_clamping_force_n": 20.0,
+            "recipe": "demo_brazing",
+        },
+    )
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    proxy_bottoms: list[float] = []
+    suction_alignment_positions: list[np.ndarray] = []
+    try:
+        runtime.submit_plan(plan)
+        proxy_id = int(adapter.model.geom("v2_arm1_raw_base_proxy_geom").id)
+        unit = runtime.units["THIN_BASE_HANDOFF_UNIT_01"]
+        for _ in range(6_000):
+            runtime.tick(0.005)
+            adapter.sync(runtime)
+            adapter.step_physics(0.005)
+            state = adapter.robot_motion_snapshot()["arm1"]
+            if "缓慢吸取基板" in str(state["target_zh"]) and not state["workpiece_held"]:
+                suction_alignment_positions.append(
+                    np.asarray(adapter.data.geom_xpos[proxy_id], dtype=float).copy()
+                )
+            if state["workpiece_held"] and (
+                "逐步纯Z下降" in str(state["target_zh"]) or "缓慢放置基板" in str(state["target_zh"])
+            ):
+                proxy_bottoms.append(
+                    float(adapter.data.geom_xpos[proxy_id, 2] - adapter.model.geom_size[proxy_id, 2])
+                )
+            if state["release_verified"]:
+                break
+
+        assert unit.tray_id is not None
+        settled_name = f"{unit.tray_id.lower()}_base_plate"
+        settled = adapter.data.geom(settled_name)
+        settled_bottom = float(settled.xpos[2] - adapter.model.geom(settled_name).size[2])
+        assert len(proxy_bottoms) >= 8
+        assert min(proxy_bottoms) >= settled_bottom - 0.0005
+        assert proxy_bottoms[-1] == pytest.approx(settled_bottom, abs=0.0005)
+        alignment = np.stack(suction_alignment_positions)
+        alignment_steps = np.linalg.norm(np.diff(alignment, axis=0), axis=1)
+        assert float(np.linalg.norm(alignment[-1] - alignment[0])) >= 0.0005
+        assert float(np.max(alignment_steps)) <= 0.0002
     finally:
         adapter.close()
 

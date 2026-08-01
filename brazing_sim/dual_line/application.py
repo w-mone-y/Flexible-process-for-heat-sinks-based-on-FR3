@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from brazing_sim.api import SharedState, start_http_server
+from brazing_sim.flexible import build_custom_plan
 
 from .presentation import V2StatePresenter
 from .runtime import DualLineRuntime
@@ -64,16 +65,37 @@ class V2ControlSurface:
         strategy = str(command.get("route_strategy") or "").strip().upper()
         if strategy and strategy != "STANDARD":
             raise ValueError(f"V2 当前不支持工艺路线 {strategy}，订单未加入")
-        if command.get("custom_product") is not None:
-            raise ValueError("V2 当前不支持自定义产品执行，订单未加入")
-        self.runtime.submit_order(
-            str(command.get("preset", "A")),
-            order_id=str(command.get("order_id") or "").strip() or None,
-            quantity=int(command.get("quantity", 1) if quantity is None else quantity),
-            priority=int(command.get("priority", 10)),
-            due_at=self._due_at(command),
-            urgent=bool(command.get("urgent", False)),
-        )
+        requested_quantity = int(command.get("quantity", 1) if quantity is None else quantity)
+        custom_product = command.get("custom_product")
+        if custom_product is not None:
+            if not isinstance(custom_product, Mapping):
+                raise ValueError("V2 自定义产品参数必须是对象")
+            identifier = str(command.get("order_id") or "").strip()
+            if not identifier:
+                identifier = self.runtime.next_order_id
+            plan = build_custom_plan(
+                order_id=identifier,
+                quantity=requested_quantity,
+                priority=int(command.get("priority", 10)),
+                due_time=command.get("due_time"),
+                preferred_rack_layer=command.get("preferred_rack_layer"),
+                product=dict(custom_product),
+                route_strategy=strategy or "STANDARD",
+            )
+            self.runtime.submit_plan(
+                plan,
+                due_at=self._due_at(command),
+                urgent=bool(command.get("urgent", False)),
+            )
+        else:
+            self.runtime.submit_order(
+                str(command.get("preset", "A")),
+                order_id=str(command.get("order_id") or "").strip() or None,
+                quantity=requested_quantity,
+                priority=int(command.get("priority", 10)),
+                due_at=self._due_at(command),
+                urgent=bool(command.get("urgent", False)),
+            )
         if ignored:
             self.ignored_order_fields = ignored
             raise ValueError("订单已接受，但以下设置在 V2 下未生效：" + "；".join(ignored))

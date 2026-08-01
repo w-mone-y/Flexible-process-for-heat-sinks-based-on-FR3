@@ -18,6 +18,22 @@ from brazing_sim.manufacturing_config import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _custom_product(*, fin_count: int = 6) -> dict[str, object]:
+    return {
+        "base_size_m": [0.36, 0.22, 0.008],
+        "fin_size_m": [0.30, 0.002, 0.06],
+        "fin_count": fin_count,
+        "fin_pitch_m": 0.02,
+        "path_margin_m": 0.015,
+        "path_width_m": 0.004,
+        "nozzle_spacing_m": 0.005,
+        "nozzle_tip_height_m": 0.004,
+        "material_speed_m_s": 0.04,
+        "target_clamping_force_n": 24.0,
+        "recipe": "demo_brazing",
+    }
+
+
 def test_v2_configuration_and_multi_order_files_load() -> None:
     scheduler = load_scheduler_config(ROOT / "config" / "scheduler.yaml")
     resources, zones = load_resource_config(ROOT / "config" / "resources.yaml")
@@ -70,7 +86,45 @@ def test_order_plan_and_v2_control_commands_validate() -> None:
     )
     assert safety["auto_recover"] is False
     assert safety["duration_s"] is None
+    assert MANUAL_FAULT_CATALOG["CONTACT_SAFETY_STOP"].simulated_manual_review
+    assert MANUAL_FAULT_CATALOG["TRAY_STATE_INCONSISTENT"].simulated_manual_review
     assert {"FIN_POSE", "BRAZING_MISSING", "FURNACE_PROFILE", "FORK_TIMEOUT"} <= set(MANUAL_FAULT_CATALOG)
+
+
+def test_custom_v2_order_can_be_previewed_and_inserted() -> None:
+    payload = {
+        "line_profile": "V2_DUAL_INSTALL",
+        "mode": "custom",
+        "order_id": "CUSTOM_UI",
+        "quantity": 2,
+        "priority": 18,
+        "custom_product": _custom_product(fin_count=6),
+    }
+
+    preview = validate_http_command("/orders/plan", payload)
+    insertion = validate_http_command("/orders/insert", payload)
+
+    assert preview["plan"]["preset"] == "CUSTOM"
+    assert preview["plan"]["fin_count"] == 6
+    assert preview["plan"]["path_count"] == 12
+    assert preview["plan"]["comb_module"] == "comb_insert_20mm"
+    assert insertion["type"] == "order_insert"
+    assert insertion["custom_product"] == payload["custom_product"]
+
+
+def test_v2_custom_preview_rejects_geometry_outside_the_physical_tray() -> None:
+    product = _custom_product()
+    product["base_size_m"] = [0.44, 0.22, 0.008]
+    with pytest.raises(ValueError, match="390×250 mm"):
+        validate_http_command(
+            "/orders/plan",
+            {
+                "line_profile": "V2_DUAL_INSTALL",
+                "mode": "custom",
+                "order_id": "TOO_LARGE",
+                "custom_product": product,
+            },
+        )
 
 
 def test_removed_fin_insert_fault_is_not_exposed_or_accepted() -> None:

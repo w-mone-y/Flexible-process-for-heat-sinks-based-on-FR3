@@ -8,8 +8,59 @@ import sys
 import pytest
 
 from brazing_sim.dual_line import DualLineRuntime, FurnacePhase, UnitStage
+from brazing_sim.flexible import build_custom_plan
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _custom_plan(*, order_id: str = "CUSTOM_RUNTIME", quantity: int = 1):
+    return build_custom_plan(
+        order_id=order_id,
+        quantity=quantity,
+        priority=17,
+        product={
+            "base_size_m": [0.36, 0.22, 0.008],
+            "fin_size_m": [0.30, 0.002, 0.06],
+            "fin_count": 6,
+            "fin_pitch_m": 0.02,
+            "path_margin_m": 0.015,
+            "path_width_m": 0.004,
+            "nozzle_spacing_m": 0.005,
+            "nozzle_tip_height_m": 0.004,
+            "material_speed_m_s": 0.04,
+            "target_clamping_force_n": 24.0,
+            "recipe": "demo_brazing",
+        },
+    )
+
+
+def test_v2_runtime_executes_a_custom_process_plan_to_completion() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_plan(_custom_plan())
+
+    snapshot = runtime.run_until_complete(max_sim_time=180.0, dt=0.05)
+
+    assert snapshot["complete"]
+    unit = snapshot["units"][0]
+    assert unit["preset"] == "CUSTOM"
+    assert unit["product_id"] == "CUSTOM_CUSTOM_RUNTIME"
+    assert unit["fin_count"] == 6
+    assert unit["comb_module"] == "comb_insert_20mm"
+    assert unit["path_count"] == 12
+    assert snapshot["orders"][0]["mode"] == "custom"
+
+
+def test_compatible_custom_and_preset_orders_share_one_v2_furnace_batch() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_plan(_custom_plan(order_id="CUSTOM_MIX"))
+    runtime.submit_order("A", order_id="PRESET_MIX")
+
+    snapshot = runtime.run_until_complete(max_sim_time=180.0, dt=0.05)
+
+    assert snapshot["complete"]
+    assert snapshot["furnace"]["completed_batches"] == 1
+    queued = [event for event in snapshot["events"] if event["type"] == "ORDER_QUEUED"]
+    assert {event["preset"] for event in queued} == {"CUSTOM", "A"}
 
 
 def test_v2_runtime_schedules_three_mixed_orders_across_both_install_branches() -> None:

@@ -47,7 +47,7 @@ class DualLineTopology:
             Station("S3B_ARM3_INSTALL", "S3B Arm3 翅片安装", (0.35, -0.45, 0.225)),
             Station("FIN_TABLE_B", "B线翅片料台", (0.55, -0.85, 0.265)),
             Station("MERGE_A_WAIT", "A线北侧平面等待位", (1.40, 0.50, 0.225)),
-            Station("MERGE_B_WAIT", "B线南侧平面等待位", (1.55, -1.22, 0.225)),
+            Station("MERGE_B_WAIT", "B线南侧平面等待位", (1.40, -1.22, 0.225)),
             Station("Y_MERGE_SHARED", "S4入口单占用区", (1.40, 0.00, 0.225)),
             Station("S4_PRE_BRAZE_INSPECTION", "S4 共享焊前检测", (1.40, 0.00, 0.225)),
             Station("FURNACE_BUFFER_1", "炉前缓存1", (1.85, 0.00, 0.225)),

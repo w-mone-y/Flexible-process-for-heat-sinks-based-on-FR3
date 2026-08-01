@@ -142,6 +142,7 @@ _DEFINITIONS = (
         "关联机构立即停止并变红，接触位置显示闪烁红球；默认需要人工确认。",
         runtime_fault="CONTACT_SAFETY_STOP",
         supports_duration=False,
+        simulated_manual_review=True,
     ),
     ManualFaultDefinition(
         "TRAY_STATE_INCONSISTENT",
@@ -151,6 +152,7 @@ _DEFINITIONS = (
         "托盘变为紫红色并出现偏移半透明重影，停止物流并转入人工归属检查。",
         runtime_fault="TRAY_STATE_INCONSISTENT",
         supports_duration=False,
+        simulated_manual_review=True,
     ),
 )
 

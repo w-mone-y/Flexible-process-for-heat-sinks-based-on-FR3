@@ -135,7 +135,9 @@ def _fixture_view(active: Mapping[str, Any] | None) -> dict[str, Any]:
             "clamping_force_n": 0.0,
         }
     preset = str(active.get("preset", ""))
-    comb, force = _PRESET_FIXTURE.get(preset, (None, 0.0))
+    fallback_comb, fallback_force = _PRESET_FIXTURE.get(preset, (None, 0.0))
+    comb = active.get("comb_module") or fallback_comb
+    force = float(active.get("target_clamping_force_n", fallback_force))
     rank = _STAGE_RANK.get(str(active.get("stage", "")), 0)
     fitted = rank >= _STAGE_RANK[_COMB_INSTALLED_FROM]
     engaged = _STAGE_RANK[_PRESS_ENGAGED_FROM] <= rank < _STAGE_RANK[_PRESS_RELEASED_FROM]

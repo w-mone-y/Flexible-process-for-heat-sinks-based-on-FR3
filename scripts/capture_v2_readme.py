@@ -53,6 +53,111 @@ def _save(
     print(f"[capture] {filename} at t={application.runtime.sim_time:.2f}s", flush=True)
 
 
+def _capture_fault_frame(
+    *,
+    fault_type: str,
+    target: str,
+    filename: str,
+) -> None:
+    """Capture one real defect/rework state from the shared V2 application."""
+
+    args = parse_args(
+        [
+            "--headless",
+            "--no-ui",
+            "--orders",
+            "A",
+            "--fast",
+            "--max-sim-time",
+            "260",
+        ]
+    )
+    application = V2BrazingApplication(args)
+    application.submit_cli_orders()
+    application.runtime.inject_fault(fault_type, target=target)
+    model = application.scene.model
+    model.vis.global_.offwidth = 1280
+    model.vis.global_.offheight = 720
+    renderer = mujoco.Renderer(model, height=720, width=1280)
+    try:
+        while (
+            not application.runtime.complete
+            and application.runtime.sim_time < float(args.max_sim_time)
+        ):
+            application.advance_frame()
+            runtime = application.runtime
+            defects = tuple(runtime.faults.physical_faults.values())
+            if fault_type == "BRAZING_MISSING":
+                detected = next(
+                    (
+                        defect
+                        for defect in defects
+                        if defect.visual_type == "BRAZING_MISSING"
+                        and defect.status == "DETECTED"
+                    ),
+                    None,
+                )
+                if detected is not None:
+                    _save(
+                        renderer,
+                        application,
+                        filename,
+                        _camera(
+                            lookat=(0.50, 0.00, 0.27),
+                            distance=1.18,
+                            azimuth=142,
+                            elevation=-42,
+                        ),
+                    )
+                    return
+            else:
+                recovery = next(
+                    (
+                        operation
+                        for operation in runtime.operations.values()
+                        if operation.recovery and operation.kind == "INSTALL_FIN"
+                    ),
+                    None,
+                )
+                if recovery is not None:
+                    progress = application.scene.robot_motion_snapshot()[
+                        recovery.resource.lower()
+                    ].get("progress", 0.0)
+                    if 0.28 <= float(progress) <= 0.78:
+                        unit = runtime.units[recovery.unit_id]
+                        assert unit.tray_id is not None
+                        tray_position = application.scene.tray_position(unit.tray_id)
+                        _save(
+                            renderer,
+                            application,
+                            filename,
+                            _camera(
+                                lookat=tuple(float(value) for value in tray_position),
+                                distance=1.32,
+                                azimuth=138,
+                                elevation=-38,
+                            ),
+                        )
+                        return
+        raise RuntimeError(f"V2 fault run completed without capture state: {filename}")
+    finally:
+        renderer.close()
+        application.close()
+
+
+def _capture_fault_flexibility_frames() -> None:
+    _capture_fault_frame(
+        fault_type="BRAZING_MISSING",
+        target="path_02",
+        filename="v2_fault_brazing_missing.png",
+    )
+    _capture_fault_frame(
+        fault_type="FIN_POSE",
+        target="fin_03",
+        filename="v2_fault_fin_pose_rework.png",
+    )
+
+
 def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     args = parse_args(
@@ -203,6 +308,7 @@ def main() -> int:
     finally:
         renderer.close()
         application.close()
+    _capture_fault_flexibility_frames()
     return 0
 
 

@@ -136,7 +136,11 @@ def build_custom_plan(
         nozzle_tip_height_m=float(product["nozzle_tip_height_m"]),
         material_speed_m_s=float(product["material_speed_m_s"]),
         recipe=recipe_name,
-        material_system=str(product.get("material_system", "demo_brazing_material")),
+        # Runtime-custom products use the line's current aluminium material
+        # system unless the caller explicitly selects another one.  This lets
+        # a compatible custom order share a V2 furnace batch with A/B/C while
+        # still preserving strict material-system separation when overridden.
+        material_system=str(product.get("material_system", "demo_aluminum_brazing")),
     )
     fins, paths = generate_geometry(config)
     recipe = recipes[recipe_name]

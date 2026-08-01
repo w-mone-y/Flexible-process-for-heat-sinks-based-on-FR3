@@ -16,7 +16,23 @@ from brazing_sim.dual_line.application import V2ControlSurface
 from brazing_sim.dual_line.presentation import V2StatePresenter
 from brazing_sim.dual_line.runtime import DualLineRuntime
 from brazing_sim.dual_line.tray_flow import TrayOwner
-from brazing_sim.ui import manual_review_popup_state
+from brazing_sim.ui import line_ui_profile, manual_review_popup_state
+
+
+def _custom_product() -> dict[str, object]:
+    return {
+        "base_size_m": [0.36, 0.22, 0.008],
+        "fin_size_m": [0.30, 0.002, 0.06],
+        "fin_count": 6,
+        "fin_pitch_m": 0.02,
+        "path_margin_m": 0.015,
+        "path_width_m": 0.004,
+        "nozzle_spacing_m": 0.005,
+        "nozzle_tip_height_m": 0.004,
+        "material_speed_m_s": 0.04,
+        "target_clamping_force_n": 24.0,
+        "recipe": "demo_brazing",
+    }
 
 
 def _state(runtime: DualLineRuntime) -> dict:
@@ -51,13 +67,54 @@ def test_manual_review_popup_changes_from_waiting_to_success() -> None:
                 {
                     "recovery_id": "R1",
                     "status": "SUCCEEDED",
-                    "message": "修复成功✅",
+                    "message": "修改成功✅",
                     "complete_at": 10.0,
                 }
             ],
         }
     )
-    assert succeeded == {"recovery_id": "R1", "status": "SUCCEEDED", "message": "修复成功✅"}
+    assert succeeded == {"recovery_id": "R1", "status": "SUCCEEDED", "message": "修改成功✅"}
+
+
+def test_manual_review_dialog_has_full_message_and_does_not_close_control_panel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the real Qt widget lifecycle that previously left only MuJoCo visible."""
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    from brazing_sim.qt_manual_review import ManualReviewDialog
+
+    application = QApplication.instance() or QApplication([])
+    control_panel = QWidget()
+    control_panel.show()
+    dialog = ManualReviewDialog(control_panel)
+
+    dialog.apply_popup(
+        {
+            "recovery_id": "R1",
+            "status": "MANUAL_REVIEW",
+            "message": "发生机械臂暂时离线故障❌，需进行人工审核🔩🔧，请稍作等待⏰\n预计剩余 9.8 秒",
+        }
+    )
+    application.processEvents()
+    assert dialog.isVisible()
+    assert "发生机械臂暂时离线故障" in dialog.message_label.text()
+    assert "预计剩余 9.8 秒" in dialog.message_label.text()
+    assert not dialog.confirm_button.isVisible(), "等待阶段不应出现默认 OK 按钮"
+
+    dialog.apply_popup({"recovery_id": "R1", "status": "SUCCEEDED", "message": "修改成功✅"})
+    application.processEvents()
+    assert dialog.confirm_button.isVisible()
+    assert dialog.confirm_button.text() == "确定"
+    assert dialog.message_label.text() == "修改成功✅"
+
+    dialog.confirm_button.click()
+    application.processEvents()
+    assert not dialog.isVisible()
+    assert control_panel.isVisible(), "确认修复结果后控制台不得随弹窗一起消失"
 
 
 @pytest.fixture(scope="module")
@@ -245,6 +302,61 @@ def test_supported_order_fields_do_not_warn():
     assert not surface.ignored_order_fields
     assert runtime.orders["CLEAN"].urgent is True
     assert len(runtime.orders["CLEAN"].unit_ids) == 2
+
+
+def test_custom_order_insert_reaches_the_v2_runtime() -> None:
+    runtime = DualLineRuntime(fast=True)
+    surface = V2ControlSurface(runtime)
+
+    surface.process(
+        {
+            "type": "order_insert",
+            "mode": "custom",
+            "preset": "CUSTOM",
+            "order_id": "CUSTOM_WIRED",
+            "quantity": 1,
+            "priority": 21,
+            "route_strategy": "STANDARD",
+            "custom_product": _custom_product(),
+        }
+    )
+
+    order = runtime.orders["CUSTOM_WIRED"]
+    unit = runtime.units[order.unit_ids[0]]
+    assert order.product_id == "CUSTOM_CUSTOM_WIRED"
+    assert unit.preset == "CUSTOM"
+    assert unit.fin_count == 6
+    assert len(unit.process_geometry.fin_targets) == 6
+    assert len(unit.process_geometry.brazing_paths) == 12
+    assert unit.comb_module == "comb_insert_20mm"
+    assert unit.target_clamping_force_n == pytest.approx(24.0)
+
+
+def test_v2_ui_profile_exposes_custom_order_mode() -> None:
+    assert line_ui_profile("V2").supports_custom_orders
+
+
+def test_custom_fixture_parameters_are_visible_in_the_v2_console_state() -> None:
+    runtime = DualLineRuntime(fast=True)
+    V2ControlSurface(runtime).process(
+        {
+            "type": "order_insert",
+            "mode": "custom",
+            "order_id": "CUSTOM_FIXTURE",
+            "quantity": 1,
+            "priority": 10,
+            "custom_product": _custom_product(),
+        }
+    )
+    fixture = _state(runtime)["fixture"]
+    for _ in range(2_000):
+        runtime.tick(0.05)
+        fixture = _state(runtime)["fixture"]
+        if fixture["active_comb_module"]:
+            break
+
+    assert fixture["active_comb_module"] == "comb_insert_20mm"
+    assert "CUSTOM" in fixture["status"]
 
 
 def test_batch_command_is_supported():

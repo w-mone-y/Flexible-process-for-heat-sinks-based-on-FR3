@@ -618,9 +618,9 @@ class V2FaultController:
         )
         self.faults[record.fault_id] = record
 
-        # Safety faults always require an explicit operator verification.  An
-        # ``auto_recover`` checkbox or a timeout must never clear a contact stop
-        # or inconsistent tray ownership behind the operator's back.
+        # Manual-review faults do not use the generic resource timeout.  Their
+        # release is owned by the single ten-second review state machine below,
+        # so the popup, resource isolation and order continuation stay atomic.
         simulated_manual_review = self._uses_simulated_manual_review(record)
         deadline = (
             float(now) + float(duration_s)
@@ -679,7 +679,7 @@ class V2FaultController:
         if not record.recoverable:
             strategy, rollback = "MANUAL_REVIEW", None
 
-        simulated_manual_review = strategy == "MANUAL_REVIEW" and self._uses_simulated_manual_review(record)
+        simulated_manual_review = strategy == "MANUAL_REVIEW"
         fault_label_zh = str(record.details.get("label_zh") or record.fault_type.value)
         self._recovery_sequence += 1
         plan = V2RecoveryPlan(
@@ -714,7 +714,46 @@ class V2FaultController:
             FaultType.FURNACE_PROFILE,
             FaultType.FIN_PICK_FAILED,
             FaultType.ARM_UNAVAILABLE,
+            FaultType.CONTACT_SAFETY_STOP,
+            FaultType.TRAY_STATE_INCONSISTENT,
         } or (record.fault_type is FaultType.FIN_GEOMETRY_FAILED and visual_type != "FIN_POSE")
+
+    @staticmethod
+    def _manual_review_message(record: FaultRecord) -> str:
+        label = str(record.details.get("label_zh") or record.fault_type.value)
+        return f"发生{label}故障❌，需进行人工审核🔩🔧，请稍作等待⏰"
+
+    def _begin_manual_review(
+        self,
+        plan: V2RecoveryPlan,
+        record: FaultRecord,
+        now: float,
+    ) -> None:
+        """Enter the common, idempotent ten-second simulated review window."""
+
+        if plan.status is RecoveryStatus.MANUAL_REVIEW and plan.manual_review_complete_at is not None:
+            return
+        plan.status = RecoveryStatus.MANUAL_REVIEW
+        plan.manual_review_started_at = float(now)
+        plan.manual_review_complete_at = float(now) + SIMULATED_MANUAL_REVIEW_SECONDS
+        plan.fault_label_zh = str(record.details.get("label_zh") or record.fault_type.value)
+        plan.message = self._manual_review_message(record)
+
+    def _release_manual_review_isolation(self, record: FaultRecord) -> None:
+        """Release exactly the physical/logical hold owned by one reviewed fault."""
+
+        if record.fault_type is FaultType.ARM_UNAVAILABLE:
+            resource = str(record.details.get("target") or record.source).upper()
+            self.isolated_resources.pop(resource, None)
+        if record.fault_type is FaultType.CONTACT_SAFETY_STOP:
+            self.cell_hold_active = False
+            self.cell_hold_until = None
+        for resource in _ISOLATED_MECHANISMS.get(record.fault_type, ()):
+            self.isolated_resources.pop(resource, None)
+        if record.fault_type is FaultType.RACK_LAYER_UNAVAILABLE:
+            target = str(record.details.get("target", ""))
+            if target.isdigit():
+                self.unavailable_rack_layers.discard(int(target))
 
     def service_manual_reviews(self, now: float) -> list[V2RecoveryPlan]:
         """Complete the explicitly simulated ten-second human repair window."""
@@ -731,13 +770,11 @@ class V2FaultController:
             record = self.faults.get(plan.fault_id)
             if record is None:
                 continue
-            if record.fault_type is FaultType.ARM_UNAVAILABLE:
-                resource = str(record.details.get("target") or record.source).upper()
-                self.isolated_resources.pop(resource, None)
+            self._release_manual_review_isolation(record)
             record.recovered = True
             plan.status = RecoveryStatus.SUCCEEDED
             plan.completed_at = float(now)
-            plan.message = "修复成功✅"
+            plan.message = "修改成功✅"
             for request in self.pending.values():
                 if request.fault_id != record.fault_id:
                     continue
@@ -985,6 +1022,12 @@ class V2FaultController:
             plan.status = RecoveryStatus.RUNNING
         elif verb == "retry":
             record = self.faults.get(plan.fault_id)
+            if (
+                plan.status is RecoveryStatus.MANUAL_REVIEW
+                and plan.manual_review_complete_at is not None
+                and float(now) + 1.0e-9 < plan.manual_review_complete_at
+            ):
+                return False
             # For safety faults, Retry means that the operator has inspected
             # the cell and explicitly confirmed it is safe to release.  It is
             # not an automatic process retry and therefore completes the manual
@@ -1021,15 +1064,16 @@ class V2FaultController:
                 plan.message = "该质量故障需要人工处置结论，不能伪装为自动重试"
                 return False
             if plan.retry_count >= plan.retry_limit:
-                plan.status = RecoveryStatus.MANUAL_REVIEW
-                plan.message = "重试次数已用尽，转人工"
+                if record is not None:
+                    self._begin_manual_review(plan, record, now)
                 return False
             plan.retry_count += 1
             plan.status = RecoveryStatus.RUNNING
         elif verb == "manual_review":
-            plan.status = RecoveryStatus.MANUAL_REVIEW
-            if plan.manual_review_complete_at is None:
-                plan.message = "操作员转人工"
+            record = self.faults.get(plan.fault_id)
+            if record is None:
+                return False
+            self._begin_manual_review(plan, record, now)
         else:
             return False
         return True

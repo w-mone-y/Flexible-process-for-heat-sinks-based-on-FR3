@@ -40,6 +40,7 @@ class LineUiProfile:
     tab_titles: tuple[str, ...]
     segment_actions: tuple[UiSegmentAction, ...]
     station_titles: dict[str, str]
+    supports_custom_orders: bool
 
 
 _V1_UI_PROFILE = LineUiProfile(
@@ -61,6 +62,7 @@ _V1_UI_PROFILE = LineUiProfile(
         "S3_FIN_ASSEMBLY": "S3 翅片装配/压紧",
         "RACK_INFEED": "炉前料架入口",
     },
+    supports_custom_orders=True,
 )
 
 _V2_UI_PROFILE = LineUiProfile(
@@ -98,6 +100,7 @@ _V2_UI_PROFILE = LineUiProfile(
         "POST_BRAZE_SCAN": "焊后固定视觉检测",
         "FINISHED_OUTPUT": "成品出口",
     },
+    supports_custom_orders=True,
 )
 
 
@@ -238,7 +241,6 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             QHBoxLayout,
             QLabel,
             QLineEdit,
-            QMessageBox,
             QPushButton,
             QSpinBox,
             QTabWidget,
@@ -247,6 +249,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             QVBoxLayout,
             QWidget,
         )
+        from brazing_sim.qt_manual_review import ManualReviewDialog
     except ImportError:
         print("PySide6 is not installed; run with --headless or install brazing-sim[ui].", file=sys.stderr)
         return 2
@@ -839,10 +842,10 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.order_mode_input = QComboBox()
             self.order_mode_input.addItem("预设产品", "preset")
             self.order_mode_input.addItem("自定义产品", "custom")
-            if selected_profile.profile_id == "V2_DUAL_INSTALL":
+            if not selected_profile.supports_custom_orders:
                 custom_item = self.order_mode_input.model().item(1)
                 custom_item.setEnabled(False)
-                custom_item.setToolTip("V2 当前只执行已经过实体工装验证的 A/B/C 产品")
+                custom_item.setToolTip("当前产线未接入自定义产品执行")
             self.preset_input = QComboBox()
             self.preset_input.addItems(["A", "B", "C"])
             self.quantity_input = QSpinBox()
@@ -886,8 +889,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 control.setSuffix(" mm")
                 return control
 
-            self.custom_base_l = millimetres(360.0, 100.0, 440.0)
-            self.custom_base_w = millimetres(220.0, 80.0, 290.0)
+            self.custom_base_l = millimetres(360.0, 100.0, 390.0)
+            self.custom_base_w = millimetres(220.0, 80.0, 250.0)
             self.custom_base_t = millimetres(8.0, 1.0, 20.0)
             self.custom_fin_l = millimetres(300.0, 80.0, 380.0)
             self.custom_fin_t = millimetres(2.0, 0.5, 8.0)
@@ -1248,6 +1251,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             layer_index = self.layer_input.currentIndex() - 1
             due = self.due_input.text().strip()
             payload = {
+                "line_profile": selected_profile.profile_id,
                 "order_id": self.order_id_input.text().strip(),
                 "mode": str(self.order_mode_input.currentData()),
                 "preset": self.preset_input.currentText(),
@@ -1548,9 +1552,9 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             popup = manual_review_popup_state(state)
             if popup is None:
                 if self._manual_review_dialog is not None:
-                    self._manual_review_dialog.close()
-                    self._manual_review_dialog = None
+                    self._manual_review_dialog.dismiss()
                     self._manual_review_recovery_id = ""
+                self._manual_review_success_seen.clear()
                 return
             recovery_id = popup["recovery_id"]
             succeeded = popup["status"] == "SUCCEEDED"
@@ -1558,20 +1562,13 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 return
             if self._manual_review_dialog is None or self._manual_review_recovery_id != recovery_id:
                 if self._manual_review_dialog is not None:
-                    self._manual_review_dialog.close()
-                self._manual_review_dialog = QMessageBox(self)
-                self._manual_review_dialog.setWindowTitle("人工审核")
-                self._manual_review_dialog.setWindowModality(Qt.WindowModal)
+                    self._manual_review_dialog.dismiss()
+                else:
+                    self._manual_review_dialog = ManualReviewDialog(self)
                 self._manual_review_recovery_id = recovery_id
-                self._manual_review_dialog.show()
-            self._manual_review_dialog.setText(popup["message"])
+            self._manual_review_dialog.apply_popup(popup)
             if succeeded:
-                self._manual_review_dialog.setIcon(QMessageBox.Information)
-                self._manual_review_dialog.setStandardButtons(QMessageBox.Ok)
                 self._manual_review_success_seen.add(recovery_id)
-            else:
-                self._manual_review_dialog.setIcon(QMessageBox.Warning)
-                self._manual_review_dialog.setStandardButtons(QMessageBox.NoButton)
 
         def refresh(self) -> None:
             try:

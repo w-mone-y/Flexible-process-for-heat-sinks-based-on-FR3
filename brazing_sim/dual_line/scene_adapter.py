@@ -6,13 +6,13 @@ from collections import deque
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from ..motion import HOME_QPOS
 from ..profiles import quintic_time_scaling
-from .process_geometry import TRAY_PAYLOAD_ORIGIN_Z_M, V2ProcessGeometry
+from .process_geometry import V2ProcessGeometry
 from .robot_projector import V2RobotMotionProjector
 from .fault_visuals import (
     BRAZING_DEVIATION_REAPPLY_START,
@@ -269,13 +269,13 @@ class DualLineSceneAdapter:
             ),
         )
 
-    def _configure_tray_geometry(self, tray_id: str, preset: str) -> None:
+    def _configure_tray_geometry(self, tray_id: str, unit: Any) -> None:
         """Resize and reseat the reusable visual pool from the V1 process plan."""
 
-        geometry = V2ProcessGeometry.for_preset(preset)
+        geometry = V2ProcessGeometry.for_unit(unit)
         base_id = self._component_geom_ids[(tray_id, "base_plate")]
         self.model.geom_size[base_id, :3] = np.asarray(geometry.base_size_m, dtype=float) / 2.0
-        base_center_z = TRAY_PAYLOAD_ORIGIN_Z_M
+        base_center_z = geometry.base_center_z_m
         self.model.geom_pos[base_id] = np.asarray([0.0, 0.0, base_center_z], dtype=float)
 
         template_id = self._component_geom_ids[(tray_id, "template_plate")]
@@ -616,8 +616,9 @@ class DualLineSceneAdapter:
 
         Both S3 branches remain on the station transport plane.  The A branch
         passes north of S2B.  The denser B branch first clears the S2B west
-        edge, then follows the south perimeter around the Arm3 cell before
-        running directly from its southeast wait into the relocated S4 centre.
+        edge, then follows the south perimeter before turning onto the S4
+        centreline.  Its final leg enters the relocated S4 vertically, matching
+        the A branch's centred approach instead of using an oblique segment.
         Moving the inspection table toward the furnace removes the former
         north-side return loop and its visible reverse motion.  These waypoints
         use the complete 400-by-280 mm pallet envelope; they are not
@@ -631,7 +632,7 @@ class DualLineSceneAdapter:
             # corridor in reverse, staying on the 0.225 m transport plane.
             if target_owner is TrayOwner.INSTALL_B:
                 return (
-                    np.asarray([1.55, _BRANCH_B_SOUTH_CLEAR_Y_M, float(start[2])]),
+                    np.asarray([1.40, _BRANCH_B_SOUTH_CLEAR_Y_M, float(start[2])]),
                     np.asarray([_BRANCH_B_WEST_CLEAR_X_M, _BRANCH_B_SOUTH_CLEAR_Y_M, float(start[2])]),
                     np.asarray([_BRANCH_B_WEST_CLEAR_X_M, _BRANCH_B_CORRIDOR_ENTRY_Y_M, float(start[2])]),
                     np.asarray([_BRANCH_B_CORNER_CLEAR_X_M, float(final_target[1]), float(start[2])]),
@@ -672,14 +673,10 @@ class DualLineSceneAdapter:
                 )
             return (final_target.copy(),)
         if source_owner in branch_waits and target_owner is TrayOwner.MERGE:
-            if source_owner is TrayOwner.MERGE_B_WAIT:
-                # Stay east of Arm3 until the pallet is level with S4, then
-                # enter the inspection centre horizontally.  The former direct
-                # diagonal crossed Arm3 link3 with the complete comb/press load.
-                return (
-                    np.asarray([float(start[0]), float(final_target[1]), float(start[2])]),
-                    final_target.copy(),
-                )
+            # Both waits are already aligned to the S4 centreline.  Returning
+            # one target keeps the physical carrier, UI route and MJCF rails on
+            # the same straight final segment without a duplicate zero-length
+            # waypoint.
             return (final_target.copy(),)
         if target_owner is TrayOwner.FURNACE:
             front_lift_low = np.asarray([2.75, 0.0, 0.225])
@@ -930,7 +927,7 @@ class DualLineSceneAdapter:
             owner = tray.owner
             unit = self._unit_for_tray(runtime, tray_id)
             if unit is not None and self._configured_unit_by_tray.get(tray_id) != unit.unit_id:
-                self._configure_tray_geometry(tray_id, unit.preset)
+                self._configure_tray_geometry(tray_id, unit)
                 self._configured_unit_by_tray[tray_id] = unit.unit_id
             nonphysical = {TrayOwner.EMPTY_BUFFER, TrayOwner.VIRTUAL_RETURN}
             visible = (

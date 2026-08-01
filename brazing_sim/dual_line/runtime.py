@@ -12,6 +12,8 @@ from enum import Enum
 from math import isfinite
 from typing import Any, Protocol
 
+from ..flexible import build_inline_plan
+from ..flexible.models import ProcessPlan
 from ..recovery.fault_models import RecoveryStatus
 from .faults import V2FaultController
 from .dispatch import (
@@ -21,6 +23,7 @@ from .dispatch import (
     InstallResourceState,
 )
 from .furnace import BatchRecipe, FurnacePhase, ThroughBatchFurnace
+from .process_geometry import V2_MAX_PRODUCT_HEIGHT_M, V2ProcessGeometry
 from .topology import DualLineTopology
 from .tray_flow import TrayFlowController, TrayOwner, TrayPhase
 
@@ -59,6 +62,12 @@ class V2UnitState:
     fin_count: int
     priority: int
     due_at: float | None
+    product_id: str
+    process_geometry: V2ProcessGeometry
+    comb_module: str
+    target_clamping_force_n: float
+    batch_recipe: BatchRecipe
+    route_strategy: str
     urgent: bool = False
     stage: UnitStage = UnitStage.QUEUED
     tray_id: str | None = None
@@ -75,7 +84,14 @@ class V2UnitState:
             "unit_id": self.unit_id,
             "order_id": self.order_id,
             "preset": self.preset,
+            "product_id": self.product_id,
             "fin_count": self.fin_count,
+            "path_count": len(self.process_geometry.brazing_paths),
+            "comb_module": self.comb_module,
+            "target_clamping_force_n": self.target_clamping_force_n,
+            "recipe": self.batch_recipe.name,
+            "material_system": self.batch_recipe.material_system,
+            "route_strategy": self.route_strategy,
             "priority": self.priority,
             "due_at": self.due_at,
             "urgent": self.urgent,
@@ -96,6 +112,9 @@ class V2OrderState:
     priority: int
     unit_ids: tuple[str, ...]
     inserted_at: float
+    product_id: str
+    route_strategy: str
+    mode: str
     due_at: float | None = None
     urgent: bool = False
 
@@ -104,6 +123,9 @@ class V2OrderState:
         return {
             "order_id": self.order_id,
             "preset": self.preset,
+            "product_id": self.product_id,
+            "route_strategy": self.route_strategy,
+            "mode": self.mode,
             "priority": self.priority,
             "due_at": self.due_at,
             "urgent": self.urgent,
@@ -197,9 +219,6 @@ class _Durations:
 # Stage progression index, used to tell forward motion from a recovery rewind.
 _STAGE_ORDER: dict[UnitStage, int] = {stage: index for index, stage in enumerate(UnitStage)}
 
-_FIN_COUNTS = {"A": 5, "B": 4, "C": 7}
-_STANDARD_RECIPE = BatchRecipe("CAB_STANDARD", "aluminium", 600.0, 240.0, 0.10)
-
 
 class DualLineRuntime:
     """Asynchronous six-tray runtime with shared Arm3 and a batch furnace."""
@@ -266,6 +285,12 @@ class DualLineRuntime:
     def complete(self) -> bool:
         return bool(self.units) and all(unit.stage is UnitStage.COMPLETE for unit in self.units.values())
 
+    @property
+    def next_order_id(self) -> str:
+        """Stable identifier offered to control surfaces before submission."""
+
+        return f"V2_ORDER_{self._order_sequence + 1:03d}"
+
     def submit_order(
         self,
         preset: str,
@@ -277,35 +302,78 @@ class DualLineRuntime:
         urgent: bool = False,
     ) -> V2OrderState:
         preset = str(preset).strip().upper()
-        if preset not in _FIN_COUNTS:
+        if preset not in {"A", "B", "C"}:
             raise ValueError("V2 preset must be A, B or C")
-        if not 1 <= int(quantity) <= 3:
+        identifier = str(order_id or "").strip()
+        if not identifier:
+            identifier = self.next_order_id
+        plan = build_inline_plan(
+            preset=preset,
+            order_id=identifier,
+            quantity=int(quantity),
+            priority=int(priority),
+        )
+        return self.submit_plan(plan, due_at=due_at, urgent=urgent)
+
+    def submit_plan(
+        self,
+        plan: ProcessPlan,
+        *,
+        due_at: float | None = None,
+        urgent: bool = False,
+    ) -> V2OrderState:
+        """Bind one validated ``ProcessPlan`` to V2 logical and physical state."""
+
+        if not 1 <= int(plan.quantity) <= 3:
             raise ValueError("one V2 order may contain one to three units")
-        if priority < 0:
+        if plan.order.priority < 0:
             raise ValueError("priority must be non-negative")
         if due_at is not None and not isfinite(float(due_at)):
             raise ValueError("due time must be finite")
+        if plan.route_strategy.value != "STANDARD":
+            raise ValueError(f"V2 当前不支持工艺路线 {plan.route_strategy.value}，订单未加入")
+
+        geometry = V2ProcessGeometry.from_plan(plan)
+        batch_recipe = BatchRecipe(
+            name=plan.recipe.name,
+            material_system=plan.product.material_system,
+            peak_c=float(plan.recipe.peak_c),
+            soak_seconds=float(plan.recipe.soak_seconds),
+            # This field describes the common V2 rack envelope so compatible
+            # A/B/C/custom products can share a batch after individual height
+            # validation above.
+            maximum_product_height_m=V2_MAX_PRODUCT_HEIGHT_M,
+        )
         self._order_sequence += 1
-        identifier = order_id or f"V2_ORDER_{self._order_sequence:03d}"
+        identifier = str(plan.order.order_id).strip() or f"V2_ORDER_{self._order_sequence:03d}"
         if identifier in self.orders:
             raise ValueError(f"duplicate V2 order id: {identifier}")
-        unit_ids = tuple(f"{identifier}_UNIT_{index:02d}" for index in range(1, int(quantity) + 1))
+        unit_ids = tuple(f"{identifier}_UNIT_{index:02d}" for index in range(1, int(plan.quantity) + 1))
         for unit_id in unit_ids:
             self.units[unit_id] = V2UnitState(
                 unit_id=unit_id,
                 order_id=identifier,
-                preset=preset,
-                fin_count=_FIN_COUNTS[preset],
-                priority=int(priority),
+                preset=plan.product.preset,
+                fin_count=len(plan.fin_targets),
+                priority=int(plan.order.priority),
                 due_at=None if due_at is None else float(due_at),
+                product_id=plan.product.product_id,
+                process_geometry=geometry,
+                comb_module=plan.fixture_module.name,
+                target_clamping_force_n=float(plan.product.target_clamping_force_n),
+                batch_recipe=batch_recipe,
+                route_strategy=plan.route_strategy.value,
                 urgent=bool(urgent),
             )
         order = V2OrderState(
             order_id=identifier,
-            preset=preset,
-            priority=int(priority),
+            preset=plan.product.preset,
+            priority=int(plan.order.priority),
             unit_ids=unit_ids,
             inserted_at=self.sim_time,
+            product_id=plan.product.product_id,
+            route_strategy=plan.route_strategy.value,
+            mode="custom" if plan.product.preset == "CUSTOM" else "preset",
             due_at=None if due_at is None else float(due_at),
             urgent=bool(urgent),
         )
@@ -313,9 +381,14 @@ class DualLineRuntime:
         self._event(
             "ORDER_QUEUED",
             order_id=identifier,
-            preset=preset,
-            quantity=quantity,
-            priority=int(priority),
+            preset=plan.product.preset,
+            product_id=plan.product.product_id,
+            quantity=plan.quantity,
+            priority=int(plan.order.priority),
+            fin_count=len(plan.fin_targets),
+            path_count=len(plan.brazing_paths),
+            comb_module=plan.fixture_module.name,
+            route_strategy=plan.route_strategy.value,
             due_at=order.due_at,
             urgent=order.urgent,
         )
@@ -1134,11 +1207,15 @@ class DualLineRuntime:
                 or len(self._active_batch_units) >= self.furnace.capacity
             ):
                 return False
-            unit = buffered[0]
+            batch_recipe = self.units[self._active_batch_units[0]].batch_recipe
+            compatible = [unit for unit in buffered if batch_recipe.compatible_with(unit.batch_recipe)]
+            if not compatible:
+                return False
+            unit = compatible[0]
             assert unit.tray_id is not None
             self.furnace.append_loading_tray(
                 unit.tray_id,
-                _STANDARD_RECIPE,
+                unit.batch_recipe,
                 now=self.sim_time,
             )
             self._active_batch_units.append(unit.unit_id)
@@ -1156,7 +1233,7 @@ class DualLineRuntime:
             return False
         selected = buffered[:1]
         self.furnace.plan_batch(
-            tuple((unit.tray_id or unit.unit_id, _STANDARD_RECIPE) for unit in selected),
+            tuple((unit.tray_id or unit.unit_id, unit.batch_recipe) for unit in selected),
             now=self.sim_time,
         )
         self.furnace.open_front(now=self.sim_time)

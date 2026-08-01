@@ -138,7 +138,34 @@ def test_arm_offline_uses_a_ten_second_simulated_manual_review(resource: str) ->
     runtime.tick(0.02)
     assert runtime.faults.resource_available(resource)
     assert plan.status is RecoveryStatus.SUCCEEDED
-    assert runtime.snapshot()["manual_review_notices"][0]["message"] == "修复成功✅"
+    assert runtime.snapshot()["manual_review_notices"][0]["message"] == "修改成功✅"
+
+
+@pytest.mark.parametrize(
+    "fault,isolated_resource",
+    (("CONTACT_SAFETY_STOP", None), ("TRAY_STATE_INCONSISTENT", "OUTPUT")),
+)
+def test_safety_fault_manual_review_finishes_after_ten_seconds(
+    fault: str,
+    isolated_resource: str | None,
+) -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id=f"TIMED_{fault}", quantity=1)
+    runtime.inject_fault(fault, target="")
+    plan = next(iter(runtime.faults.plans.values()))
+    assert plan.status is RecoveryStatus.MANUAL_REVIEW
+    assert plan.manual_review_complete_at == pytest.approx(plan.created_at + 10.0)
+
+    runtime.tick(9.99)
+    assert plan.status is RecoveryStatus.MANUAL_REVIEW
+    assert not runtime.faults.cell_available() or isolated_resource in runtime.faults.isolated_resources
+
+    runtime.tick(0.02)
+    assert plan.status is RecoveryStatus.SUCCEEDED
+    assert plan.message == "修改成功✅"
+    assert runtime.faults.cell_available()
+    if isolated_resource is not None:
+        assert isolated_resource not in runtime.faults.isolated_resources
 
 
 @pytest.mark.parametrize("fault", ("FIN_PICK_FAILED", "FIN_GEOMETRY_FAILED"))
@@ -180,25 +207,9 @@ def test_armed_requests_that_never_match_are_marked_missed():
 
 @pytest.mark.parametrize("fault,target,kwargs", FAULT_CASES)
 def test_every_fault_is_survivable(fault, target, kwargs, baseline):
-    """A fault must recover autonomously or after its required safety approval."""
+    """A fault must recover autonomously or through the simulated review."""
 
-    if fault in {"CONTACT_SAFETY_STOP", "TRAY_STATE_INCONSISTENT"}:
-        runtime = DualLineRuntime(fast=True)
-        runtime.submit_order("A", order_id=f"FAULT_{fault}", quantity=1)
-        runtime.inject_fault(fault, target=target, **kwargs)
-        for _ in range(20):
-            runtime.tick(0.05)
-        plan = next(iter(runtime.faults.plans.values()))
-        assert plan.status is RecoveryStatus.MANUAL_REVIEW
-        assert not runtime.complete, "安全故障不得在未经人工确认时自动绕过"
-        assert runtime.recovery_action(plan.recovery_id, "retry")
-        snapshot = runtime.snapshot()
-        for _ in range(30_000):
-            snapshot = runtime.tick(0.05)
-            if runtime.complete:
-                break
-    else:
-        runtime, snapshot = _run(fault, target, **kwargs)
+    runtime, snapshot = _run(fault, target, **kwargs)
     assert runtime.complete, f"{fault} 导致产线卡死"
     assert snapshot["faults_v2"], f"{fault} 未产生故障记录"
     assert runtime.sim_time >= baseline
@@ -386,7 +397,7 @@ def test_mechanism_timeout_holds_the_operation_where_it_occurs_and_then_recovers
     "fault,isolated_resource",
     (("CONTACT_SAFETY_STOP", None), ("TRAY_STATE_INCONSISTENT", "OUTPUT")),
 )
-def test_operator_retry_releases_a_verified_safety_hold(fault, isolated_resource):
+def test_timed_safety_review_cannot_be_bypassed_by_retry(fault, isolated_resource):
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("A", order_id=f"SAFE_{fault}", quantity=1)
     runtime.inject_fault(fault, target="", auto_recover=False)
@@ -394,7 +405,8 @@ def test_operator_retry_releases_a_verified_safety_hold(fault, isolated_resource
     assert plan.status is RecoveryStatus.MANUAL_REVIEW
     assert not runtime.faults.cell_available() or isolated_resource in runtime.faults.isolated_resources
 
-    assert runtime.recovery_action(plan.recovery_id, "retry")
+    assert not runtime.recovery_action(plan.recovery_id, "retry")
+    runtime.tick(10.01)
     assert plan.status is RecoveryStatus.SUCCEEDED
     assert runtime.faults.cell_available()
     if isolated_resource is not None:
@@ -421,7 +433,7 @@ def test_furnace_profile_is_released_after_the_simulated_manual_review():
         if runtime.complete:
             break
     assert plan.status is RecoveryStatus.SUCCEEDED
-    assert plan.message == "修复成功✅"
+    assert plan.message == "修改成功✅"
     assert runtime.complete
 
 
@@ -460,6 +472,28 @@ def test_repeated_failures_escalate_to_manual_review():
         statuses.append(list(controller.plans.values())[-1].strategy)
     assert statuses[:2] == ["LOCAL_BRAZING_REWORK", "LOCAL_BRAZING_REWORK"]
     assert statuses[2:] == ["MANUAL_REVIEW", "MANUAL_REVIEW"]
+    manual_plans = [plan for plan in controller.plans.values() if plan.status is RecoveryStatus.MANUAL_REVIEW]
+    assert all(
+        plan.manual_review_complete_at == pytest.approx(plan.created_at + 10.0) for plan in manual_plans
+    )
+
+
+def test_operator_manual_review_action_also_uses_the_ten_second_simulation() -> None:
+    controller = V2FaultController()
+    record = controller.inject(
+        FaultType.BRAZING_MISSING,
+        source="ARM3",
+        target="slot_02_left",
+        unit_id="U1",
+        now=0.0,
+    )
+    plan = controller.plans[record.recovery_id]
+    assert controller.action(plan.recovery_id, "manual_review", 2.0)
+    assert plan.status is RecoveryStatus.MANUAL_REVIEW
+    assert plan.manual_review_complete_at == pytest.approx(12.0)
+    assert not controller.service_manual_reviews(11.99)
+    assert controller.service_manual_reviews(12.01) == [plan]
+    assert plan.message == "修改成功✅"
 
 
 @pytest.mark.parametrize(
@@ -485,7 +519,7 @@ def test_repeated_mechanism_timeout_escalates_after_its_single_safe_retry(fault)
     assert controller.plans[second.recovery_id].status is RecoveryStatus.MANUAL_REVIEW
 
 
-def test_repeated_runtime_mechanism_failure_waits_for_operator_before_resuming():
+def test_repeated_runtime_mechanism_failure_uses_timed_manual_review_before_resuming():
     runtime = DualLineRuntime(fast=True)
     runtime.submit_order("A", order_id="REPEATED_TRANSFER", quantity=1)
     runtime.inject_fault("ELEVATOR_TIMEOUT", target="", duration_s=1.0)
@@ -510,7 +544,9 @@ def test_repeated_runtime_mechanism_failure_waits_for_operator_before_resuming()
     before = held_operation.remaining_s
     runtime.tick(1.0)
     assert held_operation.remaining_s == pytest.approx(before)
-    assert runtime.recovery_action(manual_plan.recovery_id, "retry")
+    assert not runtime.recovery_action(manual_plan.recovery_id, "retry")
+    runtime.tick(9.05)
+    assert manual_plan.status is RecoveryStatus.SUCCEEDED
 
     for _ in range(30_000):
         runtime.tick(0.05)
@@ -521,9 +557,12 @@ def test_repeated_runtime_mechanism_failure_waits_for_operator_before_resuming()
 
 def test_safety_faults_go_straight_to_manual_review():
     for fault in ("CONTACT_SAFETY_STOP", "TRAY_STATE_INCONSISTENT"):
-        _, snapshot = _run(fault, "", duration_s=3.0)
-        assert snapshot["recoveries"][0]["strategy"] == "MANUAL_REVIEW"
-        assert snapshot["recoveries"][0]["status"] == RecoveryStatus.MANUAL_REVIEW.value
+        runtime = DualLineRuntime(fast=True)
+        runtime.inject_fault(fault, target="", duration_s=3.0)
+        plan = next(iter(runtime.faults.plans.values()))
+        assert plan.strategy == "MANUAL_REVIEW"
+        assert plan.status is RecoveryStatus.MANUAL_REVIEW
+        assert plan.manual_review_complete_at == pytest.approx(10.0)
 
 
 def test_recovery_actions_apply_and_respect_the_retry_limit():

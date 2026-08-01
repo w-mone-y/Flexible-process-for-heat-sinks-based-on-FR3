@@ -452,6 +452,11 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
             )
         else:
             raise ValueError("mode must be preset or custom")
+        line_profile = str(payload.get("line_profile", "")).strip().upper()
+        if line_profile in {"V2", "V2_DUAL_INSTALL"}:
+            from .dual_line.process_geometry import V2ProcessGeometry
+
+            V2ProcessGeometry.from_plan(plan)
         summary = plan.summary()
         preview_graph = build_task_graph(plan, flexible_cell=True)
         summary["estimated_task_count"] = len(preview_graph)
@@ -470,6 +475,7 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
             "mode": mode,
             "custom_product": custom_product if mode == "custom" else None,
             "route_strategy": route_strategy,
+            "line_profile": line_profile or None,
             "plan": summary,
             "task_preview": preview_graph.snapshot(),
         }

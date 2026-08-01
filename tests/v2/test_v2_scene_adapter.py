@@ -12,6 +12,7 @@ from brazing_sim.dual_line import (
     TrayOwner,
     V2ProcessGeometry,
 )
+from brazing_sim.flexible import build_custom_plan
 from brazing_sim.recovery.fault_models import RecoveryStatus
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,7 +25,7 @@ def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
     install_a = np.asarray([0.55, 0.50, 0.225])
     wait_a = np.asarray([1.40, 0.50, 0.225])
     install_b = np.asarray([0.35, -0.45, 0.225])
-    wait_b = np.asarray([1.55, -1.22, 0.225])
+    wait_b = np.asarray([1.40, -1.22, 0.225])
     merge = np.asarray([1.40, 0.00, 0.225])
 
     np.testing.assert_allclose(
@@ -48,7 +49,7 @@ def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
             (0.15, -0.45, 0.225),
             (0.115, -0.475, 0.225),
             (0.115, -1.22, 0.225),
-            (1.55, -1.22, 0.225),
+            (1.40, -1.22, 0.225),
         ),
         atol=1.0e-9,
     )
@@ -69,7 +70,7 @@ def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
             source_owner=TrayOwner.MERGE_B_WAIT,
             target_owner=TrayOwner.MERGE,
         ),
-        ((1.55, 0.0, 0.225), merge),
+        (merge,),
         atol=1.0e-9,
     )
 
@@ -753,6 +754,91 @@ def test_scene_adapter_configures_each_tray_from_the_order_geometry(preset: str)
             bead = adapter.model.geom(f"{prefix}_braze_{index:02d}")
             assert float(bead.pos[1]) == pytest.approx(path.start[1])
             assert float(bead.size[1]) == pytest.approx(0.5 * path.length_m)
+    finally:
+        adapter.close()
+
+
+def test_scene_adapter_configures_a_custom_plan_instead_of_a_preset_fallback() -> None:
+    pytest.importorskip("mujoco")
+    plan = build_custom_plan(
+        order_id="VISIBLE_CUSTOM",
+        quantity=1,
+        priority=12,
+        product={
+            "base_size_m": [0.38, 0.23, 0.009],
+            "fin_size_m": [0.31, 0.0025, 0.065],
+            "fin_count": 6,
+            "fin_pitch_m": 0.02,
+            "path_margin_m": 0.018,
+            "path_width_m": 0.003,
+            "nozzle_spacing_m": 0.006,
+            "nozzle_tip_height_m": 0.004,
+            "material_speed_m_s": 0.04,
+            "target_clamping_force_n": 25.0,
+            "recipe": "demo_brazing",
+        },
+    )
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_plan(plan)
+        adapter.sync(runtime)
+        unit = runtime.units["VISIBLE_CUSTOM_UNIT_01"]
+        tray_id = unit.tray_id
+        assert tray_id is not None
+        prefix = tray_id.lower()
+
+        base = adapter.model.geom(f"{prefix}_base_plate")
+        np.testing.assert_allclose(base.size[:3], np.asarray(plan.product.base_size_m) / 2.0)
+        geometry = unit.process_geometry
+        assert len(geometry.fin_targets) == 6
+        for index, target in enumerate(geometry.fin_targets, start=1):
+            fin = adapter.model.geom(f"{prefix}_fin_{index:02d}")
+            np.testing.assert_allclose(fin.pos, target, atol=1.0e-12)
+            np.testing.assert_allclose(fin.size[:3], np.asarray(plan.product.fin_size_m) / 2.0)
+        for index, path in enumerate(geometry.brazing_paths, start=1):
+            bead = adapter.model.geom(f"{prefix}_braze_{index:02d}")
+            assert float(bead.pos[1]) == pytest.approx(path.start[1])
+    finally:
+        adapter.close()
+
+
+def test_two_millimetre_custom_base_keeps_the_same_tray_support_plane() -> None:
+    """Base thickness changes its centre/top, never its load-bearing bottom."""
+
+    pytest.importorskip("mujoco")
+    plan = build_custom_plan(
+        order_id="THIN_BASE_SUPPORT",
+        quantity=1,
+        priority=10,
+        product={
+            "base_size_m": [0.36, 0.22, 0.002],
+            "fin_size_m": [0.30, 0.002, 0.06],
+            "fin_count": 5,
+            "fin_pitch_m": 0.02,
+            "path_margin_m": 0.015,
+            "path_width_m": 0.004,
+            "nozzle_spacing_m": 0.005,
+            "nozzle_tip_height_m": 0.004,
+            "material_speed_m_s": 0.04,
+            "target_clamping_force_n": 20.0,
+            "recipe": "demo_brazing",
+        },
+    )
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_plan(plan)
+        adapter.sync(runtime)
+        tray_id = runtime.units["THIN_BASE_SUPPORT_UNIT_01"].tray_id
+        assert tray_id is not None
+        prefix = tray_id.lower()
+        template = adapter.model.geom(f"{prefix}_template_plate")
+        base = adapter.model.geom(f"{prefix}_base_plate")
+        template_top = float(template.pos[2] + template.size[2])
+        base_bottom = float(base.pos[2] - base.size[2])
+
+        assert base_bottom - template_top == pytest.approx(0.001, abs=1.0e-9)
     finally:
         adapter.close()
 

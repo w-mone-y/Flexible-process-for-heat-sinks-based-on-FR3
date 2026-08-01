@@ -455,18 +455,16 @@ def test_v2_arm3_cell_matches_the_marked_south_magazine_layout(model) -> None:
 
     np.testing.assert_allclose(arm3, (0.97, -0.49), atol=1.0e-9)
     np.testing.assert_allclose(magazine, (0.55, -0.85), atol=1.0e-9)
-    np.testing.assert_allclose(merge_wait, (1.55, -1.22), atol=1.0e-9)
+    np.testing.assert_allclose(merge_wait, (1.40, -1.22), atol=1.0e-9)
     assert abs(float(magazine[0] - install[0])) <= 0.25
     # The upward move requested in the marked layout still leaves 80 mm
     # between the two tabletop footprints.
     assert float(install[1] - magazine[1]) >= 0.39
 
-    # The B-line wait lies beyond the complete Arm3 cell. Runtime waypoints
-    # supply the south dog-leg; only the final wait→S4 segment runs directly
-    # into the shared table centre.
-    assert float(merge_wait[0] - arm3[0]) >= 0.55
+    # The requested B-line wait is exactly south of S4, so its final segment
+    # is a vertical centreline entry matching the A-side visual principle.
+    assert float(merge_wait[0]) == pytest.approx(float(merge[0]))
     assert float(arm3[1] - merge_wait[1]) >= 0.65
-    assert 0.10 <= float(merge_wait[0] - merge[0]) <= 0.20
 
 
 def test_v2_shared_inspection_table_is_relocated_toward_the_furnace(model) -> None:
@@ -532,7 +530,7 @@ def test_v2_installation_branches_use_explicit_planar_obstacle_bypasses(model) -
     merge = np.asarray(model.body("v2_merge_anchor").pos[:2], dtype=float)
 
     np.testing.assert_allclose(wait_a, (merge[0], install_a[1]), atol=1.0e-9)
-    assert float(wait_b[0]) >= 1.50
+    assert float(wait_b[0]) == pytest.approx(float(merge[0]))
     assert float(wait_b[1]) <= -1.20
     assert float(wait_b[0]) > float(install_b[0])
     assert float(wait_b[1]) < float(install_b[1])
@@ -809,7 +807,7 @@ def test_v2_s1_s2a_has_a_visible_aisle_and_full_length_slide_rail(model) -> None
 
 
 def test_v2_branch_b_visible_rails_enter_the_exact_s4_centre(model) -> None:
-    """The right-hand route must not stop at an offset east-side spur."""
+    """The right-hand route must enter S4 vertically on its centreline."""
 
     import mujoco
 
@@ -817,6 +815,7 @@ def test_v2_branch_b_visible_rails_enter_the_exact_s4_centre(model) -> None:
     mujoco.mj_forward(model, data)
     s4 = np.asarray(data.site("v2_station_s4_dock").xpos, dtype=float)
     closest_endpoints: list[np.ndarray] = []
+    expected_x = {"left": 1.345, "right": 1.455}
     for side in ("left", "right"):
         rail = model.geom(f"v2_install_b_s4_rail_{side}_04")
         rotation = np.asarray(data.geom_xmat[rail.id], dtype=float).reshape(3, 3)
@@ -824,6 +823,8 @@ def test_v2_branch_b_visible_rails_enter_the_exact_s4_centre(model) -> None:
         center = np.asarray(data.geom_xpos[rail.id], dtype=float)
         half_length = float(rail.size[1])
         endpoints = (center - axis * half_length, center + axis * half_length)
+        assert float(np.ptp(np.asarray(endpoints)[:, 0])) <= 1.0e-9
+        assert float(center[0]) == pytest.approx(expected_x[side])
         closest_endpoints.append(min(endpoints, key=lambda point: float(np.linalg.norm(point - s4))))
     np.testing.assert_allclose(np.mean(closest_endpoints, axis=0), s4 + (0.0, 0.0, -0.027))
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; B 线最后进站段已被 ADR-0003 局部替代
 
 ## Context
 

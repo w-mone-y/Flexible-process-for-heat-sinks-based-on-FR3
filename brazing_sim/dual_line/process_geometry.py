@@ -9,13 +9,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 import numpy as np
 
 from ..flexible import build_preset_plan
-from ..flexible.models import BrazingPath
+from ..flexible.models import BrazingPath, ProcessPlan
 
 TRAY_PAYLOAD_ORIGIN_Z_M = 0.032
+TRAY_BASE_SUPPORT_Z_M = 0.028
+V2_MAX_BASE_LENGTH_M = 0.39
+V2_MAX_BASE_WIDTH_M = 0.25
+V2_MAX_PRODUCT_HEIGHT_M = 0.12
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +51,28 @@ class V2ProcessGeometry:
     @lru_cache(maxsize=3)
     def for_preset(cls, preset: str) -> "V2ProcessGeometry":
         plan = build_preset_plan(str(preset).upper(), quantity=1)
+        return cls.from_plan(plan)
+
+    @classmethod
+    def from_plan(cls, plan: ProcessPlan) -> "V2ProcessGeometry":
+        """Convert a plan into V2 tray-local geometry after envelope checks."""
+
+        base_length, base_width, base_thickness = plan.product.base_size_m
+        fin_length, _fin_thickness, fin_height = plan.product.fin_size_m
+        if base_length > V2_MAX_BASE_LENGTH_M or base_width > V2_MAX_BASE_WIDTH_M:
+            raise ValueError(
+                "V2托盘可执行包络为基板不超过390×250 mm，"
+                f"当前为{1000 * base_length:g}×{1000 * base_width:g} mm"
+            )
+        if fin_length > base_length:
+            raise ValueError("V2翅片长度不得超过基板长度")
+        if base_thickness + fin_height > V2_MAX_PRODUCT_HEIGHT_M:
+            raise ValueError("V2产品总高度不得超过120 mm炉层安全包络")
+        if len(plan.fin_targets) > 12 or len(plan.brazing_paths) > 24:
+            raise ValueError("V2自定义产品超出12片翅片/24条焊道实体对象池")
+        base_center_z = TRAY_BASE_SUPPORT_Z_M + 0.5 * base_thickness
         fin_targets = tuple(
-            np.asarray(target.position, dtype=float)
-            + np.asarray([0.0, 0.0, TRAY_PAYLOAD_ORIGIN_Z_M], dtype=float)
+            np.asarray(target.position, dtype=float) + np.asarray([0.0, 0.0, base_center_z], dtype=float)
             for target in plan.fin_targets
         )
         passes: list[DispensePass] = []
@@ -59,8 +83,8 @@ class V2ProcessGeometry:
             start = np.mean(np.asarray([path.start for path in group], dtype=float), axis=0)
             end = np.mean(np.asarray([path.end for path in group], dtype=float), axis=0)
             tip_z = (
-                TRAY_PAYLOAD_ORIGIN_Z_M
-                + 0.5 * plan.execution_spec.base_thickness
+                TRAY_BASE_SUPPORT_Z_M
+                + plan.execution_spec.base_thickness
                 + float(plan.product.nozzle_tip_height_m)
             )
             start[2] = tip_z
@@ -85,12 +109,31 @@ class V2ProcessGeometry:
             dispense_passes=tuple(passes),
         )
 
+    @classmethod
+    def for_unit(cls, unit: Any) -> "V2ProcessGeometry":
+        """Return order-bound geometry, retaining preset compatibility."""
+
+        geometry = getattr(unit, "process_geometry", None)
+        if isinstance(geometry, cls):
+            return geometry
+        return cls.for_preset(str(unit.preset))
+
     @property
     def path_length_m(self) -> float:
         if not self.dispense_passes:
             return 0.0
         first = self.dispense_passes[0]
         return float(np.linalg.norm(first.end - first.start))
+
+    @property
+    def base_center_z_m(self) -> float:
+        """Thickness-aware centre that keeps every base bottom on one support."""
+
+        return TRAY_BASE_SUPPORT_Z_M + 0.5 * self.base_size_m[2]
+
+    @property
+    def base_top_z_m(self) -> float:
+        return TRAY_BASE_SUPPORT_Z_M + self.base_size_m[2]
 
     @staticmethod
     def _world(local: np.ndarray, *, origin: np.ndarray, rotation: np.ndarray) -> np.ndarray:
@@ -124,4 +167,12 @@ class V2ProcessGeometry:
         )
 
 
-__all__ = ["DispensePass", "TRAY_PAYLOAD_ORIGIN_Z_M", "V2ProcessGeometry"]
+__all__ = [
+    "DispensePass",
+    "TRAY_BASE_SUPPORT_Z_M",
+    "TRAY_PAYLOAD_ORIGIN_Z_M",
+    "V2_MAX_BASE_LENGTH_M",
+    "V2_MAX_BASE_WIDTH_M",
+    "V2_MAX_PRODUCT_HEIGHT_M",
+    "V2ProcessGeometry",
+]

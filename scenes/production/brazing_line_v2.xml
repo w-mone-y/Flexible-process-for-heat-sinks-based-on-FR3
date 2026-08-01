@@ -544,8 +544,9 @@
     <!-- Both S3 branches stay on the 0.225 m station transport plane.
          The A line follows the short north-side dog-leg.  The B line follows
          the south perimeter of the Arm3 cell, so a complete tray, combs, fins
-         and press bars never sweep through S2B or any Arm3 link.  Each visible
-         pair below is one continuous mitered slide-rail route. -->
+         and press bars never sweep through S2B.  Its final segment turns onto
+         the S4 centreline and enters the table vertically.  Each visible pair
+         below is one continuous mitered slide-rail route. -->
     <body name="v2_merge">
       <geom class="visual" name="v2_install_a_s4_rail_left" type="capsule"
             size="0.008" fromto="0.550 0.555 0.198 1.455 0.555 0.198"
@@ -573,16 +574,16 @@
             size="0.008" fromto="-0.005 -0.395 0.198 -0.005 -1.275 0.198"
             material="v2_frame_mat"/>
       <geom class="visual" name="v2_install_b_s4_rail_left_03" type="capsule"
-            size="0.008" fromto="0.105 -1.165 0.198 1.495 -1.165 0.198"
+            size="0.008" fromto="0.105 -1.165 0.198 1.345 -1.165 0.198"
             material="v2_frame_mat"/>
       <geom class="visual" name="v2_install_b_s4_rail_right_03" type="capsule"
-            size="0.008" fromto="-0.005 -1.275 0.198 1.605 -1.275 0.198"
+            size="0.008" fromto="-0.005 -1.275 0.198 1.455 -1.275 0.198"
             material="v2_frame_mat"/>
       <geom class="visual" name="v2_install_b_s4_rail_left_04" type="capsule"
-            size="0.008" fromto="1.495 -1.165 0.198 1.345 0.000 0.198"
+            size="0.008" fromto="1.345 -1.165 0.198 1.345 0.000 0.198"
             material="v2_frame_mat"/>
       <geom class="visual" name="v2_install_b_s4_rail_right_04" type="capsule"
-            size="0.008" fromto="1.605 -1.275 0.198 1.455 0.000 0.198"
+            size="0.008" fromto="1.455 -1.275 0.198 1.455 0.000 0.198"
             material="v2_frame_mat"/>
       <site name="v2_merge_dock" pos="1.40 0 0.225" size="0.008" rgba="1 0.8 0.1 0.8"/>
     </body>
@@ -855,7 +856,7 @@
     <body name="v2_install_a_anchor" pos="0.55 0.50 0.225"/>
     <body name="v2_install_b_anchor" pos="0.35 -0.45 0.225"/>
     <body name="v2_merge_a_wait_anchor" pos="1.40 0.50 0.225"/>
-    <body name="v2_merge_b_wait_anchor" pos="1.55 -1.22 0.225"/>
+    <body name="v2_merge_b_wait_anchor" pos="1.40 -1.22 0.225"/>
     <body name="v2_merge_anchor" pos="1.40 0 0.225"/>
     <body name="v2_s4_anchor" pos="1.40 0 0.225"/>
     <body name="v2_post_scan_anchor" pos="4.20 0 0.225"/>
