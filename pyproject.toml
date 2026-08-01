@@ -24,6 +24,27 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["brazing_sim", "brazing_sim.*"]
 
+[tool.setuptools.data-files]
+"brazing_sim/config" = [
+  "config/*.yaml",
+]
+"brazing_sim/config/faults" = ["config/faults/*.yaml"]
+"brazing_sim/config/orders" = ["config/orders/*.yaml"]
+"brazing_sim/config/products" = ["config/products/*.yaml"]
+"brazing_sim/config/routings" = ["config/routings/*.yaml"]
+"brazing_sim/scenes/includes" = ["scenes/includes/*.xml"]
+"brazing_sim/scenes/production" = ["scenes/production/*.xml"]
+"brazing_sim/assets/meshes" = ["assets/meshes/*"]
+"brazing_sim/assets/robots/fr3" = [
+  "assets/robots/fr3/*.xml",
+  "assets/robots/fr3/*.png",
+  "assets/robots/fr3/*.md",
+  "assets/robots/fr3/LICENSE",
+]
+"brazing_sim/assets/robots/fr3/assets" = ["assets/robots/fr3/assets/*"]
+"brazing_sim/assets/signs" = ["assets/signs/*"]
+"brazing_sim/assets/workcells" = ["assets/workcells/*"]
+
 [tool.black]
 line-length = 110
 target-version = ["py310"]

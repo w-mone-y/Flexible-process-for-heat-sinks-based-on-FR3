@@ -51,7 +51,7 @@ from .workcells import (
     WorkstationState,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
+from .paths import CONFIG_DIR
 
 
 class OrderRunStatus(str, Enum):
@@ -201,8 +201,8 @@ class ManufacturingRuntime:
         dispatch_guard: Callable[[ManufacturingTask], tuple[bool, str]] | None = None,
         external_batch_controller: bool = False,
     ) -> None:
-        self.config = scheduler_config or load_scheduler_config(ROOT / "config" / "scheduler.yaml")
-        resources, zones = load_resource_config(resource_config_path or ROOT / "config" / "resources.yaml")
+        self.config = scheduler_config or load_scheduler_config(CONFIG_DIR / "scheduler.yaml")
+        resources, zones = load_resource_config(resource_config_path or CONFIG_DIR / "resources.yaml")
         self.resources = ResourceManager(resources)
         self.zones = ZoneLockManager(zones)
         self.scheduler_mode = self._normalize_scheduler_mode(scheduler_mode)
