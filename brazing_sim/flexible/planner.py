@@ -129,7 +129,12 @@ def build_process_plan(
 
 def preset_order_file(preset: str, *, config_root: str | Path | None = None) -> Path:
     root = Path(config_root).expanduser().resolve() if config_root is not None else DEFAULT_CONFIG_ROOT
-    mapping = {"A": "order_001.yaml", "B": "order_002.yaml", "C": "order_003.yaml"}
+    mapping = {
+        "A": "order_001.yaml",
+        "B": "order_002.yaml",
+        "C": "order_003.yaml",
+        "D": "order_004.yaml",
+    }
     key = str(preset).upper()
     if key not in mapping:
         raise KeyError(f"unknown order preset: {preset!r}")

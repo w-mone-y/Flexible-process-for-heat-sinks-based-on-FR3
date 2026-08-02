@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from typing import Any, Callable, Mapping, TextIO
-from urllib import request
+from urllib import error, request
 from urllib.parse import urlsplit
 
 ARM_NAMES = ("arm1", "arm2", "arm3")
@@ -313,9 +313,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                     "zone_locks": state.get("zone_locks", {}),
                 },
                 "/orders": {"orders": state.get("orders", [])},
-                "/faults": {"faults": state.get("faults_v2") or state.get("faults", [])},
-                "/recoveries": {"recoveries": state.get("recoveries", [])},
-                "/metrics": state.get("experiment_metrics") or state.get("kpi", {}),
+                "/faults": {
+                    "faults": state.get("faults_v2") or state.get("faults", []),
+                    "policy_summary": state.get("fault_policy_summary", {}),
+                },
+                "/recoveries": {
+                    "recoveries": state.get("recoveries", []),
+                    "policy_summary": state.get("fault_policy_summary", {}),
+                },
+                "/metrics": {
+                    "live": state.get("experiment_metrics") or state.get("kpi", {}),
+                    "golden_experiments": state.get("golden_experiments", {}),
+                },
                 "/fault-catalog": {"faults": fault_catalog_snapshot()},
                 "/workstations": {
                     "workstations": state.get("workstations", {}),
@@ -675,11 +684,35 @@ def start_terminal_thread(
     return thread
 
 
+def _http_error_detail(exc: error.HTTPError) -> str:
+    """Return the validation reason carried by a failed JSON response."""
+
+    try:
+        body = exc.read().decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        body = ""
+    if body:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, Mapping):
+            for key in ("error", "message", "detail"):
+                detail = str(payload.get(key, "")).strip()
+                if detail:
+                    return detail
+        return body
+    return f"HTTP {exc.code}: {exc.reason}"
+
+
 def post_json(url: str, payload: Mapping[str, Any], timeout: float = 1.0) -> dict[str, Any]:
     body = json.dumps(jsonable(payload)).encode("utf-8")
     req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        raise ValueError(_http_error_detail(exc)) from exc
 
 
 def get_json(url: str, timeout: float = 1.0) -> dict[str, Any]:

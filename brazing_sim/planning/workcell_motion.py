@@ -65,25 +65,39 @@ class WorkcellMotionPlanningService:
     @staticmethod
     def _scene_q(context: Any, resource_id: str) -> np.ndarray | None:
         scene = getattr(context, "scene", None)
-        if scene is None:
-            return None
-        controller = getattr(scene, "arms", {}).get(resource_id.lower())
+        controller = None
+        if scene is not None:
+            controller = getattr(scene, "arms", {}).get(resource_id.lower())
+        if controller is None:
+            # V2 binds its MuJoCo adapter through the physical execution gate,
+            # rather than exposing the V1 ``scene.arms`` facade.
+            gate = getattr(context, "physical_gate", None)
+            projector = getattr(gate, "_robots", None)
+            controller = getattr(projector, "controllers", {}).get(resource_id.lower())
         if controller is None:
             return None
-        return np.asarray(scene.data.qpos[controller.qpos_ids], dtype=float).copy()
+        data = getattr(scene, "data", None) if scene is not None else getattr(gate, "data", None)
+        if data is None:
+            return None
+        return np.asarray(data.qpos[controller.qpos_ids], dtype=float).copy()
 
     @staticmethod
-    def _goal(task: ManufacturingTask, start: np.ndarray) -> np.ndarray:
+    def _goal(task: ManufacturingTask, start: np.ndarray, resource_id: str) -> np.ndarray:
         goal = HOME.copy()
         station = str(task.station_id or "")
-        resource = str(task.eligible_resources[0] if task.eligible_resources else "")
+        resource = str(resource_id).upper()
         station_offsets = {
             "S1_BASE_LOADING": (-0.38, 0.10, 0.18, 0.06, -0.08, 0.08, 0.0),
             "S2A_DISPENSING": (-0.12, 0.16, -0.12, 0.08, 0.06, 0.12, 0.0),
             "S2B_MATERIAL_INSPECTION": (0.12, 0.14, -0.10, 0.07, 0.08, 0.14, 0.0),
             "S3_FIN_ASSEMBLY": (0.38, 0.10, -0.18, 0.06, 0.10, 0.10, 0.0),
             "RACK_INFEED": (0.48, 0.08, -0.16, 0.04, 0.10, 0.08, 0.0),
+            "S3A_ARM1_INSTALL": (0.38, 0.10, -0.18, 0.06, 0.10, 0.10, 0.0),
+            "S3B_ARM3_INSTALL": (-0.30, 0.12, 0.16, 0.08, -0.08, 0.14, 0.0),
+            "S4_PRE_BRAZE_INSPECTION": (0.18, 0.14, -0.12, 0.07, 0.08, 0.14, 0.0),
         }
+        if station == "S3_DUAL_INSTALL":
+            station = "S3A_ARM1_INSTALL" if resource == "ARM1" else "S3B_ARM3_INSTALL"
         if station in station_offsets:
             goal += np.asarray(station_offsets[station])
         elif "ZONE_TABLE1" in task.required_zones:
@@ -98,13 +112,25 @@ class WorkcellMotionPlanningService:
 
     @staticmethod
     def _occupancy(task: ManufacturingTask, resource_id: str):
+        station = str(task.station_id or "")
+        if station == "S3_DUAL_INSTALL":
+            station = "S3A_ARM1_INSTALL" if resource_id == "ARM1" else "S3B_ARM3_INSTALL"
         station_cell = {
             "S1_BASE_LOADING": "CELL_S1",
             "S2A_DISPENSING": "CELL_S2A",
             "S2B_MATERIAL_INSPECTION": "CELL_S2B",
             "S3_FIN_ASSEMBLY": "CELL_S3",
             "RACK_INFEED": "CELL_RACK_INFEED",
-        }.get(str(task.station_id or ""), "CELL_SAFE_CORRIDOR")
+            "S3A_ARM1_INSTALL": "CELL_V2_S3A",
+            "S3B_ARM3_INSTALL": "CELL_V2_S3B",
+            "S4_PRE_BRAZE_INSPECTION": "CELL_V2_S4_SHARED",
+        }.get(station, "CELL_SAFE_CORRIDOR")
+        if station == "S1_BASE_LOADING":
+            station_cell = "CELL_V2_S1"
+        elif station == "S2A_DISPENSING":
+            station_cell = "CELL_V2_S2A"
+        elif station == "S2B_MATERIAL_INSPECTION":
+            station_cell = "CELL_V2_S2B"
         fixed = tuple(sorted({station_cell, *(f"ZONE::{zone}" for zone in task.required_zones)}))
 
         def cells(q: np.ndarray) -> tuple[str, ...]:
@@ -130,7 +156,7 @@ class WorkcellMotionPlanningService:
         start = self._scene_q(context, resource)
         if start is None:
             start = self._logical_q[resource].copy()
-        goal = self._goal(task, start)
+        goal = self._goal(task, start, resource)
         request = MotionRequest(
             request_id=f"MOTION-{task.task_id}",
             resource_id=resource,

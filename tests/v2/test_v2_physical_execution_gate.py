@@ -10,6 +10,7 @@ from brazing_sim.dual_line.tray_flow import TrayOwner
 class _ControllableGate:
     ready_owners: set[tuple[str, TrayOwner]] = field(default_factory=set)
     completed_operations: set[tuple[str, str, str]] = field(default_factory=set)
+    allowed_operations: set[tuple[str, str, str]] | None = None
 
     def tray_ready(self, tray_id: str, owner: TrayOwner) -> bool:
         return (tray_id, owner) in self.ready_owners
@@ -19,6 +20,36 @@ class _ControllableGate:
 
     def owner_available(self, owner: TrayOwner) -> bool:
         return True
+
+    def operation_start_allowed(self, resource: str, unit_id: str, kind: str) -> bool:
+        return (
+            self.allowed_operations is None
+            or (
+                resource,
+                unit_id,
+                kind,
+            )
+            in self.allowed_operations
+        )
+
+
+def test_v2_runtime_never_starts_an_operation_without_external_authority() -> None:
+    runtime = DualLineRuntime(fast=True)
+    gate = _ControllableGate(allowed_operations=set())
+    runtime.set_execution_gate(gate)
+
+    order = runtime.submit_order("A", order_id="PHYSICAL_AUTHORITY")
+    unit = runtime.units[order.unit_ids[0]]
+    assert unit.tray_id is not None
+    gate.ready_owners.add((unit.tray_id, TrayOwner.S1))
+    runtime.tick(0.05)
+
+    assert "ARM1" not in runtime.operations
+
+    gate.allowed_operations.add(("ARM1", unit.unit_id, "BASE_LOADING"))
+    runtime.tick(0.05)
+
+    assert runtime.operations["ARM1"].kind == "BASE_LOADING"
 
 
 def test_v2_runtime_does_not_start_station_work_before_the_tray_physically_arrives() -> None:

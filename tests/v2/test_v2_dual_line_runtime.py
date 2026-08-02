@@ -50,6 +50,17 @@ def test_v2_runtime_executes_a_custom_process_plan_to_completion() -> None:
     assert snapshot["orders"][0]["mode"] == "custom"
 
 
+def test_v2_runtime_accepts_the_configured_d_product_family() -> None:
+    runtime = DualLineRuntime(fast=True)
+
+    order = runtime.submit_order("D", order_id="PRODUCT_D_RUNTIME")
+
+    unit = runtime.units[order.unit_ids[0]]
+    assert unit.preset == "D"
+    assert unit.product_id == "PRODUCT_D"
+    assert unit.comb_module == "comb_insert_15mm"
+
+
 def test_compatible_custom_and_preset_orders_share_one_v2_furnace_batch() -> None:
     runtime = DualLineRuntime(fast=True)
     runtime.submit_plan(_custom_plan(order_id="CUSTOM_MIX"))

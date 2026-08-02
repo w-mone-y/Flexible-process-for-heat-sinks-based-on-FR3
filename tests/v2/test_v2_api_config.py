@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from brazing_sim.api import SharedState, start_http_server, validate_http_command
+from brazing_sim.api import SharedState, post_json, start_http_server, validate_http_command
 from brazing_sim.fault_catalog import MANUAL_FAULT_CATALOG
 from brazing_sim.flexible import load_order_plans
 from brazing_sim.manufacturing_config import (
@@ -125,6 +125,26 @@ def test_v2_custom_preview_rejects_geometry_outside_the_physical_tray() -> None:
                 "custom_product": product,
             },
         )
+
+
+def test_post_json_exposes_custom_order_validation_reason_from_http_400() -> None:
+    shared = SharedState()
+    server = start_http_server(shared, "127.0.0.1", 0)
+    product = _custom_product()
+    product["base_size_m"] = [0.44, 0.22, 0.008]
+    payload = {
+        "line_profile": "V2_DUAL_INSTALL",
+        "mode": "custom",
+        "order_id": "TOO_LARGE_OVER_HTTP",
+        "custom_product": product,
+    }
+    url = f"http://127.0.0.1:{server.server_address[1]}/orders/insert"
+    try:
+        with pytest.raises(ValueError, match="390×250 mm"):
+            post_json(url, payload)
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_removed_fin_insert_fault_is_not_exposed_or_accepted() -> None:

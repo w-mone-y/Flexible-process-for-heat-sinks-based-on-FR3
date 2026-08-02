@@ -246,3 +246,102 @@ def test_v2_application_publishes_real_carrier_transport_to_the_shared_ui() -> N
         assert state["ui_capabilities"]["orders"]
     finally:
         application.close()
+
+
+def test_v2_application_publishes_planned_motion_and_space_time_reservations() -> None:
+    """V2 must expose the scheduler's PRM/SIPP authority, not only arm playback."""
+
+    args = parse_args(["--headless", "--orders", "A", "--fast"])
+    application = V2BrazingApplication(args)
+    try:
+        application.submit_cli_orders()
+        for _ in range(40):
+            application.advance_frame()
+            state = application.publish(viewer_running=False)
+            planned = [
+                item for item in state["motion_plans"] if item.get("planner") in {"PRM_ASTAR", "RRT_CONNECT"}
+            ]
+            if planned and state["space_time_reservations"]:
+                break
+        else:
+            raise AssertionError("V2 did not publish an active motion reservation")
+
+        reservation = state["space_time_reservations"][0]
+        assert planned[0]["reservation_id"] == reservation["reservation_id"]
+        assert planned[0]["resource_id"] == "ARM1"
+        assert any(cell.startswith("CELL_V2_S1") for cell, _start, _end in reservation["occupied_cells"])
+    finally:
+        application.close()
+
+
+def test_v2_comb_configuration_is_stage_driven_without_visible_changeover_gantry() -> None:
+    args = parse_args(["--headless", "--orders", "D", "--fast"])
+    application = V2BrazingApplication(args)
+    try:
+        assert (
+            application.scene.mujoco.mj_name2id(
+                application.scene.model,
+                application.scene.mujoco.mjtObj.mjOBJ_BODY,
+                "v2_shared_changeover_gantry",
+            )
+            == -1
+        )
+        application.submit_cli_orders()
+        for _ in range(1_200):
+            application.advance_frame()
+            state = application.publish(viewer_running=False)
+            configured = next(task for task in state["tasks"] if task["task_type"] == "CONFIGURE_COMB")
+            if configured["status"] == "SUCCEEDED":
+                break
+        else:
+            raise AssertionError("V2 stage-driven comb configuration did not complete")
+
+        unit = application.runtime.units["V2_D_01_UNIT_01"]
+        assert unit.tray_id is not None
+        assert application.scene.component_visible(unit.tray_id, "front_comb_base")
+        assert "changeover" not in state
+        assert "module_ownership" not in state
+        assert state["ui_capabilities"]["flexibility_actions"]["physical_changeover"] is False
+    finally:
+        application.close()
+
+
+def test_v2_physical_execution_complete_requires_every_terminal_gate() -> None:
+    args = parse_args(["--headless", "--orders", "A", "--fast"])
+    application = V2BrazingApplication(args)
+    try:
+        initial = application.publish(viewer_running=False)
+        assert initial["physical_execution_complete"] is False
+        assert initial["physical_completion_gates"]["passed"] is False
+        assert "manufacturing_terminal" in initial["physical_completion_gates"]["failed_checks"]
+
+        application.submit_cli_orders()
+        for _ in range(4_500):
+            application.advance_frame()
+            if application.runtime.complete:
+                final = application.publish(viewer_running=False)
+                break
+        else:
+            raise AssertionError("single A did not physically complete")
+
+        gates = final["physical_completion_gates"]
+        assert final["physical_execution_complete"] is True
+        assert gates["passed"] is True
+        assert gates["failed_checks"] == []
+        assert all(item["passed"] for item in gates["checks"].values())
+        assert {
+            "manufacturing_terminal",
+            "task_outcomes",
+            "physical_runtime_terminal",
+            "operations_idle",
+            "tray_transport_settled",
+            "motion_reservations_released",
+            "furnace_and_output_safe",
+            "tray_ownership_safe",
+            "faults_resolved",
+            "robots_settled",
+            "physical_gate_bound",
+        }.issubset(gates["checks"])
+        assert "changeover_safe" not in gates["checks"]
+    finally:
+        application.close()

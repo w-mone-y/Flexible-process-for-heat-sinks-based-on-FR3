@@ -17,6 +17,7 @@ class ActiveExecution:
     skill: Skill
     started_at: float
     last_update: float
+    requires_physical_evidence: bool = False
 
 
 class SkillExecutor:
@@ -38,10 +39,23 @@ class SkillExecutor:
         resource = str(resource_id).upper()
         if resource in self.active:
             raise RuntimeError(f"resource {resource} already has an active task")
-        skill = self.registry.get(task.task_type)
+        skill = self.registry.create(task.task_type)
         skill.start(task, resource, self.context if context is None else context, now)
-        self.active[resource] = ActiveExecution(task, resource, skill, float(now), float(now))
-        self.monitor.start(task.task_id, now, max(10.0, task.estimated_duration * 5.0))
+        self.active[resource] = ActiveExecution(
+            task,
+            resource,
+            skill,
+            float(now),
+            float(now),
+            self.registry.requires_physical_evidence(task.task_type),
+        )
+        timeout_provider = getattr(skill, "execution_timeout", None)
+        timeout = (
+            float(timeout_provider(task))
+            if callable(timeout_provider)
+            else max(10.0, task.estimated_duration * 5.0)
+        )
+        self.monitor.start(task.task_id, now, timeout)
 
     def update_task(self, dt: float, now: float | None = None) -> dict[str, SkillExecutionResult]:
         results: dict[str, SkillExecutionResult] = {}
@@ -49,6 +63,17 @@ class SkillExecutor:
             timestamp = execution.last_update + float(dt) if now is None else float(now)
             result = execution.skill.update(timestamp, max(0.0, timestamp - execution.last_update))
             execution.last_update = timestamp
+            if (
+                result.succeeded
+                and execution.requires_physical_evidence
+                and result.completion_evidence is None
+            ):
+                result = SkillExecutionResult.running_result(
+                    {
+                        **result.metrics,
+                        "completion_blocker": "WAITING_FOR_PHYSICAL_EVIDENCE",
+                    }
+                )
             if result.running:
                 timeout = self.monitor.update(
                     execution.task.task_id,

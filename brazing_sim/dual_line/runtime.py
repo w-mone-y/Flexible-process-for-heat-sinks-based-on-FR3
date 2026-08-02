@@ -302,8 +302,8 @@ class DualLineRuntime:
         urgent: bool = False,
     ) -> V2OrderState:
         preset = str(preset).strip().upper()
-        if preset not in {"A", "B", "C"}:
-            raise ValueError("V2 preset must be A, B or C")
+        if preset not in {"A", "B", "C", "D"}:
+            raise ValueError("V2 preset must be A, B, C or D")
         identifier = str(order_id or "").strip()
         if not identifier:
             identifier = self.next_order_id
@@ -321,6 +321,7 @@ class DualLineRuntime:
         *,
         due_at: float | None = None,
         urgent: bool = False,
+        dispatch: bool = True,
     ) -> V2OrderState:
         """Bind one validated ``ProcessPlan`` to V2 logical and physical state."""
 
@@ -392,7 +393,8 @@ class DualLineRuntime:
             due_at=order.due_at,
             urgent=order.urgent,
         )
-        self._dispatch()
+        if dispatch:
+            self._dispatch()
         return order
 
     def _event(self, event_type: str, **payload: Any) -> None:
@@ -426,7 +428,12 @@ class DualLineRuntime:
 
         if resource in self.operations:
             raise RuntimeError(f"resource already busy: {resource}")
-        if not self._resource_online(resource):
+        # Every operation, including ordinary robot work, must cross the same
+        # execution-authority seam.  Previously only one furnace-door branch
+        # called ``_operation_start_allowed``; an external scheduler therefore
+        # could not prevent Arm1/2/3 from starting work on its own.  Keeping the
+        # check here makes ``_start`` the single physical dispatch choke point.
+        if not self._operation_start_allowed(resource, unit, kind):
             return False
         # A unit carrying pending rework performs the next operation at rework
         # effort, then the surcharge is consumed.
@@ -614,15 +621,33 @@ class DualLineRuntime:
                 ),
             ),
         )
-        unit.branch = decision.branch
-        self.install_branch_counts[decision.branch] += 1
+        selected_branch = decision.branch
+        preferred_callback = (
+            None
+            if self._execution_gate is None
+            else getattr(self._execution_gate, "preferred_install_resource", None)
+        )
+        preferred_resource = None if preferred_callback is None else preferred_callback(unit.unit_id)
+        preferred_branch = {
+            "ARM1": InstallBranch.ARM1_A,
+            "ARM3": InstallBranch.ARM3_B,
+        }.get(str(preferred_resource).upper())
+        if preferred_branch is not None:
+            selected_branch = preferred_branch
+        unit.branch = selected_branch
+        self.install_branch_counts[selected_branch] += 1
+        selected_candidate = decision.candidates[selected_branch]
         self._event(
             "INSTALL_ASSIGNED",
             unit_id=unit.unit_id,
             tray_id=unit.tray_id,
-            branch=decision.branch.value,
-            explanation_zh=decision.explanation_zh,
-            selected_cost=decision.candidates[decision.branch].cost,
+            branch=selected_branch.value,
+            explanation_zh=(
+                decision.explanation_zh
+                if selected_branch is decision.branch
+                else f"统一运行时按全局DAG、交期与资源占用选择{selected_branch.value}"
+            ),
+            selected_cost=selected_candidate.cost,
             candidates=[
                 {
                     "resource_id": candidate.branch.value,
@@ -762,7 +787,7 @@ class DualLineRuntime:
             unit.completed_at = self.sim_time
             self._event("UNIT_COMPLETED", unit_id=unit.unit_id, order_id=unit.order_id)
         elif operation.kind == "FURNACE_FRONT_OPEN":
-            self._event("FURNACE_FRONT_DOOR_OPENED")
+            self._event("FURNACE_FRONT_DOOR_OPENED", unit_id=unit.unit_id)
         elif operation.kind == "FURNACE_LOAD_TRAY":
             assert unit.furnace_layer is not None
             self.furnace.lock_layer(unit.furnace_layer, now=self.sim_time)
@@ -773,7 +798,7 @@ class DualLineRuntime:
             self._event("FURNACE_THERMAL_CYCLE_STARTED")
         elif operation.kind == "FURNACE_REAR_OPEN":
             self._rear_door_ready = True
-            self._event("FURNACE_REAR_DOOR_OPENED")
+            self._event("FURNACE_REAR_DOOR_OPENED", unit_id=unit.unit_id)
         elif operation.kind == "FURNACE_UNLOAD_TRAY":
             self._set_stage(unit, UnitStage.POST_BRAZE_INSPECTION)
             self._start(
@@ -1046,11 +1071,23 @@ class DualLineRuntime:
 
     def _dispatch_resources(self) -> bool:
         changed = False
+        if "POST_CAMERA" not in self.operations and self._resource_online("POST_CAMERA"):
+            waiting_post = [
+                unit
+                for unit in self._waiting_units(UnitStage.POST_BRAZE_INSPECTION)
+                if self._tray_ready(unit)
+            ]
+            if waiting_post:
+                changed |= self._start(
+                    "POST_CAMERA",
+                    waiting_post[0],
+                    "POST_BRAZE_INSPECTION",
+                    self.durations.post_braze_inspection,
+                )
         if "ARM2" not in self.operations and self._resource_online("ARM2"):
             waiting = [unit for unit in self._waiting_units(UnitStage.DISPENSING) if self._tray_ready(unit)]
             if waiting:
-                self._start("ARM2", waiting[0], "DISPENSING", self.durations.dispensing)
-                changed = True
+                changed |= self._start("ARM2", waiting[0], "DISPENSING", self.durations.dispensing)
         # Detection always gets Arm3 before another fin is picked. An active
         # INSTALL_FIN operation remains non-preemptible until this tick ends.
         if "ARM3" not in self.operations and self._resource_online("ARM3"):
@@ -1058,13 +1095,12 @@ class DualLineRuntime:
                 unit for unit in self._waiting_units(UnitStage.PRE_BRAZE_INSPECTION) if self._tray_ready(unit)
             ]
             if waiting_s4:
-                self._start(
+                changed |= self._start(
                     "ARM3",
                     waiting_s4[0],
                     "PRE_BRAZE_INSPECTION",
                     self.durations.pre_braze_inspection,
                 )
-                changed = True
             else:
                 waiting_s2b = [
                     unit
@@ -1072,18 +1108,16 @@ class DualLineRuntime:
                     if self._tray_ready(unit)
                 ]
                 if waiting_s2b:
-                    self._start(
+                    changed |= self._start(
                         "ARM3",
                         waiting_s2b[0],
                         "MATERIAL_INSPECTION",
                         self.durations.material_inspection,
                     )
-                    changed = True
         if "MERGE" not in self.operations and self._resource_online("MERGE"):
             waiting = [unit for unit in self._waiting_units(UnitStage.MERGING) if self._tray_ready(unit)]
             if waiting:
-                self._start("MERGE", waiting[0], "MERGING", self.durations.merge)
-                changed = True
+                changed |= self._start("MERGE", waiting[0], "MERGING", self.durations.merge)
         # Arm1 prioritises a tray already committed to installation; only then
         # does it admit another base plate.
         if "ARM1" not in self.operations and self._resource_online("ARM1"):
@@ -1095,20 +1129,18 @@ class DualLineRuntime:
                 and self._tray_ready(unit)
             ]
             if install:
-                self._start("ARM1", install[0], "INSTALL_FIN", self.durations.arm1_fin)
-                changed = True
+                changed |= self._start("ARM1", install[0], "INSTALL_FIN", self.durations.arm1_fin)
             else:
                 base_loading = [
                     unit for unit in self._waiting_units(UnitStage.BASE_LOADING) if self._tray_ready(unit)
                 ]
                 if base_loading:
-                    self._start(
+                    changed |= self._start(
                         "ARM1",
                         base_loading[0],
                         "BASE_LOADING",
                         self.durations.base_load,
                     )
-                    changed = True
                 elif self._admit_next_unit():
                     changed = True
         if "ARM3" not in self.operations and self._resource_online("ARM3"):
@@ -1120,20 +1152,18 @@ class DualLineRuntime:
                 and self._tray_ready(unit)
             ]
             if install:
-                self._start("ARM3", install[0], "INSTALL_FIN", self.durations.arm3_fin)
-                changed = True
+                changed |= self._start("ARM3", install[0], "INSTALL_FIN", self.durations.arm3_fin)
         if "OUTPUT" not in self.operations and self._resource_online("OUTPUT"):
             delivering = [
                 unit for unit in self._waiting_units(UnitStage.DELIVERING) if self._tray_ready(unit)
             ]
             if delivering:
-                self._start(
+                changed |= self._start(
                     "OUTPUT",
                     delivering[0],
                     "OUTPUT_DELIVERY",
                     self.durations.output_delivery,
                 )
-                changed = True
         if (
             "OUTPUT_GATE" not in self.operations
             and self._resource_online("OUTPUT_GATE")
@@ -1147,25 +1177,25 @@ class DualLineRuntime:
                 and self._target_available(TrayOwner.OUTPUT)
             ]
             if waiting_output:
-                self._output_gate_open = True
-                self._output_gate_ready = False
-                self._start(
+                started = self._start(
                     "OUTPUT_GATE",
                     waiting_output[0],
                     "OUTPUT_GATE_OPEN",
                     self.durations.furnace_door,
                 )
-                changed = True
+                if started:
+                    self._output_gate_open = True
+                    self._output_gate_ready = False
+                    changed = True
         for unit in self._waiting_units(UnitStage.VIRTUAL_RETURN):
             resource = f"RETURN:{unit.unit_id}"
             if resource not in self.operations and self._resource_online(resource):
-                self._start(
+                changed |= self._start(
                     resource,
                     unit,
                     "VIRTUAL_RETURN",
                     self.durations.virtual_return,
                 )
-                changed = True
         return changed
 
     def _units_outside_furnace_queue(self) -> list[V2UnitState]:
@@ -1232,6 +1262,12 @@ class DualLineRuntime:
         if self.furnace.state.phase not in {FurnacePhase.IDLE, FurnacePhase.COMPLETE}:
             return False
         selected = buffered[:1]
+        if not self._operation_start_allowed(
+            "FURNACE_DOOR",
+            selected[0],
+            "FURNACE_FRONT_OPEN",
+        ):
+            return False
         self.furnace.plan_batch(
             tuple((unit.tray_id or unit.unit_id, unit.batch_recipe) for unit in selected),
             now=self.sim_time,
@@ -1317,6 +1353,12 @@ class DualLineRuntime:
             if not available_layers:
                 return False
             layer = available_layers[0]
+            if not self._operation_start_allowed(
+                "FURNACE_TRANSFER",
+                unit,
+                "FURNACE_LOAD_TRAY",
+            ):
+                return False
             unit.furnace_layer = layer
             for fault_layer in sorted(self.faults.unavailable_rack_layers):
                 if self.faults.mark_rack_reallocated(
@@ -1372,10 +1414,17 @@ class DualLineRuntime:
             and "FURNACE_DOOR" not in self.operations
             and self._resource_online("FURNACE_DOOR")
         ):
+            leader = self.units[self._active_batch_units[-1]]
+            if not self._operation_start_allowed(
+                "FURNACE_DOOR",
+                leader,
+                "FURNACE_REAR_OPEN",
+            ):
+                return False
             self.furnace.open_rear(now=self.sim_time)
             self._start(
                 "FURNACE_DOOR",
-                self.units[self._active_batch_units[-1]],
+                leader,
                 "FURNACE_REAR_OPEN",
                 self.durations.furnace_door,
             )
@@ -1400,6 +1449,12 @@ class DualLineRuntime:
             if self.units[unit_id].tray_id == tray_id
         )
         if not self._tray_ready(unit):
+            return False
+        if not self._operation_start_allowed(
+            "FURNACE_TRANSFER",
+            unit,
+            "FURNACE_UNLOAD_TRAY",
+        ):
             return False
         unloaded_tray_id = self.furnace.unload_rear(now=self.sim_time)
         if unloaded_tray_id != tray_id:

@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "suite_id": "FLEXIBLE_LINE_GOLDEN_4",
+  "seed": 42,
+  "step_seconds": 0.05,
+  "git_commit": "91244c1282b182f8ec06a32a60ccd9c1e7ae39c9",
+  "measurement_basis": {
+    "simulation_time": "terminal simulation event timestamps",
+    "wall_time": "time.perf_counter around each local run",
+    "estimate_substitution_forbidden": true
+  },
+  "groups": [
+    {
+      "group_id": "G1_SCHEDULER",
+      "title_zh": "调度柔性：固定顺序 vs 动态优先级",
+      "controlled_variable_zh": "订单、释放时刻、产品组合与资源配置相同，仅改变调度算法。",
+      "runs": [
+        {
+          "group_id": "G1_SCHEDULER",
+          "variant_id": "FIXED",
+          "label_zh": "固定顺序调度",
+          "complete": true,
+          "makespan_s": 725.9999999998875,
+          "throughput_units_per_hour": 14.876033057853546,
+          "average_robot_utilization": 0.25668044077135976,
+          "completed_units": 3,
+          "recovery_rate": 0.0,
+          "parallel_install_s": 0.0,
+          "changeover_s": 0.0,
+          "wall_seconds": 2.012003416995867,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        },
+        {
+          "group_id": "G1_SCHEDULER",
+          "variant_id": "DYNAMIC",
+          "label_zh": "动态优先级调度",
+          "complete": true,
+          "makespan_s": 495.35000000007835,
+          "throughput_units_per_hour": 21.80276572120378,
+          "average_robot_utilization": 0.37592947747382727,
+          "completed_units": 3,
+          "recovery_rate": 0.0,
+          "parallel_install_s": 0.0,
+          "changeover_s": 0.0,
+          "wall_seconds": 1.3144759580027312,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        }
+      ],
+      "comparison": {
+        "baseline_makespan_s": 725.9999999998875,
+        "candidate_makespan_s": 495.35000000007835,
+        "absolute_change_s": -230.6499999998091,
+        "makespan_improvement_percent": 31.76997245176926,
+        "baseline_throughput_units_per_hour": 14.876033057853546,
+        "candidate_throughput_units_per_hour": 21.80276572120378
+      }
+    },
+    {
+      "group_id": "G2_INSTALL_RESOURCE",
+      "title_zh": "资源柔性：单安装资源 vs 双安装资源",
+      "controlled_variable_zh": "A/B/C 与炉批参数相同，仅改变 S3 可用安装资源。",
+      "runs": [
+        {
+          "group_id": "G2_INSTALL_RESOURCE",
+          "variant_id": "ARM1_ONLY",
+          "label_zh": "仅 Arm1 安装翅片",
+          "complete": true,
+          "makespan_s": 71.44999999999808,
+          "throughput_units_per_hour": 151.15465360392287,
+          "average_robot_utilization": 0.1758805691625893,
+          "completed_units": 3,
+          "recovery_rate": 0.0,
+          "parallel_install_s": 4.399999999999992,
+          "changeover_s": 0.0,
+          "wall_seconds": 0.05905883300147252,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        },
+        {
+          "group_id": "G2_INSTALL_RESOURCE",
+          "variant_id": "ARM1_ARM3",
+          "label_zh": "Arm1 + Arm3 双安装支路",
+          "complete": true,
+          "makespan_s": 72.74999999999801,
+          "throughput_units_per_hour": 148.45360824742673,
+          "average_robot_utilization": 0.16540664375716374,
+          "completed_units": 3,
+          "recovery_rate": 0.0,
+          "parallel_install_s": 4.299999999999993,
+          "changeover_s": 0.0,
+          "wall_seconds": 0.058127167001657654,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        }
+      ],
+      "comparison": {
+        "baseline_makespan_s": 71.44999999999808,
+        "candidate_makespan_s": 72.74999999999801,
+        "absolute_change_s": 1.299999999999926,
+        "makespan_improvement_percent": -1.8194541637508201,
+        "baseline_throughput_units_per_hour": 151.15465360392287,
+        "candidate_throughput_units_per_hour": 148.45360824742673
+      }
+    },
+    {
+      "group_id": "G3_ORDER_SEQUENCE",
+      "title_zh": "订单排序柔性：交错顺序 vs 同族集中",
+      "controlled_variable_zh": "产品数量、种类与配置规则相同，仅改变订单序列；不包含可见实体换型。",
+      "runs": [
+        {
+          "group_id": "G3_ORDER_SEQUENCE",
+          "variant_id": "ARRIVAL_ABA",
+          "label_zh": "按到达顺序 ABA",
+          "complete": true,
+          "makespan_s": 169.45000000000428,
+          "throughput_units_per_hour": 63.735615225728694,
+          "average_robot_utilization": 0.270876364709347,
+          "completed_units": 3,
+          "recovery_rate": 0.0,
+          "parallel_install_s": 20.0,
+          "changeover_s": 0.0,
+          "wall_seconds": 16.65589537499909,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        },
+        {
+          "group_id": "G3_ORDER_SEQUENCE",
+          "variant_id": "FAMILY_AAB",
+          "label_zh": "同族排序 AAB",
+          "complete": true,
+          "makespan_s": 154.70000000000093,
+          "throughput_units_per_hour": 69.81254040077528,
+          "average_robot_utilization": 0.29077784960137726,
+          "completed_units": 3,
+          "recovery_rate": 0.0,
+          "parallel_install_s": 22.55,
+          "changeover_s": 0.0,
+          "wall_seconds": 15.271163083001738,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        }
+      ],
+      "comparison": {
+        "baseline_makespan_s": 169.45000000000428,
+        "candidate_makespan_s": 154.70000000000093,
+        "absolute_change_s": -14.750000000003354,
+        "makespan_improvement_percent": 8.704632634997333,
+        "baseline_throughput_units_per_hour": 63.735615225728694,
+        "candidate_throughput_units_per_hour": 69.81254040077528
+      }
+    },
+    {
+      "group_id": "G4_RECOVERY_DISPOSITION",
+      "title_zh": "扰动柔性：自主恢复 vs 人工处置",
+      "controlled_variable_zh": "同一 A 型订单、同一 fin_02 几何类异常；比较自主纠偏闭环与 10 秒人工处置。",
+      "runs": [
+        {
+          "group_id": "G4_RECOVERY_DISPOSITION",
+          "variant_id": "AUTONOMOUS",
+          "label_zh": "翅片偏位自主纠偏复检",
+          "complete": true,
+          "makespan_s": 57.69999999999886,
+          "throughput_units_per_hour": 62.39168110918668,
+          "average_robot_utilization": 0.08232235701906575,
+          "completed_units": 1,
+          "recovery_rate": 1.0,
+          "parallel_install_s": 0.0,
+          "changeover_s": 0.0,
+          "wall_seconds": 0.046529040999303106,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        },
+        {
+          "group_id": "G4_RECOVERY_DISPOSITION",
+          "variant_id": "MANUAL_10S",
+          "label_zh": "同类几何异常人工处置 10 秒",
+          "complete": true,
+          "makespan_s": 65.04999999999845,
+          "throughput_units_per_hour": 55.342044581092786,
+          "average_robot_utilization": 0.06456571867794161,
+          "completed_units": 1,
+          "recovery_rate": 1.0,
+          "parallel_install_s": 0.0,
+          "changeover_s": 0.0,
+          "wall_seconds": 0.05105783400358632,
+          "measurement_source": "SIMULATION_EVENT_TIMESTAMPS"
+        }
+      ],
+      "comparison": {
+        "baseline_makespan_s": 57.69999999999886,
+        "candidate_makespan_s": 65.04999999999845,
+        "absolute_change_s": 7.349999999999589,
+        "makespan_improvement_percent": -12.738301559791568,
+        "baseline_throughput_units_per_hour": 62.39168110918668,
+        "candidate_throughput_units_per_hour": 55.342044581092786
+      }
+    }
+  ]
+}

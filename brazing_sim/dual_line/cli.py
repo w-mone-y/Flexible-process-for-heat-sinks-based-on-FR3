@@ -29,7 +29,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--orders",
         default="",
-        help="comma-separated A/B/C presets; omitted viewer sessions start idle",
+        help="comma-separated A/B/C/D presets; omitted viewer sessions start idle",
     )
     parser.add_argument("--fast", action="store_true", help="shorten upstream demo operations")
     parser.add_argument("--max-sim-time", type=float, default=300.0)
@@ -40,8 +40,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     if args.max_sim_time <= 0 or args.dt <= 0:
         parser.error("--max-sim-time and --dt must be positive")
     presets = tuple(value.strip().upper() for value in args.orders.split(",") if value.strip())
-    if any(preset not in {"A", "B", "C"} for preset in presets):
-        parser.error("--orders must contain only A, B and C")
+    if any(preset not in {"A", "B", "C", "D"} for preset in presets):
+        parser.error("--orders must contain only A, B, C and D")
     args.order_presets = presets
     return args
 

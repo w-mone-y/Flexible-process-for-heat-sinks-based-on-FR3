@@ -18,13 +18,14 @@ from brazing_sim.flexible import build_custom_plan
 from .presentation import V2StatePresenter
 from .runtime import DualLineRuntime
 from .scene_adapter import DualLineSceneAdapter
+from .unified_runtime import UnifiedV2Runtime
 
 
 @dataclass(slots=True)
 class V2ControlSurface:
     """Translate common V1 API commands without owning MuJoCo or HTTP."""
 
-    runtime: DualLineRuntime
+    runtime: DualLineRuntime | UnifiedV2Runtime
     simulation_speed: float = 1.0
     running: bool = True
     # Order fields the last submission could not honour, surfaced to the console.
@@ -219,7 +220,16 @@ class V2BrazingApplication:
 
     def __init__(self, args: Any) -> None:
         self.args = args
-        self.scene = DualLineSceneAdapter(Path(args.xml))
+        compressed_headless = bool(args.headless) and bool(args.fast)
+        self.scene = DualLineSceneAdapter(
+            Path(args.xml),
+            # Headless acceptance retains the same dense Cartesian waypoints
+            # and 10 ms MuJoCo control cadence.  Only their time parameter is
+            # compressed; viewer motion and direct adapter regressions keep
+            # the established 4x/3x rehearsal scales.
+            fast_base_speed_scale=6.0 if compressed_headless else 4.0,
+            fast_process_speed_scale=5.0 if compressed_headless else 3.0,
+        )
         if bool(args.headless) and bool(args.fast):
             # Fast headless runs validate logical/physical completion rather
             # than contact-rich viewer cinematics.  A 10 ms MuJoCo step keeps
@@ -227,7 +237,7 @@ class V2BrazingApplication:
             # avoiding 25 substeps for every 50 ms application tick.  Viewer
             # sessions retain the authored 2 ms physics step.
             self.scene.model.opt.timestep = min(0.010, float(args.dt))
-        self.runtime = DualLineRuntime(fast=bool(args.fast))
+        self.runtime = UnifiedV2Runtime(fast=bool(args.fast))
         self.controls = V2ControlSurface(self.runtime)
         self.presenter = V2StatePresenter()
         self.shared = SharedState()
@@ -367,7 +377,8 @@ class V2BrazingApplication:
                 if target
                 else f"{detail} · 执行进度 {progress * 100.0:.0f}%"
             )
-        state["motion_plans"] = [
+        planned_motion = list(state.get("motion_plans", []))
+        physical_motion = [
             {
                 "resource_id": arm_name.upper(),
                 "request_id": physical.get("operation", ""),
@@ -380,6 +391,7 @@ class V2BrazingApplication:
             for arm_name, physical in robot_motion.items()
             if physical.get("operation")
         ]
+        state["motion_plans"] = [*planned_motion, *physical_motion]
         state["async_line"]["minimum_tray_clearance_m"] = self.scene.visible_tray_clearance_m()
         physical_owners = self.scene.physical_owner_snapshot()
         state["async_line"]["physical_tray_owners"] = physical_owners

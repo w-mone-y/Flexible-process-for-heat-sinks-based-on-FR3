@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .events import EventBus, EventType
 from .execution import SkillExecutor, SkillRegistry, TimedSkill
@@ -194,9 +194,12 @@ class ManufacturingRuntime:
         context: Any = None,
         max_wip_units: int = 3,
         flexible_cell: bool = False,
+        enable_motion_planning: bool | None = None,
         execution_profile: LineExecutionProfile | None = None,
         track_changeover: bool = False,
         teaching_baseline: TeachingBaseline | None = None,
+        dispatch_guard: Callable[[ManufacturingTask], tuple[bool, str]] | None = None,
+        external_batch_controller: bool = False,
     ) -> None:
         self.config = scheduler_config or load_scheduler_config(ROOT / "config" / "scheduler.yaml")
         resources, zones = load_resource_config(resource_config_path or ROOT / "config" / "resources.yaml")
@@ -215,6 +218,9 @@ class ManufacturingRuntime:
         self.scenario: FaultScenario | None = None
         self.max_wip_units = int(max_wip_units)
         self.flexible_cell = bool(flexible_cell)
+        self.motion_planning_enabled = (
+            self.flexible_cell if enable_motion_planning is None else bool(enable_motion_planning)
+        )
         # Step B: which resources may realise a capability depends on what this
         # line's actors can physically execute, not just on capability data.
         # V1's fin skills are implemented against Arm1's welds, so Arm3 is an
@@ -226,9 +232,11 @@ class ManufacturingRuntime:
         self.installed_fixture = FixtureConfiguration()
         self.setup_matrix = SetupTimeMatrix(durations=dict(LEGACY_DURATIONS))
         self.teaching_baseline = teaching_baseline or PLACEHOLDER_TEACHING_BASELINE
+        self.dispatch_guard = dispatch_guard
+        self.external_batch_controller = bool(external_batch_controller)
         self._unit_configurations: dict[str, FixtureConfiguration] = {}
         self.changeover_log: list[dict[str, Any]] = []
-        self.motion_planning = WorkcellMotionPlanningService(seed=0) if self.flexible_cell else None
+        self.motion_planning = WorkcellMotionPlanningService(seed=0) if self.motion_planning_enabled else None
         self.workstations: dict[WorkstationId, WorkstationState] = {}
         self.transfers: dict[TransferId, AsyncTransferState] = {}
         self.tray_routes: dict[str, TrayRouteState] = {}
@@ -281,7 +289,11 @@ class ManufacturingRuntime:
     def _default_registry() -> SkillRegistry:
         registry = SkillRegistry()
         for task_type in TaskType:
-            registry.register(task_type, TimedSkill())
+            # One stateful skill instance per execution is required for real
+            # V2 alternative resources: Arm1 and Arm3 may both install a fin
+            # during the same tick.  A singleton per task type serialised that
+            # legal parallelism even when the scheduler selected both tasks.
+            registry.register_factory(task_type, TimedSkill)
         return registry
 
     def set_scheduler(self, mode: str) -> None:
@@ -1141,7 +1153,10 @@ class ManufacturingRuntime:
         for task_id, result in self.executor.update_task(dt, timestamp).items():
             task = self.graph.get(task_id)
             if result.succeeded:
-                self._complete_task(task, result.metrics, timestamp)
+                metrics = dict(result.metrics)
+                if result.completion_evidence is not None:
+                    metrics["physical_completion"] = result.completion_evidence.as_dict()
+                self._complete_task(task, metrics, timestamp)
             elif result.failed:
                 self._fail_task(
                     task,
@@ -1180,7 +1195,18 @@ class ManufacturingRuntime:
         ready = self._refresh_ready(timestamp)
         if self.flexible_cell:
             ready = [task for task in ready if self._cell_task_available(task)]
-        ready = self._prepare_furnace_batches(ready, timestamp)
+        if self.dispatch_guard is not None:
+            guarded: list[ManufacturingTask] = []
+            for task in ready:
+                allowed, reason = self.dispatch_guard(task)
+                if allowed:
+                    task.payload.pop("dispatch_blocker", None)
+                    guarded.append(task)
+                else:
+                    task.payload["dispatch_blocker"] = str(reason)
+            ready = guarded
+        if not self.external_batch_controller:
+            ready = self._prepare_furnace_batches(ready, timestamp)
         occupied = {zone for zone, lease in self.zones.snapshot().items() if lease is not None}
         # Step D: make the sequence-dependent setup cost visible to the
         # scheduler.  ``SchedulingWeights.product_changeover_cost`` already

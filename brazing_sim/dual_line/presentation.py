@@ -3,9 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import json
+from pathlib import Path
 from typing import Any, Mapping
 
 from brazing_sim.ui import line_ui_profile
+
+
+@lru_cache(maxsize=1)
+def _golden_experiment_snapshot() -> dict[str, Any]:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "benchmarks"
+        / "results"
+        / "2026-08-02-golden-flexibility"
+        / "metrics.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
 
 _OWNER_TO_STATION = {
     "S1": "S1_BASE_LOADING",
@@ -97,6 +117,7 @@ _PRESET_FIXTURE = {
     "A": ("comb_insert_20mm", 20.0),
     "B": ("comb_insert_30mm", 18.0),
     "C": ("comb_insert_15mm", 22.0),
+    "D": ("comb_insert_15mm", 30.0),
 }
 
 # Stages during which the tray's comb is fitted and the press is engaged.
@@ -760,12 +781,22 @@ class V2StatePresenter:
             list(snapshot.get("physical_faults", [])),
             all_events,
         )
+        authority = snapshot.get("manufacturing")
+        authority = authority if isinstance(authority, Mapping) else {}
+        authority_tasks = authority.get("tasks", ())
+        if isinstance(authority_tasks, (list, tuple)) and authority_tasks:
+            # The task graph consumes the sole ManufacturingRuntime state;
+            # physical V2 operations remain available in the resource/gantt
+            # views but no longer invent a second set of task statuses.
+            tasks = [dict(task) for task in authority_tasks if isinstance(task, Mapping)]
         resources_v2 = self._resources(
             operations,
             tasks,
             isolated=snapshot.get("isolated_resources", {}),
             faults=list(snapshot.get("faults_v2", [])),
         )
+        if isinstance(authority.get("resources_v2"), Mapping):
+            resources_v2 = dict(authority["resources_v2"])
         profile = line_ui_profile(self.line_profile)
         segment_capabilities = {action.segment: False for action in profile.segment_actions}
         rack_layers = list(furnace.get("layers", ()))
@@ -937,7 +968,19 @@ class V2StatePresenter:
                 "final_quality_score": None,
             },
             "scheduler": {
-                "mode": "V2_EARLIEST_FINISH",
+                **(
+                    dict(authority.get("scheduler", {}))
+                    if isinstance(authority.get("scheduler"), Mapping)
+                    else {}
+                ),
+                "mode": str(
+                    (
+                        authority.get("scheduler", {}).get("mode")
+                        if isinstance(authority.get("scheduler"), Mapping)
+                        else None
+                    )
+                    or "V2_EARLIEST_FINISH"
+                ),
                 "ready_count": sum(task.get("status") == "READY" for task in tasks),
                 "running_count": sum(task.get("status") == "RUNNING" for task in tasks),
                 "replan_count": 0,
@@ -964,17 +1007,20 @@ class V2StatePresenter:
             "faults_v2": list(snapshot.get("faults_v2", [])),
             "recoveries": list(snapshot.get("recoveries", [])),
             "manual_fault_requests": list(snapshot.get("manual_fault_requests", [])),
+            "fault_policy_summary": dict(snapshot.get("fault_policy_summary", {})),
             "isolated_resources": dict(snapshot.get("isolated_resources", {})),
             "unavailable_rack_layers": list(snapshot.get("unavailable_rack_layers", [])),
             "experiment_metrics": self._experiment_metrics(snapshot, all_events, units),
-            "motion_plans": [],
-            "space_time_reservations": [],
-            "motion_blockers": {},
+            "golden_experiments": _golden_experiment_snapshot(),
+            "motion_plans": list(authority.get("motion_plans", [])),
+            "space_time_reservations": list(authority.get("space_time_reservations", [])),
+            "motion_blockers": dict(authority.get("motion_blockers", {})),
+            "physical_completion_gates": dict(snapshot.get("physical_completion_gates", {})),
             "gantt_events": self._gantt_events(all_events, float(snapshot.get("sim_time", 0.0))),
             "ui_capabilities": {
                 "segments": segment_capabilities,
                 "orders": True,
-                "custom_orders": False,
+                "custom_orders": bool(authority),
                 "pause_continue_reset": True,
                 "speed": True,
                 "fault_injection": True,
@@ -984,9 +1030,9 @@ class V2StatePresenter:
                     "batch_three": True,
                     "urgent_insert": True,
                     "fault_loop": True,
-                    "and_or_runtime": False,
+                    "and_or_runtime": bool(authority),
                     "physical_changeover": False,
-                    "optimization_scheduler": False,
+                    "optimization_scheduler": bool(authority),
                 },
             },
         }

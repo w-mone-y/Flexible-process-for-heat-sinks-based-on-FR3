@@ -158,18 +158,20 @@ class V2RobotMotionProjector:
         dtype=float,
     )
     # Same TCP as ``ARM3_BRANCH_CLEAR_PARK_M``, solved on the certified
-    # elbow-down branch whose links remain outside the complete pallet AABB.
-    # A Cartesian endpoint alone is insufficient because the redundant FR3
-    # can reach that TCP with an elbow-up solution intersecting the bridge.
+    # redundancy branch whose links retain at least 20 mm clearance from the
+    # *complete* B-line payload (comb guides and press bars included) over the
+    # vertical MERGE_B_WAIT→S4 sweep.  A Cartesian endpoint alone is
+    # insufficient because another valid FR3 solution puts link 3 through the
+    # left comb guide even though the tray slab itself remains clear.
     ARM3_BRANCH_CLEAR_QPOS = np.asarray(
         [
-            0.24180331626101303,
-            -1.4347891965758024,
-            0.6742496984552557,
-            -1.7005126621158881,
-            1.2078573892807527,
-            0.7227373905882183,
-            0.7101234269141535,
+            1.0616983712183474,
+            -0.6334018162398624,
+            0.9397680521727119,
+            -1.800293200896538,
+            0.4953382064226898,
+            1.4023823169061889,
+            1.1830243798357174,
         ],
         dtype=float,
     )
@@ -181,14 +183,23 @@ class V2RobotMotionProjector:
         *,
         set_component_visible: Callable[[str, str, bool], None] | None = None,
         restore_component_pose: Callable[[str, str], None] | None = None,
+        fast_base_speed_scale: float = 4.0,
+        fast_process_speed_scale: float = 3.0,
     ) -> None:
         import mujoco
+
+        if not math.isfinite(float(fast_base_speed_scale)) or float(fast_base_speed_scale) <= 0.0:
+            raise ValueError("fast base playback scale must be finite and positive")
+        if not math.isfinite(float(fast_process_speed_scale)) or float(fast_process_speed_scale) <= 0.0:
+            raise ValueError("fast process playback scale must be finite and positive")
 
         self.mujoco = mujoco
         self.model = model
         self.data = data
         self._set_component_visible = set_component_visible
         self._restore_component_pose = restore_component_pose
+        self._fast_base_speed_scale = float(fast_base_speed_scale)
+        self._fast_process_speed_scale = float(fast_process_speed_scale)
         self._paused_arms: set[str] = set()
         self._paused_joint_positions: dict[str, np.ndarray] = {}
         self.controllers = {arm: ArmController(model, data, arm) for arm in ("arm1", "arm2", "arm3")}
@@ -384,6 +395,10 @@ class V2RobotMotionProjector:
         self._plans: dict[str, _JointPlan | None] = {arm: None for arm in self.controllers}
         self._active_operation: dict[str, str] = {arm: "" for arm in self.controllers}
         self._target_label: dict[str, str] = {arm: "等待任务" for arm in self.controllers}
+        # Fine-grained task completion can be polled one control tick after a
+        # combined operation leaves the active plan. Preserve measured
+        # grasp/release milestones until reset so they cannot be missed.
+        self._measured_milestones: set[tuple[str, str]] = set()
         # Exact latent fin defects currently present on a tray.  The cache is
         # refreshed from runtime truth every scene sync so physical grasp
         # behaviour can differ from a successful nominal operation without
@@ -1786,7 +1801,15 @@ class V2RobotMotionProjector:
         # points while compressing Cartesian dwell.  The previous 2.5 scale
         # left the collision-safe branch reservation just outside the
         # established three-order acceptance window.
-        speed_scale = 4.0 if fast and operation.kind == "BASE_LOADING" else 3.0 if fast else 1.0
+        # Fast playback must not increase the per-control-tick joint jump: the
+        # V1-derived trajectories and clearance checks are authored around
+        # these limits.  Unified headless acceleration belongs at the
+        # application/physics stepping boundary, not inside the joint plan.
+        speed_scale = (
+            self._fast_base_speed_scale
+            if fast and operation.kind == "BASE_LOADING"
+            else self._fast_process_speed_scale if fast else 1.0
+        )
         stop_indices = [index for index, waypoint in enumerate(waypoints) if waypoint.stop]
         continuous_ranges = tuple(
             (left, right) for left, right in zip(stop_indices, stop_indices[1:]) if right > left + 1
@@ -2029,6 +2052,7 @@ class V2RobotMotionProjector:
                     return False
                 self._grasp_proxy(plan)
                 plan.grasp_verified = True
+                self._measured_milestones.add((plan.operation_key, "grasp"))
             elif index == plan.release_waypoint_index:
                 if not plan.interaction_started:
                     plan.interaction_started = True
@@ -2044,6 +2068,7 @@ class V2RobotMotionProjector:
                 self._reveal_installed_base(plan)
                 self._release_proxy(plan)
                 plan.release_verified = True
+                self._measured_milestones.add((plan.operation_key, "release"))
             return True
         interaction = plan.waypoints[index].interaction
         if interaction not in {"open", "grasp", "release"}:
@@ -2119,6 +2144,7 @@ class V2RobotMotionProjector:
             else:
                 self._grasp_proxy(plan)
                 plan.grasp_verified = True
+                self._measured_milestones.add((plan.operation_key, "grasp"))
         elif interaction == "release":
             if plan.grasp_failed:
                 self._restore_failed_pick_to_source(plan)
@@ -2130,6 +2156,7 @@ class V2RobotMotionProjector:
                 self._reveal_installed_fin(plan)
                 self._release_proxy(plan)
             plan.release_verified = True
+            self._measured_milestones.add((plan.operation_key, "release"))
         return True
 
     def sync(self, runtime: "DualLineRuntime") -> None:
@@ -2397,6 +2424,31 @@ class V2RobotMotionProjector:
             and final_pose_verified
         )
 
+    def operation_milestone(
+        self,
+        resource: str,
+        unit_id: str,
+        kind: str,
+        milestone: str,
+    ) -> bool:
+        """Expose measured grasp/release milestones to fine-grained DAG tasks."""
+
+        arm_name = str(resource).strip().lower()
+        plan = self._plans.get(arm_name)
+        operation_key = f"{unit_id}:{kind}"
+        key = str(milestone).strip().lower()
+        if (operation_key, key) in self._measured_milestones:
+            return True
+        if plan is None or plan.operation_key != operation_key or plan.operation_kind != kind:
+            return False
+        if key == "grasp":
+            return bool(plan.grasp_verified)
+        if key == "release":
+            return bool(plan.release_verified)
+        if key == "settled":
+            return self.operation_complete(resource, unit_id, kind)
+        raise ValueError(f"unknown physical operation milestone: {milestone}")
+
     def operation_progress(
         self,
         resource: str,
@@ -2487,6 +2539,7 @@ class V2RobotMotionProjector:
         self._arm1_tools.reset_to_rack()
         self._paused_arms.clear()
         self._paused_joint_positions.clear()
+        self._measured_milestones.clear()
         for arm_name, controller in self.controllers.items():
             controller.hold()
             self._plans[arm_name] = None

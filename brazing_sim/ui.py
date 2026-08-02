@@ -2057,9 +2057,31 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                         f"恢复率 {100*float(experiment.get('recovery_rate', 0.0)):.1f}%"
                     )
                     if selected_profile.profile_id == "V2_DUAL_INSTALL":
+                        golden = state.get("golden_experiments", {})
+                        golden_rows = []
+                        if isinstance(golden, dict):
+                            for group in golden.get("groups", []):
+                                if not isinstance(group, dict):
+                                    continue
+                                runs = group.get("runs", [])
+                                if not isinstance(runs, list) or len(runs) != 2:
+                                    continue
+                                baseline, candidate = runs
+                                comparison = group.get("comparison", {})
+                                improvement = comparison.get("makespan_improvement_percent")
+                                change = "不可计算" if improvement is None else f"{float(improvement):+.2f}%"
+                                golden_rows.append(
+                                    [
+                                        group.get("title_zh", group.get("group_id", "-")),
+                                        f"{float(baseline.get('makespan_s', 0.0)):.2f}s",
+                                        f"{float(candidate.get('makespan_s', 0.0)):.2f}s ({change})",
+                                        "实际仿真事件时间戳",
+                                    ]
+                                )
                         self._fill_table(
                             self.metrics_table,
-                            [
+                            golden_rows
+                            or [
                                 [
                                     "完工时间 / 当前时长",
                                     "-",

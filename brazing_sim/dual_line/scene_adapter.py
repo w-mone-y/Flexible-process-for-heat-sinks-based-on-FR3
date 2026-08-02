@@ -76,6 +76,8 @@ class DualLineSceneAdapter:
         *,
         transfer_speed_m_s: float = 0.35,
         minimum_transfer_s: float = 0.55,
+        fast_base_speed_scale: float = 4.0,
+        fast_process_speed_scale: float = 3.0,
     ) -> None:
         import mujoco
 
@@ -214,6 +216,8 @@ class DualLineSceneAdapter:
             self.data,
             set_component_visible=self._set_component_visible,
             restore_component_pose=self._restore_component_pose,
+            fast_base_speed_scale=fast_base_speed_scale,
+            fast_process_speed_scale=fast_process_speed_scale,
         )
 
     def _set_all_hidden(self) -> None:
@@ -1415,9 +1419,55 @@ class DualLineSceneAdapter:
             and not any(motion.target_owner is TrayOwner.FURNACE for motion in self._motions.values())
         )
 
+    def operation_milestone(
+        self,
+        resource: str,
+        unit_id: str,
+        kind: str,
+        milestone: str,
+    ) -> bool:
+        """Expose robot interaction feedback through the execution-gate seam."""
+
+        return self._robots.operation_milestone(resource, unit_id, kind, milestone)
+
     @property
     def transport_settled(self) -> bool:
         return not self._motions and not any(self._pending_owners.values())
+
+    def physical_terminal_gate_snapshot(self) -> dict[str, object]:
+        """Measured scene-side state used by the final completion authority."""
+
+        mechanism_positions = self.furnace_mechanism_position_snapshot()
+        mechanism_safe = all(
+            abs(float(mechanism_positions.get(name, 0.0))) <= tolerance
+            for name, tolerance in {
+                "front_door": 0.02,
+                "rear_door": 0.02,
+                "lift": 0.01,
+                "pusher": 0.02,
+                "rear_lift": 0.01,
+                "rear_extractor": 0.02,
+                "v2_finished_output_gate": 0.02,
+            }.items()
+        )
+        robots = self.robot_motion_snapshot()
+        robots_settled = all(
+            not str(item.get("operation") or "") and not str(item.get("failure") or "")
+            for item in robots.values()
+        )
+        physical_owners = self.physical_owner_snapshot()
+        trays_safe = all(owner == TrayOwner.EMPTY_BUFFER.value for owner in physical_owners.values())
+        return {
+            "transport_settled": self.transport_settled,
+            "pending_owner_count": sum(len(queue) for queue in self._pending_owners.values()),
+            "active_transport_count": len(self._motions),
+            "mechanisms_safe": mechanism_safe,
+            "mechanism_positions_m": mechanism_positions,
+            "robots_settled": robots_settled,
+            "robot_operations": {resource: item.get("operation") for resource, item in robots.items()},
+            "physical_trays_safe": trays_safe,
+            "physical_tray_owners": physical_owners,
+        }
 
     def dual_camera_rgb(self, *, width: int = 480, height: int = 360) -> np.ndarray:
         """Render Arm3 and rear fixed-camera images as one side-by-side frame."""

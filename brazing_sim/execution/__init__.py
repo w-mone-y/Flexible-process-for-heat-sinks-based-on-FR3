@@ -4,6 +4,7 @@ from .skill_executor import SkillExecutor
 from .execution_monitor import ExecutionMonitor
 from .skill_registry import (
     ActorSkillAdapter,
+    PhysicalCompletionEvidence,
     SkillExecutionResult,
     SkillRegistry,
     TimedSkill,
@@ -22,12 +23,13 @@ def build_async_line_skill_registry() -> SkillRegistry:
 
     registry = SkillRegistry()
     for task_type in TaskType:
-        registry.register(task_type, TimedSkill())
+        registry.register_factory(task_type, TimedSkill)
     return registry
 
 
 __all__ = [
     "ActorSkillAdapter",
+    "PhysicalCompletionEvidence",
     "ExecutionMonitor",
     "SkillExecutionResult",
     "SkillExecutor",

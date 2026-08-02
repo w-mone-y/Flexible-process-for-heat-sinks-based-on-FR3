@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
 from ..recovery.fault_models import FaultRecord, FaultType, RecoveryStatus
+from ..fault_catalog import MANUAL_FAULT_CATALOG
 
 # Quality faults use two different triggers.  They first *manifest* while the
 # work is being produced and remain latent/visible on the pallet.  A later
@@ -258,6 +259,8 @@ class V2RecoveryPlan:
     label_zh: str
     unit_id: str | None
     rollback_stage: str | None
+    recovery_class: str = "AUTONOMOUS_RECOVERY"
+    final_disposition_zh: str = "修复后复检，合格则回归原订单"
     status: RecoveryStatus = RecoveryStatus.PLANNED
     retry_count: int = 0
     retry_limit: int = 1
@@ -285,6 +288,8 @@ class V2RecoveryPlan:
             "label_zh": self.label_zh,
             "unit_id": self.unit_id,
             "rollback_stage": self.rollback_stage,
+            "recovery_class": self.recovery_class,
+            "final_disposition_zh": self.final_disposition_zh,
             "rollback_applied": self.rollback_applied,
             "effort_factor": self.effort_factor,
             "status": self.status.value,
@@ -651,6 +656,9 @@ class V2FaultController:
         unit_id = record.details.get("unit_id")
         target = str(record.details.get("target", ""))
         visual_type = str(record.details.get("visual_type", record.fault_type.value)).upper()
+        definition = MANUAL_FAULT_CATALOG.get(visual_type) or MANUAL_FAULT_CATALOG.get(
+            record.fault_type.value
+        )
 
         # FIN_POSE is the first catalogue item and keeps its automatic Arm3
         # correction.  The sixth item uses the same typed runtime fault but is
@@ -680,6 +688,12 @@ class V2FaultController:
             strategy, rollback = "MANUAL_REVIEW", None
 
         simulated_manual_review = strategy == "MANUAL_REVIEW"
+        recovery_class = "MANUAL_DISPOSITION" if simulated_manual_review else "AUTONOMOUS_RECOVERY"
+        final_disposition_zh = (
+            definition.final_disposition_zh
+            if definition is not None
+            else "人工确认后恢复安全状态" if simulated_manual_review else "修复后复检，合格则回归原订单"
+        )
         fault_label_zh = str(record.details.get("label_zh") or record.fault_type.value)
         self._recovery_sequence += 1
         plan = V2RecoveryPlan(
@@ -689,6 +703,8 @@ class V2FaultController:
             label_zh=_STRATEGY_LABELS_ZH.get(strategy, strategy),
             unit_id=unit_id,
             rollback_stage=rollback,
+            recovery_class=recovery_class,
+            final_disposition_zh=final_disposition_zh,
             status=(RecoveryStatus.MANUAL_REVIEW if strategy == "MANUAL_REVIEW" else RecoveryStatus.RUNNING),
             retry_limit=max(1, retry_limit),
             created_at=float(now),
@@ -1140,6 +1156,13 @@ class V2FaultController:
             for plan in self.plans.values()
             if plan.manual_review_started_at is not None
         ]
+        catalog = tuple(MANUAL_FAULT_CATALOG.values())
+        unresolved = [record for record in self.faults.values() if not record.recovered]
+        active_plans = [
+            plan
+            for plan in self.plans.values()
+            if plan.status not in {RecoveryStatus.SUCCEEDED, RecoveryStatus.FAILED}
+        ]
         return {
             "faults_v2": [record.as_dict() for record in self.faults.values()],
             "recoveries": [plan.as_dict() for plan in self.plans.values()],
@@ -1152,6 +1175,16 @@ class V2FaultController:
                 "recover_at": self.cell_hold_until,
             },
             "manual_review_notices": notices,
+            "fault_policy_summary": {
+                "catalog_count": len(catalog),
+                "autonomous_count": sum(item.recovery_class == "AUTONOMOUS_RECOVERY" for item in catalog),
+                "manual_count": sum(item.recovery_class == "MANUAL_DISPOSITION" for item in catalog),
+                "active_autonomous": sum(
+                    item.recovery_class == "AUTONOMOUS_RECOVERY" for item in active_plans
+                ),
+                "active_manual": sum(item.recovery_class == "MANUAL_DISPOSITION" for item in active_plans),
+                "unresolved_count": len(unresolved),
+            },
             "fault_count": len(self.faults),
             "recovered_fault_count": sum(1 for record in self.faults.values() if record.recovered),
         }

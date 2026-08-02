@@ -3,10 +3,38 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from math import isfinite
+from typing import Any, Callable, Protocol
 
 from ..domain import Actor, TaskSpec, TaskType as LegacyTaskType
 from ..planning.task_models import ManufacturingTask, TaskType
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalCompletionEvidence:
+    """Measured proof that a physical skill has reached its terminal state."""
+
+    observed_at: float
+    source: str
+    checks: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isfinite(float(self.observed_at)) or float(self.observed_at) < 0.0:
+            raise ValueError("physical completion time must be finite and non-negative")
+        if not str(self.source).strip():
+            raise ValueError("physical completion source must not be empty")
+        normalized = tuple(str(check).strip() for check in self.checks if str(check).strip())
+        if not normalized:
+            raise ValueError("physical completion must contain at least one measured check")
+        object.__setattr__(self, "source", str(self.source).strip())
+        object.__setattr__(self, "checks", normalized)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "observed_at": float(self.observed_at),
+            "source": self.source,
+            "checks": list(self.checks),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,19 +44,31 @@ class SkillExecutionResult:
     failed: bool = False
     failure_code: str | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
+    completion_evidence: PhysicalCompletionEvidence | None = None
 
     def __post_init__(self) -> None:
         terminal = int(self.succeeded) + int(self.failed)
         if terminal > 1 or (self.running and terminal):
             raise ValueError("skill result flags are mutually exclusive")
+        if self.completion_evidence is not None and not self.succeeded:
+            raise ValueError("completion evidence is only valid for a successful result")
 
     @classmethod
     def running_result(cls, metrics: dict[str, Any] | None = None) -> "SkillExecutionResult":
         return cls(running=True, metrics=dict(metrics or {}))
 
     @classmethod
-    def success(cls, metrics: dict[str, Any] | None = None) -> "SkillExecutionResult":
-        return cls(succeeded=True, metrics=dict(metrics or {}))
+    def success(
+        cls,
+        metrics: dict[str, Any] | None = None,
+        *,
+        completion_evidence: PhysicalCompletionEvidence | None = None,
+    ) -> "SkillExecutionResult":
+        return cls(
+            succeeded=True,
+            metrics=dict(metrics or {}),
+            completion_evidence=completion_evidence,
+        )
 
     @classmethod
     def failure(cls, code: str, metrics: dict[str, Any] | None = None) -> "SkillExecutionResult":
@@ -46,28 +86,73 @@ class Skill(Protocol):
 class SkillRegistry:
     def __init__(self) -> None:
         self._skills: dict[TaskType, Skill] = {}
+        self._factories: dict[TaskType, Callable[[], Skill]] = {}
+        self._physical_evidence_required: set[TaskType] = set()
 
     def register(self, task_type: TaskType | str, skill: Skill, *, replace: bool = False) -> None:
         key = TaskType(task_type)
-        if key in self._skills and not replace:
+        if (key in self._skills or key in self._factories) and not replace:
             raise ValueError(f"skill already registered for {key.value}")
+        self._factories.pop(key, None)
+        self._physical_evidence_required.discard(key)
         self._skills[key] = skill
+
+    def register_factory(
+        self,
+        task_type: TaskType | str,
+        factory: Callable[[], Skill],
+        *,
+        replace: bool = False,
+        requires_physical_evidence: bool = False,
+    ) -> None:
+        """Register a per-execution skill factory.
+
+        Factories are required when one task type can run concurrently on two
+        capable resources (for example V2 fin installation on Arm1 and Arm3).
+        """
+
+        key = TaskType(task_type)
+        if (key in self._skills or key in self._factories) and not replace:
+            raise ValueError(f"skill already registered for {key.value}")
+        if not callable(factory):
+            raise TypeError("skill factory must be callable")
+        self._skills.pop(key, None)
+        self._factories[key] = factory
+        if requires_physical_evidence:
+            self._physical_evidence_required.add(key)
+        else:
+            self._physical_evidence_required.discard(key)
 
     def get(self, task_type: TaskType | str) -> Skill:
         key = TaskType(task_type)
+        if key in self._factories:
+            return self._factories[key]()
         try:
             return self._skills[key]
         except KeyError as exc:
             raise KeyError(f"no skill registered for {key.value}") from exc
 
     def supports(self, task_type: TaskType | str) -> bool:
-        return TaskType(task_type) in self._skills
+        key = TaskType(task_type)
+        return key in self._skills or key in self._factories
+
+    def create(self, task_type: TaskType | str) -> Skill:
+        """Create or obtain the skill instance for one concrete execution."""
+
+        return self.get(task_type)
+
+    def requires_physical_evidence(self, task_type: TaskType | str) -> bool:
+        return TaskType(task_type) in self._physical_evidence_required
 
     def snapshot(self) -> dict[str, str]:
-        return {
-            key.value: type(skill).__name__
-            for key, skill in sorted(self._skills.items(), key=lambda x: x[0].value)
-        }
+        snapshot = {key.value: type(skill).__name__ for key, skill in self._skills.items()}
+        snapshot.update(
+            {
+                key.value: f"factory:{getattr(factory, '__name__', type(factory).__name__)}"
+                for key, factory in self._factories.items()
+            }
+        )
+        return dict(sorted(snapshot.items()))
 
 
 class TimedSkill:
@@ -217,6 +302,7 @@ class ActorSkillAdapter:
 __all__ = [
     "ActorSkillAdapter",
     "LEGACY_TASK_MAPPING",
+    "PhysicalCompletionEvidence",
     "Skill",
     "SkillExecutionResult",
     "SkillRegistry",

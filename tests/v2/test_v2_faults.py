@@ -75,6 +75,56 @@ def test_every_runtime_fault_code_has_a_v2_trigger_rule():
     assert runtime_faults - covered == set()
 
 
+def test_fault_catalog_is_exactly_thirteen_explicit_dispositions() -> None:
+    """The UI must explain whether each advertised fault is autonomous or human-owned."""
+
+    assert len(MANUAL_FAULT_CATALOG) == 13
+    rows = [definition.as_dict() for definition in MANUAL_FAULT_CATALOG.values()]
+    assert {row["recovery_class"] for row in rows} == {
+        "AUTONOMOUS_RECOVERY",
+        "MANUAL_DISPOSITION",
+    }
+    assert all(row["detection_stage"] for row in rows)
+    assert all(row["recovery_route_zh"] for row in rows)
+    assert all(row["final_disposition_zh"] for row in rows)
+    assert sum(row["recovery_class"] == "AUTONOMOUS_RECOVERY" for row in rows) == 7
+    assert sum(row["recovery_class"] == "MANUAL_DISPOSITION" for row in rows) == 6
+
+
+def test_recovery_snapshot_exposes_policy_and_final_disposition() -> None:
+    automatic = V2FaultController()
+    auto_record = automatic.inject(
+        FaultType.BRAZING_MISSING,
+        source="ARM3",
+        target="path_02",
+        unit_id="U1",
+        now=0.0,
+        visual_type="BRAZING_MISSING",
+    )
+    auto_plan = automatic.plans[auto_record.recovery_id]
+    assert auto_plan.recovery_class == "AUTONOMOUS_RECOVERY"
+    assert auto_plan.final_disposition_zh == "修复后复检，合格则回归原订单"
+
+    manual = V2FaultController()
+    manual_record = manual.inject(
+        FaultType.ARM_UNAVAILABLE,
+        source="ARM2",
+        target="ARM2",
+        now=0.0,
+    )
+    manual_plan = manual.plans[manual_record.recovery_id]
+    assert manual_plan.recovery_class == "MANUAL_DISPOSITION"
+    assert manual_plan.manual_review_complete_at == pytest.approx(10.0)
+    assert manual.snapshot()["fault_policy_summary"] == {
+        "catalog_count": 13,
+        "autonomous_count": 7,
+        "manual_count": 6,
+        "active_autonomous": 0,
+        "active_manual": 1,
+        "unresolved_count": 1,
+    }
+
+
 def test_path_targets_accept_both_v1_and_v2_naming():
     """V1 names paths ``slot_02_left``; V2 names them ``path_02``."""
 
