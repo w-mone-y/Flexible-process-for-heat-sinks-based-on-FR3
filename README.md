@@ -196,7 +196,7 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 - NumPy、PyYAML
 - PySide6（可选，用于 Qt 规划控制台）
 - macOS 图形模式建议使用 `mjpython`
-- Windows V2 使用 Conda 环境 `wy`，启动脚本不会调用全局 Python，也不会安装依赖
+- Windows V2 使用 `.env` 中配置的 Conda 环境，启动脚本不会调用全局 Python，也不会安装依赖
 
 ### 2. 三步启动
 
@@ -214,12 +214,21 @@ mjpython brazing_line_v2.py
 
 ### Windows V2 启动
 
-Windows V2 固定通过已有的 Conda 环境 `wy` 运行。PowerShell 当前 PATH 没有 `conda` 时，
-脚本也会尝试常见的 Conda 安装位置；找不到环境或运行库时只报告错误，不执行安装。
+Windows V2 通过仓库根目录 `.env` 中的 `CONDA_ENV_PATH` 运行。推荐创建名为 `py312` 的
+Conda 环境；环境目录由用户自己填写，脚本不猜测 Conda 安装位置，也不执行安装。请使用
+PowerShell 7（`pwsh`）执行脚本。
 
 ```powershell
+# 创建推荐环境并在环境内安装项目依赖
+conda create -n py312 python=3.12
+conda run -n py312 python -m pip install -e ".[ui,dev]"
+
+# 复制配置模板，然后把 CONDA_ENV_PATH 改为 `conda env list` 显示的 py312 路径
+Copy-Item .env.example .env
+notepad .env
+
 # 在仓库根目录执行；首次使用可只对当前进程放宽脚本策略
-powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1
 
 # 带订单运行 Viewer + Qt 控制台
 powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --orders A,B,C --fast
@@ -232,8 +241,8 @@ Windows Viewer 的交互约定：左键拖动旋转，右键或中键拖动平�
 触摸板两指滑动前后左右平移；方向键/WASD 也可平移，`R` 恢复初始视角。滚轮/捏合向上
 为放大，向下为缩小。
 
-若提示缺少 `mujoco`、`PySide6` 或其他模块，请确认模块安装在 `wy` 环境中，并用
-`conda run -n wy python -c "import mujoco, PySide6"` 检查；不要改用全局 Python。
+若提示缺少 `mujoco`、`PySide6` 或其他模块，请确认模块安装在 `.env` 配置的环境中，并用
+`conda run -n py312 python -c "import mujoco, PySide6"` 检查；不要改用全局 Python。
 
 ### 3. 启动稳定 V1
 

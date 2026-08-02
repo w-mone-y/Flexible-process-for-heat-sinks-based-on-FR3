@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from brazing_sim.dual_line.windows_viewer import CameraController
+from brazing_sim.dual_line.windows_viewer import (
+    RENDER_HEIGHT,
+    RENDER_WIDTH,
+    CameraController,
+    _prepare_renderer_size,
+    _touchpad_pan_delta,
+)
 
 
 def test_camera_zoom_positive_is_in_and_stays_clamped() -> None:
@@ -37,3 +45,15 @@ def test_camera_orbit_clamps_elevation() -> None:
 
     camera.orbit(0.0, 10_000.0)
     assert camera.elevation == pytest.approx(camera.MIN_ELEVATION)
+
+
+def test_touchpad_horizontal_pan_is_reversed_for_windows_delta() -> None:
+    assert _touchpad_pan_delta(12.0, -3.0) == (-12.0, -3.0)
+
+
+def test_renderer_size_expands_model_offscreen_buffer() -> None:
+    model = SimpleNamespace(vis=SimpleNamespace(global_=SimpleNamespace(offwidth=640, offheight=480)))
+
+    assert _prepare_renderer_size(model) == (RENDER_WIDTH, RENDER_HEIGHT)
+    assert model.vis.global_.offwidth == RENDER_WIDTH
+    assert model.vis.global_.offheight == RENDER_HEIGHT
