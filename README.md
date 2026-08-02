@@ -137,8 +137,10 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 ### 💧 Arm2 蛇形钎料涂覆
 
 <p align="center">
-  <img src="docs/images/readme/v2_dispensing_process.gif" alt="Arm2 双喷嘴沿参数化蛇形路径逐条涂覆钎料" width="800">
+  <img src="docs/images/readme/v2_dispensing_process.webp" alt="Arm2 双喷嘴沿参数化蛇形路径逐条涂覆钎料" width="1000">
 </p>
+
+<p align="center"><sub>高清动态 WebP · <a href="docs/images/readme/v2_dispensing_process.gif">GIF 备用版</a></sub></p>
 
 👉 喷嘴沿奇偶路径交替反向扫描，黄色钎料会随喷头前进逐段增长，
 已完成的路径保持在基板上，而不是一次性闪现出完整线条。
@@ -146,8 +148,10 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 ### 🤖 Arm1 + Arm3 双支路并行安装
 
 <p align="center">
-  <img src="docs/images/readme/v2_parallel_install_process.gif" alt="Arm1 与 Arm3 在 S3A 和 S3B 两张托盘上并行安装翅片" width="800">
+  <img src="docs/images/readme/v2_parallel_install_process.webp" alt="Arm1 与 Arm3 在 S3A 和 S3B 两张托盘上并行安装翅片" width="1000">
 </p>
+
+<p align="center"><sub>高清动态 WebP · <a href="docs/images/readme/v2_parallel_install_process.gif">GIF 备用版</a></sub></p>
 
 👉 左右两张托盘拥有独立的梳齿、翅片和任务状态。Arm3 遇到检测任务时保持
 检测优先；它处于空闲窗口时，才与 Arm1 分担逐片安装，因此这是调度结果，
@@ -156,8 +160,10 @@ S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
 ### 🩹 钎料漏涂的“检出 → 返回 → 局部补涂”
 
 <p align="center">
-  <img src="docs/images/readme/v2_fault_recovery_process.gif" alt="S2B 检出钎料局部漏涂后托盘返回 S2A 由 Arm2 局部补涂" width="800">
+  <img src="docs/images/readme/v2_fault_recovery_process.webp" alt="S2B 检出钎料局部漏涂后托盘返回 S2A 由 Arm2 局部补涂" width="1000">
 </p>
+
+<p align="center"><sub>高清动态 WebP · <a href="docs/images/readme/v2_fault_recovery_process.gif">GIF 备用版</a></sub></p>
 
 👉 缺口先在涂覆阶段形成，到 S2B 检测后才进入恢复分支。返程中其他完好钎料
 继续保留，Arm2 只处理缺失区段，完成后再送往检测，体现“局部返工”而不是
@@ -171,8 +177,9 @@ python scripts/capture_readme_gifs.py
 ```
 
 采集脚本会根据 `DISPENSING`、双 `INSTALL_FIN` 和恢复任务的真实运行时状态
-自动确定起止时刻，最后使用 FFmpeg 生成 800×450、96 色的循环 GIF。
-这使 README 中的演示能随动作逻辑迭代而重新生成。
+自动确定起止时刻，以 4× 离屏抗锯齿渲染 1280×720 原始帧，最同时生成
+92 质量的高清动态 WebP 与 256 色 GIF 备用版。这使 README 中的演示能随动作逻辑
+迭代而重新生成。
 
 </details>
 

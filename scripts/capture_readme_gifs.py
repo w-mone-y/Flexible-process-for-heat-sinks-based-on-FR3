@@ -17,15 +17,16 @@ os.environ.setdefault("MUJOCO_GL", "cgl")
 
 import mujoco
 import numpy as np
+from PIL import Image
 
 from brazing_sim.dual_line.application import V2BrazingApplication
 from brazing_sim.dual_line.cli import parse_args
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "docs" / "images" / "readme"
-WIDTH = 800
-HEIGHT = 450
-GIF_FPS = 12
+WIDTH = 1280
+HEIGHT = 720
+ANIMATION_FPS = 15
 
 
 def _camera(
@@ -44,12 +45,31 @@ def _camera(
     return camera
 
 
-def _encode_gif(frames: list[np.ndarray], destination: Path) -> None:
-    """Use one temporary lossless stream to build a small global GIF palette."""
+def _encode_animations(frames: list[np.ndarray], destination_stem: Path) -> tuple[Path, Path]:
+    """Write a high-fidelity WebP plus a broadly compatible GIF fallback."""
 
     if len(frames) < 2:
-        raise RuntimeError(f"animation {destination.name} captured too few frames")
-    destination.parent.mkdir(parents=True, exist_ok=True)
+        raise RuntimeError(f"animation {destination_stem.name} captured too few frames")
+    destination_stem.parent.mkdir(parents=True, exist_ok=True)
+    webp_destination = destination_stem.with_suffix(".webp")
+    gif_destination = destination_stem.with_suffix(".gif")
+
+    # Animated WebP preserves gradients and small Chinese labels far better
+    # than GIF's global 256-colour ceiling.  GitHub renders it inline, while
+    # the GIF remains available as a compatibility/download fallback.
+    pil_frames = [Image.fromarray(frame) for frame in frames]
+    pil_frames[0].save(
+        webp_destination,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=round(1000 / ANIMATION_FPS),
+        loop=0,
+        format="WEBP",
+        quality=92,
+        method=6,
+        minimize_size=True,
+    )
+
     with tempfile.TemporaryDirectory(prefix="brazing-readme-gif-") as directory:
         video = Path(directory) / "clip.mkv"
         raw = subprocess.Popen(
@@ -66,7 +86,7 @@ def _encode_gif(frames: list[np.ndarray], destination: Path) -> None:
                 "-s:v",
                 f"{WIDTH}x{HEIGHT}",
                 "-r",
-                str(GIF_FPS),
+                str(ANIMATION_FPS),
                 "-i",
                 "-",
                 "-an",
@@ -81,7 +101,9 @@ def _encode_gif(frames: list[np.ndarray], destination: Path) -> None:
             raw.stdin.write(np.ascontiguousarray(frame, dtype=np.uint8).tobytes())
         raw.stdin.close()
         if raw.wait() != 0:
-            raise RuntimeError(f"failed to encode intermediate video for {destination.name}")
+            raise RuntimeError(
+                f"failed to encode intermediate video for {destination_stem.name}"
+            )
 
         palette = Path(directory) / "palette.png"
         subprocess.run(
@@ -94,7 +116,7 @@ def _encode_gif(frames: list[np.ndarray], destination: Path) -> None:
                 "-i",
                 str(video),
                 "-vf",
-                "palettegen=max_colors=96:stats_mode=diff",
+                "palettegen=max_colors=256:reserve_transparent=0:stats_mode=full",
                 str(palette),
             ],
             check=True,
@@ -111,13 +133,14 @@ def _encode_gif(frames: list[np.ndarray], destination: Path) -> None:
                 "-i",
                 str(palette),
                 "-lavfi",
-                "paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle",
+                "paletteuse=dither=sierra2_4a:diff_mode=rectangle",
                 "-loop",
                 "0",
-                str(destination),
+                str(gif_destination),
             ],
             check=True,
         )
+    return webp_destination, gif_destination
 
 
 def _render_clip(
@@ -148,6 +171,7 @@ def _render_clip(
         application.runtime.inject_fault(inject_fault[0], target=inject_fault[1])
     application.scene.model.vis.global_.offwidth = WIDTH
     application.scene.model.vis.global_.offheight = HEIGHT
+    application.scene.model.vis.quality.offsamples = 4
     renderer = mujoco.Renderer(application.scene.model, height=HEIGHT, width=WIDTH)
     frames: list[np.ndarray] = []
     clip_started_at: float | None = None
@@ -175,11 +199,13 @@ def _render_clip(
         # GitHub starts or loops the animation.
         if frames:
             frames = [frames[0]] * 4 + frames + [frames[-1]] * 8
-        destination = OUTPUT_DIR / filename
-        _encode_gif(frames, destination)
-        size_mib = destination.stat().st_size / (1024 * 1024)
+        destination_stem = OUTPUT_DIR / Path(filename).stem
+        webp_destination, gif_destination = _encode_animations(frames, destination_stem)
+        webp_size_mib = webp_destination.stat().st_size / (1024 * 1024)
+        gif_size_mib = gif_destination.stat().st_size / (1024 * 1024)
         print(
-            f"[gif] {filename}: {len(frames)} frames, {size_mib:.2f} MiB, "
+            f"[animation] {destination_stem.name}: {len(frames)} frames, "
+            f"WebP={webp_size_mib:.2f} MiB, GIF={gif_size_mib:.2f} MiB, "
             f"t={clip_started_at:.2f}s",
             flush=True,
         )
@@ -210,7 +236,7 @@ def _dispensing_clip() -> None:
         orders="A",
         camera=_camera(
             lookat=(-0.30, 0.02, 0.30),
-            distance=1.75,
+            distance=1.50,
             azimuth=140,
             elevation=-31,
         ),
@@ -237,7 +263,7 @@ def _parallel_install_clip() -> None:
         orders="A,A,A",
         camera=_camera(
             lookat=(0.32, 0.10, 0.32),
-            distance=2.55,
+            distance=2.20,
             azimuth=145,
             elevation=-28,
         ),
@@ -272,7 +298,7 @@ def _fault_recovery_clip() -> None:
         orders="A",
         camera=_camera(
             lookat=(0.00, 0.00, 0.28),
-            distance=2.35,
+            distance=1.95,
             azimuth=140,
             elevation=-32,
         ),
