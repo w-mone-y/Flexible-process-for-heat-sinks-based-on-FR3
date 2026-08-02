@@ -7,6 +7,19 @@ from dataclasses import dataclass, field
 from math import cos, exp, radians, sin
 from typing import Any
 
+RENDER_WIDTH = 1200
+RENDER_HEIGHT = 720
+
+
+def _touchpad_pan_delta(dx: float, dy: float) -> tuple[float, float]:
+    return -float(dx), float(dy)
+
+
+def _prepare_renderer_size(model: Any) -> tuple[int, int]:
+    model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), RENDER_WIDTH)
+    model.vis.global_.offheight = max(int(model.vis.global_.offheight), RENDER_HEIGHT)
+    return RENDER_WIDTH, RENDER_HEIGHT
+
 
 @dataclass(slots=True)
 class CameraController:
@@ -74,13 +87,15 @@ def run_windows_viewer(application: Any) -> int:
         from PySide6.QtGui import QImage, QPainter
         from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
     except ImportError as exc:
-        print(f"Windows V2 viewer requires MuJoCo and PySide6 in conda env wy: {exc}", file=sys.stderr)
+        print(
+            f"Windows V2 viewer requires MuJoCo and PySide6 in the configured Conda environment: {exc}",
+            file=sys.stderr,
+        )
         return 2
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     model, data = application.scene.model, application.scene.data
-    render_width = max(1, min(1200, int(model.vis.global_.offwidth)))
-    render_height = max(1, min(720, int(model.vis.global_.offheight)))
+    render_width, render_height = _prepare_renderer_size(model)
     renderer = mujoco.Renderer(model, height=render_height, width=render_width)
     camera = mujoco.MjvCamera()
     controller = CameraController()
@@ -99,7 +114,7 @@ def run_windows_viewer(application: Any) -> int:
         def _zoom_from_wheel(self, event: Any) -> bool:
             pixel_delta = event.pixelDelta()
             if not pixel_delta.isNull() and not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                controller.pan(pixel_delta.x(), pixel_delta.y())
+                controller.pan(*_touchpad_pan_delta(pixel_delta.x(), pixel_delta.y()))
                 return True
             angle_delta = event.angleDelta()
             if angle_delta.y() or angle_delta.x():
@@ -117,7 +132,7 @@ def run_windows_viewer(application: Any) -> int:
                     return True
                 if gesture == Qt.NativeGestureType.PanNativeGesture:
                     delta = event.delta()
-                    controller.pan(float(delta.x()), float(delta.y()))
+                    controller.pan(*_touchpad_pan_delta(delta.x(), delta.y()))
                     self.update()
                     event.accept()
                     return True
@@ -162,9 +177,9 @@ def run_windows_viewer(application: Any) -> int:
             elif key in (Qt.Key.Key_S, Qt.Key.Key_Down):
                 controller.pan(0.0, 40.0)
             elif key in (Qt.Key.Key_A, Qt.Key.Key_Left):
-                controller.pan(-40.0, 0.0)
-            elif key in (Qt.Key.Key_D, Qt.Key.Key_Right):
                 controller.pan(40.0, 0.0)
+            elif key in (Qt.Key.Key_D, Qt.Key.Key_Right):
+                controller.pan(-40.0, 0.0)
             elif key == Qt.Key.Key_R:
                 controller.reset()
             else:
