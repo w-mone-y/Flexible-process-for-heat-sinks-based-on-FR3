@@ -15,6 +15,9 @@ dist/
 .vscode/
 *.swp
 *~
+.env
+.env.*
+!.env.example
 
 # Runtime outputs are reproducible and must not bloat the repository.
 artifacts/

@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 from typing import Sequence
 
+from brazing_sim.paths import PRODUCTION_SCENES_DIR, PROJECT_ROOT
 from brazing_sim.ui import run_ui_client
 
 from .application import V2BrazingApplication
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_V2_XML = PROJECT_ROOT / "scenes" / "production" / "brazing_line_v2.xml"
+DEFAULT_V2_XML = PRODUCTION_SCENES_DIR / "brazing_line_v2.xml"
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -86,6 +85,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if child_result is not None:
             return child_result
     return run_headless(args) if args.headless else run_viewer(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 __all__ = ["DEFAULT_V2_XML", "main", "parse_args", "run_headless", "run_viewer"]

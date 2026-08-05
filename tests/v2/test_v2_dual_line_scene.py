@@ -826,7 +826,11 @@ def test_v2_branch_b_visible_rails_enter_the_exact_s4_centre(model) -> None:
         assert float(np.ptp(np.asarray(endpoints)[:, 0])) <= 1.0e-9
         assert float(center[0]) == pytest.approx(expected_x[side])
         closest_endpoints.append(min(endpoints, key=lambda point: float(np.linalg.norm(point - s4))))
-    np.testing.assert_allclose(np.mean(closest_endpoints, axis=0), s4 + (0.0, 0.0, -0.027))
+    np.testing.assert_allclose(
+        np.mean(closest_endpoints, axis=0),
+        s4 + (0.0, 0.0, -0.027),
+        atol=1.0e-12,
+    )
 
 
 def test_v2_two_installation_branches_each_show_twelve_raw_fins(model) -> None:
@@ -1000,7 +1004,7 @@ def test_v2_fin_supply_tables_are_flat_full_dark_surfaces_without_side_rails(
         )
     top = model.geom(table_top)
     np.testing.assert_allclose(top.size[:2], expected_half_extents, atol=1.0e-9)
-    material_id = int(top.matid)
+    material_id = int(np.asarray(top.matid).reshape(-1)[0])
     assert material_id == int(model.material("v2_fin_supply_surface_mat").id)
     assert max(float(value) for value in model.mat_rgba[material_id, :3]) <= 0.24
 

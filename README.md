@@ -46,8 +46,9 @@
 | 🧩 **准备修改场景或代码** | [文档与源码导航](#documentation) · [项目目录说明](docs/architecture/项目目录说明.md) |
 | ✅ **验证修改没有破坏流程** | [测试与质量门槛](#quality) |
 
-> **只想最快看到效果？** 安装依赖后运行 `mjpython brazing_line_v2.py`，再从 Qt
-> 控制台加入 A/B/C 普通订单即可。
+> **只想最快看到效果？** macOS/Linux 运行 `mjpython brazing_line_v2.py`；Windows
+> 运行 `powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1`，再从 Qt 控制台加入
+> A/B/C 普通订单即可。
 
 ## 👀 30 秒看懂这个项目
 
@@ -307,7 +308,7 @@ python scripts/capture_readme_gifs.py
 
 | 入口 | 适合场景 | 一条命令 |
 |---|---|---|
-| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | `mjpython brazing_line_v2.py` |
+| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | macOS/Linux: `mjpython brazing_line_v2.py`；Windows: `powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1` |
 | **V1 稳定线** | 完整故障注入、自动恢复、单段演示和旧入口兼容 | `mjpython brazing_line.py` |
 | **精细视觉版** | 截图、录屏和展示 | `mjpython brazing_line_cinematic.py --order A` |
 | **YAML 柔性订单** | 配置驱动、自定义计划、dry-run 和调度实验 | `python run_flexible_order.py --order config/orders/order_001.yaml --dry-run` |
@@ -319,6 +320,7 @@ python scripts/capture_readme_gifs.py
 - NumPy、PyYAML
 - PySide6（可选，用于 Qt 规划控制台）
 - macOS 图形模式建议使用 `mjpython`
+- Windows V2 使用 `.env` 中配置的 Conda 环境，启动脚本不会调用全局 Python，也不会安装依赖
 
 ### 2. 三步启动
 
@@ -333,6 +335,38 @@ make install-dev
 # 3. 启动推荐的 V2 Viewer + Qt 控制台
 mjpython brazing_line_v2.py
 ```
+
+### Windows V2 启动
+
+Windows V2 通过仓库根目录 `.env` 中的 `CONDA_ENV_PATH` 运行。推荐创建名为 `py312` 的
+Conda 环境；环境目录由用户自己填写，脚本不猜测 Conda 安装位置，也不执行安装。请使用
+PowerShell 7（`pwsh`）执行脚本。
+
+```powershell
+# 创建推荐环境并在环境内安装项目依赖
+conda create -n py312 python=3.12
+conda run -n py312 python -m pip install -e ".[ui,dev]"
+
+# 复制配置模板，然后把 CONDA_ENV_PATH 改为 `conda env list` 显示的 py312 路径
+Copy-Item .env.example .env
+notepad .env
+
+# 在仓库根目录执行；首次使用可只对当前进程放宽脚本策略
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1
+
+# 带订单运行 Viewer + Qt 控制台
+powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --orders A,B,C --fast
+
+# 只运行 V2 headless，不创建 Viewer 或 Qt 窗口
+powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --headless --orders A,B,C --fast
+```
+
+Windows Viewer 的交互约定：左键拖动旋转，右键或中键拖动平移，鼠标滚轮或捏合缩放，
+触摸板两指滑动前后左右平移；方向键/WASD 也可平移，`R` 恢复初始视角。滚轮/捏合向上
+为放大，向下为缩小。
+
+若提示缺少 `mujoco`、`PySide6` 或其他模块，请确认模块安装在 `.env` 配置的环境中，并用
+`conda run -n py312 python -c "import mujoco, PySide6"` 检查；不要改用全局 Python。
 
 ### 3. 启动稳定 V1
 

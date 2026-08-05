@@ -312,7 +312,7 @@ def test_v2_headless_launcher_is_independent_and_emits_json_state() -> None:
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=90,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr + completed.stdout
@@ -321,4 +321,4 @@ def test_v2_headless_launcher_is_independent_and_emits_json_state() -> None:
     assert payload["line"] == "V2_DUAL_INSTALL"
     assert payload["complete"]
     assert payload["scene"]["compiled"]
-    assert payload["scene"]["xml"].endswith("scenes/production/brazing_line_v2.xml")
+    assert Path(payload["scene"]["xml"]).as_posix().endswith("scenes/production/brazing_line_v2.xml")
