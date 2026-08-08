@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from brazing_sim.dual_line import DualLineRuntime, FurnacePhase, UnitStage
+from brazing_sim.dual_line.unified_runtime import UnifiedV2Runtime
 from brazing_sim.flexible import build_custom_plan
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -120,6 +121,20 @@ def test_v2_runtime_schedules_three_mixed_orders_across_both_install_branches() 
             if event["type"] == "UNIT_STAGE" and event["unit_id"] == unit["unit_id"]
         ]
         assert stages.index("PRODUCT_REMOVED") < stages.index("VIRTUAL_RETURN")
+
+
+def test_unified_v2_queues_fourth_order_when_three_furnace_layers_are_reserved() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    for preset in ("A", "B", "C"):
+        runtime.submit_order(preset, order_id=f"LAYER_FULL_{preset}")
+
+    runtime.submit_order("A", order_id="LAYER_WAITING_D")
+
+    entry = runtime.manufacturing_runtime.orders["LAYER_WAITING_D"]
+    assert entry.status.value == "QUEUED"
+    assert entry.admitted_unit_ids == set()
+    assert entry.tray_assignments == {}
+    assert runtime.manufacturing_runtime._active_wip() == 3
 
 
 def test_v2_runtime_keeps_processing_the_next_batch_while_the_furnace_runs() -> None:

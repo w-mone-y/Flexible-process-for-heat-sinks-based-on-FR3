@@ -430,12 +430,16 @@ class ManufacturingRuntime:
             if available <= 0 or not free_trays:
                 break
             unit_id = f"{entry.order_id}_UNIT_{assignment.unit_index + 1:02d}"
-            physical_tray = free_trays.pop(0)
             preferred = int(assignment.layer_index)
-            if preferred not in used_rack_layers:
-                selected_layer = preferred
-            else:
-                selected_layer = next(layer for layer in range(3) if layer not in used_rack_layers)
+            available_layers = [layer for layer in range(3) if layer not in used_rack_layers]
+            if not available_layers:
+                # WIP trays can wait upstream while the three physical
+                # furnace layers are occupied.  Do not consume a tray or
+                # partially admit the unit: the next unload/reset tick will
+                # call _admit_orders() again and release it atomically.
+                break
+            physical_tray = free_trays.pop(0)
+            selected_layer = preferred if preferred not in used_rack_layers else available_layers[0]
             used_rack_layers.add(selected_layer)
             entry.tray_assignments[assignment.tray_id] = physical_tray
             entry.rack_assignments[physical_tray] = selected_layer

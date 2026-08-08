@@ -235,3 +235,38 @@ def test_multi_unit_order_is_admitted_one_tray_at_a_time() -> None:
     _run(runtime)
     assert waiting.status.value == "COMPLETED"
     assert len(waiting.tray_assignments) == 2
+
+
+def test_fourth_unit_waits_for_a_furnace_layer_then_is_admitted() -> None:
+    runtime = ManufacturingRuntime(
+        scheduler_mode="dynamic",
+        flexible_cell=True,
+        max_wip_units=6,
+    )
+    entries = []
+    for index, preset in enumerate(("A", "B", "C", "A"), start=1):
+        entry = runtime.submit_plan(
+            build_inline_plan(
+                preset=preset,
+                order_id=f"LAYER_QUEUE_{index}_{preset}",
+                quantity=1,
+                priority=10,
+            ),
+            now=0.0,
+        )
+        entries.append(entry)
+
+    assert entries[-1].status.value == "QUEUED"
+    assert entries[-1].admitted_unit_ids == set()
+
+    released = False
+    for index in range(12000):
+        runtime.tick((index + 1) * 0.25)
+        if entries[-1].status.value != "QUEUED":
+            released = True
+            break
+
+    assert released
+    assert entries[-1].status.value in {"RELEASED", "RUNNING", "COMPLETED"}
+    _run(runtime)
+    assert all(entry.status.value == "COMPLETED" for entry in entries)
