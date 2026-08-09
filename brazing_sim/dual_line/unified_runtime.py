@@ -9,6 +9,7 @@ from ..execution import PhysicalCompletionEvidence, SkillExecutionResult, SkillR
 from ..flexible import ProcessPlan, build_inline_plan
 from ..manufacturing_runtime import ManufacturingRuntime
 from ..planning import ManufacturingTask, TaskType, V2_DUAL_INSTALL_PROFILE
+from ..scheduling import ResourceStatus
 from .furnace import FurnacePhase
 from .runtime import DualLineRuntime, RuntimeExecutionGate, UnitStage
 from .tray_flow import TrayOwner
@@ -20,8 +21,10 @@ _OPERATION_PERMITS: dict[TaskType, tuple[str, ...]] = {
     TaskType.PICK_BASE_PLATE: ("BASE_LOADING",),
     TaskType.DISPENSE_BRAZING: ("DISPENSING",),
     TaskType.INSPECT_BRAZING: ("MATERIAL_INSPECTION",),
+    TaskType.REVIEW_BRAZING_CLOSEUP: ("MATERIAL_INSPECTION",),
     TaskType.PICK_FIN: ("INSTALL_FIN",),
     TaskType.INSPECT_FINS: ("PRE_BRAZE_INSPECTION",),
+    TaskType.REVIEW_FINS_CLOSEUP: ("PRE_BRAZE_INSPECTION",),
     TaskType.MOVE_ELEVATOR: ("FURNACE_FRONT_OPEN",),
     TaskType.LOAD_RACK_LAYER: ("FURNACE_LOAD_TRAY",),
     TaskType.RUN_FURNACE: ("FURNACE_FRONT_CLOSE",),
@@ -158,7 +161,13 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         # MERGING is a first-class ownership-controlled transport, not Arm3's
         # inspection task. Tying it to the camera resource creates a circular
         # wait when another pallet already occupies the single merge corridor.
-        permitted = kind == "MERGING" or bool(holders)
+        permitted = kind in {
+            "MERGING",
+            "OUTPUT_GATE_OPEN",
+            "OUTPUT_DELIVERY",
+            "OUTPUT_GATE_CLOSE",
+            "VIRTUAL_RETURN",
+        } or bool(holders)
         if not permitted and kind in {"MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"}:
             permitted = any(
                 key_kind in {"MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"} and values
@@ -274,6 +283,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 kind="MATERIAL_INSPECTION",
             )
             return done, ("S2B图像分析完成",)
+        if kind is TaskType.REVIEW_BRAZING_CLOSEUP:
+            done = self.runtime.camera_coordination.route_review_completed(
+                task.unit_id, "MATERIAL_INSPECTION"
+            )
+            return done, ("S3B钎料近景复核完成",)
         if kind is TaskType.PICK_FIN:
             done = self._milestone(resource_id, task.unit_id, "INSTALL_FIN", "grasp") or self._event(
                 "FIN_INSTALLED",
@@ -298,6 +312,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 kind="PRE_BRAZE_INSPECTION",
             )
             return done, ("S4焊前图像分析完成",)
+        if kind is TaskType.REVIEW_FINS_CLOSEUP:
+            done = self.runtime.camera_coordination.route_review_completed(
+                task.unit_id, "PRE_BRAZE_INSPECTION"
+            )
+            return done, ("S3B翅片近景复核完成",)
         if kind is TaskType.MOVE_ELEVATOR:
             done = bool(self.runtime.furnace.state.front_door_open) or self._event(
                 "FURNACE_FRONT_DOOR_OPENED",
@@ -326,7 +345,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         if kind is TaskType.POST_BRAZE_INSPECTION:
             return event("POST_BRAZE_INSPECTION"), ("焊后固定相机分析完成",)
         if kind in {TaskType.ROUTE_PASS, TaskType.ROUTE_REWORK, TaskType.ROUTE_SCRAP}:
-            done = self._event("UNIT_COMPLETED", task.unit_id, since=since)
+            done = self._event("UNIT_COMPLETED", task.unit_id, since=0.0)
             return done, ("成品进入出口箱", "空托盘所有权已回收")
         if kind is TaskType.CONFIGURE_COMB:
             return _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.FIN_INSTALLATION], (
@@ -381,6 +400,30 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 unit is not None and _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.PRE_BRAZE_INSPECTION]
             )
             return allowed, ("" if allowed else "等待托盘完成合流并到达S4")
+        if task.task_type is TaskType.REVIEW_BRAZING_CLOSEUP:
+            unit = self.runtime.units.get(task.unit_id)
+            allowed = bool(
+                unit is not None
+                and (
+                    unit.stage is UnitStage.BRAZING_REVIEW
+                    or self.runtime.camera_coordination.route_review_completed(
+                        task.unit_id, "MATERIAL_INSPECTION"
+                    )
+                )
+            )
+            return allowed, ("" if allowed else "等待托盘到达S3B并完成基板近景复核")
+        if task.task_type is TaskType.REVIEW_FINS_CLOSEUP:
+            unit = self.runtime.units.get(task.unit_id)
+            allowed = bool(
+                unit is not None
+                and (
+                    unit.stage is UnitStage.FINS_REVIEW
+                    or self.runtime.camera_coordination.route_review_completed(
+                        task.unit_id, "PRE_BRAZE_INSPECTION"
+                    )
+                )
+            )
+            return allowed, ("" if allowed else "等待翅片安装完成并到达S3B")
         if task.task_type is not TaskType.RUN_FURNACE:
             return True, ""
         batch_ready_stages = {
@@ -413,6 +456,7 @@ class UnifiedV2Runtime:
             skill_registry=self.bridge.build_registry(),
             context=self.bridge,
             max_wip_units=6,
+            camera_coordination=True,
             enable_motion_planning=True,
             execution_profile=V2_DUAL_INSTALL_PROFILE,
             dispatch_guard=self.bridge.task_dispatch_allowed,
@@ -424,6 +468,18 @@ class UnifiedV2Runtime:
         # by the legacy graph builder; physically it resolves to Arm3's fixed
         # narrow-gripper half of the hybrid head.
         self.manufacturing_runtime.resources.get("ARM3").current_tool = "parallel_gripper"
+
+    def _sync_physical_resources(self) -> None:
+        isolated = {str(resource).upper() for resource in self.physical_runtime.faults.isolated_resources}
+        for resource_id, state in self.manufacturing_runtime.resources.states.items():
+            if resource_id in isolated:
+                if state.current_task_id is None:
+                    state.status = ResourceStatus.OFFLINE
+                    state.fault_code = "ARM_UNAVAILABLE"
+                continue
+            if state.status is ResourceStatus.OFFLINE:
+                state.status = ResourceStatus.IDLE
+                state.fault_code = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.physical_runtime, name)
@@ -441,6 +497,7 @@ class UnifiedV2Runtime:
         priority: int = 10,
         due_at: float | None = None,
         urgent: bool = False,
+        route_strategy: str = "STANDARD",
     ):
         identifier = str(order_id or "").strip() or self.next_order_id
         plan = build_inline_plan(
@@ -448,6 +505,7 @@ class UnifiedV2Runtime:
             order_id=identifier,
             quantity=int(quantity),
             priority=int(priority),
+            route_strategy=str(route_strategy).strip().upper() or "STANDARD",
         )
         return self.submit_plan(plan, due_at=due_at, urgent=urgent)
 
@@ -463,6 +521,7 @@ class UnifiedV2Runtime:
             urgent=urgent,
             dispatch=False,
         )
+        self._sync_physical_resources()
         entry = self.manufacturing_runtime.submit_plan(plan, urgent=urgent, now=self.sim_time)
         self._apply_v2_station_zones(entry.graph_task_ids)
         return order
@@ -475,6 +534,7 @@ class UnifiedV2Runtime:
             TaskType.PLACE_BASE_PLATE: ("ZONE_S1_ARM1",),
             TaskType.DISPENSE_BRAZING: ("ZONE_S2A_ARM2",),
             TaskType.INSPECT_BRAZING: ("ZONE_S2B_ARM3",),
+            TaskType.REVIEW_BRAZING_CLOSEUP: ("ZONE_S3B_ARM3",),
             TaskType.CONFIGURE_COMB: ("ZONE_S3_SHARED",),
             # V2 has two physically separate fin magazines and installation
             # tables. Their collision safety is enforced by the selected
@@ -482,6 +542,7 @@ class UnifiedV2Runtime:
             TaskType.PICK_FIN: (),
             TaskType.INSTALL_FIN: (),
             TaskType.INSPECT_FINS: ("ZONE_S4_SHARED",),
+            TaskType.REVIEW_FINS_CLOSEUP: ("ZONE_S3B_ARM3",),
             TaskType.APPLY_PRESS: ("ZONE_S4_SHARED",),
             TaskType.LOCK_FIXTURE: ("ZONE_S4_SHARED",),
         }
@@ -490,10 +551,12 @@ class UnifiedV2Runtime:
             TaskType.PLACE_BASE_PLATE: "S1_BASE_LOADING",
             TaskType.DISPENSE_BRAZING: "S2A_DISPENSING",
             TaskType.INSPECT_BRAZING: "S2B_MATERIAL_INSPECTION",
+            TaskType.REVIEW_BRAZING_CLOSEUP: "S3B_ARM3_INSTALL",
             TaskType.CONFIGURE_COMB: "S3_DUAL_INSTALL",
             TaskType.PICK_FIN: "S3_DUAL_INSTALL",
             TaskType.INSTALL_FIN: "S3_DUAL_INSTALL",
             TaskType.INSPECT_FINS: "S4_PRE_BRAZE_INSPECTION",
+            TaskType.REVIEW_FINS_CLOSEUP: "S3B_ARM3_INSTALL",
             TaskType.APPLY_PRESS: "S4_PRE_BRAZE_INSPECTION",
             TaskType.LOCK_FIXTURE: "S4_PRE_BRAZE_INSPECTION",
         }
@@ -538,6 +601,7 @@ class UnifiedV2Runtime:
                     ]
 
     def tick(self, dt: float) -> dict[str, Any]:
+        self._sync_physical_resources()
         now = float(self.physical_runtime.sim_time)
         self.manufacturing_runtime.tick(now)
         self.physical_runtime.tick(dt)

@@ -13,6 +13,7 @@ import numpy as np
 from ..motion import HOME_QPOS
 from ..profiles import quintic_time_scaling
 from .process_geometry import V2ProcessGeometry
+from .dispatch import InstallBranch
 from .robot_projector import V2RobotMotionProjector
 from .fault_visuals import (
     BRAZING_DEVIATION_REAPPLY_START,
@@ -20,6 +21,7 @@ from .fault_visuals import (
     V2FaultVisualizer,
 )
 from .tray_flow import TrayOwner
+from .runtime import UnitStage
 
 if TYPE_CHECKING:
     from .runtime import DualLineRuntime
@@ -457,6 +459,10 @@ class DualLineSceneAdapter:
                 )
         comb_visible = stage in {
             "FIN_INSTALLATION",
+            "WAITING_BRAZING_REVIEW",
+            "BRAZING_REVIEW",
+            "WAITING_FINS_REVIEW",
+            "FINS_REVIEW",
             "WAITING_MERGE",
             "MERGING",
             "WAITING_S4",
@@ -1320,7 +1326,23 @@ class DualLineSceneAdapter:
             # reaching the shared S4 entry.  Let an already admitted S2B
             # pallet finish inspection and leave for its reserved free branch
             # before advancing the outbound carrier.
-            if any(value is TrayOwner.S2B for value in self._physical_owner.values()):
+            s2b_blockers = [
+                tray_id for tray_id, value in self._physical_owner.items() if value is TrayOwner.S2B
+            ]
+            runtime = self._bound_runtime
+            camera_review_waiting = bool(runtime) and all(
+                (
+                    unit := next(
+                        (item for item in runtime.units.values() if item.tray_id == tray_id),
+                        None,
+                    )
+                )
+                is not None
+                and unit.stage is UnitStage.WAITING_BRAZING_REVIEW
+                and unit.branch is InstallBranch.ARM3_B
+                for tray_id in s2b_blockers
+            )
+            if s2b_blockers and not camera_review_waiting:
                 return False
             if any(motion.target_owner is TrayOwner.S2B for motion in self._motions.values()):
                 return False

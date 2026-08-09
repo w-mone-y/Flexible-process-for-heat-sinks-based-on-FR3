@@ -64,8 +64,6 @@ class V2ControlSurface:
             # so a preferred layer cannot be reserved.
             ignored.append("首选料架层（V2 按装炉顺序分配层位）")
         strategy = str(command.get("route_strategy") or "").strip().upper()
-        if strategy and strategy != "STANDARD":
-            raise ValueError(f"V2 当前不支持工艺路线 {strategy}，订单未加入")
         requested_quantity = int(command.get("quantity", 1) if quantity is None else quantity)
         custom_product = command.get("custom_product")
         if custom_product is not None:
@@ -96,6 +94,7 @@ class V2ControlSurface:
                 priority=int(command.get("priority", 10)),
                 due_at=self._due_at(command),
                 urgent=bool(command.get("urgent", False)),
+                route_strategy=strategy or "STANDARD",
             )
         if ignored:
             self.ignored_order_fields = ignored
@@ -269,7 +268,8 @@ class V2BrazingApplication:
         if not self.args.no_ui:
             command = [
                 sys.executable,
-                str(Path(__file__).resolve().parents[2] / "brazing_line_v2.py"),
+                "-m",
+                "brazing_sim.dual_line.cli",
                 "--ui-client",
                 "--host",
                 str(self.args.host),
@@ -531,6 +531,13 @@ class V2BrazingApplication:
         return 0 if self.runtime.complete and self.scene.transport_settled else 2
 
     def run_viewer(self) -> int:
+        if sys.platform == "win32":
+            from .windows_viewer import run_windows_viewer
+
+            result = run_windows_viewer(self)
+            self.publish(viewer_running=False)
+            return result
+
         import mujoco.viewer
 
         model, data = self.scene.model, self.scene.data

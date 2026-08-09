@@ -233,6 +233,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             QDoubleSpinBox,
             QFormLayout,
             QFileDialog,
+            QFrame,
             QGraphicsScene,
             QGraphicsRectItem,
             QGraphicsView,
@@ -242,6 +243,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             QLabel,
             QLineEdit,
             QPushButton,
+            QScrollArea,
+            QSizePolicy,
             QSpinBox,
             QTabWidget,
             QTableWidget,
@@ -299,7 +302,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.status.setAlignment(Qt.AlignCenter)
             self.image = QLabel()
             self.image.setAlignment(Qt.AlignCenter)
-            self.image.setMinimumSize(640, 480)
+            self.image.setMinimumSize(0, 0)
+            self.image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.image.setStyleSheet("background:#05070a;border:2px solid #3b4654")
             layout.addWidget(self.status)
             layout.addWidget(self.image, 1)
@@ -387,7 +391,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.canvas = QGraphicsScene(self)
             self.setScene(self.canvas)
             self.setRenderHint(QPainter.Antialiasing)
-            self.setMinimumHeight(430)
+            self.setMinimumHeight(260)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self.signature: tuple[Any, ...] | None = None
             self.nodes: dict[str, TaskNodeItem] = {}
 
@@ -490,7 +495,8 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
         def __init__(self) -> None:
             super().__init__()
             self.plan: dict[str, Any] = {}
-            self.setMinimumHeight(480)
+            self.setMinimumHeight(300)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         def set_plan(self, plan: dict[str, Any]) -> None:
             self.plan = dict(plan)
@@ -548,15 +554,38 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 painter.drawText(int(x), int(top + 24 * index), line)
 
     class ControlPanel(QWidget):
+        @staticmethod
+        def _scroll_page(page: Any) -> Any:
+            page.setMinimumSize(0, 0)
+            page.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            scroll = QScrollArea()
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidgetResizable(True)
+            scroll.setMinimumSize(0, 0)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setWidget(page)
+            return scroll
+
+        @staticmethod
+        def _configure_table(table: Any) -> None:
+            table.setMinimumSize(0, 0)
+            table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            table.horizontalHeader().setStretchLastSection(True)
+
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle(selected_profile.window_title)
+            self.setMinimumSize(720, 480)
             shell = QVBoxLayout(self)
             self.tabs = QTabWidget()
+            self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             shell.addWidget(self.tabs)
             overview = QWidget()
             root = QVBoxLayout(overview)
-            self.tabs.addTab(overview, "运行总览")
+            self.tabs.addTab(self._scroll_page(overview), "运行总览")
             self.current_plan: dict[str, Any] = {}
             self.current_recovery_id = ""
             self.latest_state: dict[str, Any] = {}
@@ -735,7 +764,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.flexibility_detail.setHorizontalHeaderLabels(["维度", "对象", "候选/分支", "数值", "说明"])
             self.flexibility_detail.horizontalHeader().setStretchLastSection(True)
             root.addWidget(self.flexibility_detail, 1)
-            self.tabs.addTab(page, "柔性总览")
+            self.tabs.addTab(self._scroll_page(page), "柔性总览")
 
         def refresh_flexibility(self) -> None:
             try:
@@ -958,7 +987,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 ["订单", "产品", "数量", "优先级", "状态", "进度", "紧急"]
             )
             order_root.addWidget(self.order_table, 1)
-            self.tabs.addTab(order_page, "订单规划")
+            self.tabs.addTab(self._scroll_page(order_page), "订单规划")
 
             task_page = QWidget()
             self.task_page = task_page
@@ -995,7 +1024,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 ["任务", "候选资源", "总成本", "是否选中", "阻塞原因"]
             )
             task_root.addWidget(self.scheduler_decisions)
-            self.tabs.addTab(task_page, "任务图 / 调度")
+            self.tabs.addTab(self._scroll_page(task_page), "任务图 / 调度")
 
             pipeline_page = QWidget()
             pipeline_root = QVBoxLayout(pipeline_page)
@@ -1042,7 +1071,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 ["机械臂", "请求", "规划器", "起始", "结束", "等待", "预约"]
             )
             pipeline_root.addWidget(self.motion_table)
-            self.tabs.addTab(pipeline_page, "异步流水工位")
+            self.tabs.addTab(self._scroll_page(pipeline_page), "异步流水工位")
 
             gantt_page = QWidget()
             gantt_root = QVBoxLayout(gantt_page)
@@ -1067,7 +1096,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 ]
             )
             gantt_root.addWidget(self.gantt_table, 1)
-            self.tabs.addTab(gantt_page, "实时甘特图")
+            self.tabs.addTab(self._scroll_page(gantt_page), "实时甘特图")
 
             drawing_page = QWidget()
             drawing_root = QVBoxLayout(drawing_page)
@@ -1083,7 +1112,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             drawing_actions.addWidget(png)
             drawing_actions.addWidget(svg)
             drawing_root.addLayout(drawing_actions)
-            self.tabs.addTab(drawing_page, "产品工程图规划")
+            self.tabs.addTab(self._scroll_page(drawing_page), "产品工程图规划")
 
             resource_page = QWidget()
             resource_root = QVBoxLayout(resource_page)
@@ -1095,7 +1124,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.zone_status = QLabel("区域锁：-")
             self.zone_status.setWordWrap(True)
             resource_root.addWidget(self.zone_status)
-            self.tabs.addTab(resource_page, "资源与区域")
+            self.tabs.addTab(self._scroll_page(resource_page), "资源与区域")
 
             recovery_page = QWidget()
             recovery_root = QVBoxLayout(recovery_page)
@@ -1209,7 +1238,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 replan.setToolTip("V2 调度器每 tick 自动重算，无需手动重规划")
             recovery_actions.addWidget(replan)
             recovery_root.addLayout(recovery_actions)
-            self.tabs.addTab(recovery_page, "故障与恢复规划")
+            self.tabs.addTab(self._scroll_page(recovery_page), "故障与恢复规划")
             self._fault_type_changed()
 
             logistics_page = QWidget()
@@ -1228,7 +1257,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 label.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 logistics_root.addWidget(label)
             logistics_root.addStretch(1)
-            self.tabs.addTab(logistics_page, "批次与物流")
+            self.tabs.addTab(self._scroll_page(logistics_page), "批次与物流")
 
             metrics_page = QWidget()
             metrics_root = QVBoxLayout(metrics_page)
@@ -1245,7 +1274,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 )
             )
             metrics_root.addWidget(self.metrics_table, 1)
-            self.tabs.addTab(metrics_page, "指标与实验")
+            self.tabs.addTab(self._scroll_page(metrics_page), "指标与实验")
 
         def _order_payload(self, urgent: bool = False) -> dict[str, Any]:
             layer_index = self.layer_input.currentIndex() - 1
@@ -1524,6 +1553,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             self.task_graph.set_tasks(filtered)
 
         def _fill_table(self, table: Any, rows: list[list[Any]]) -> None:
+            self._configure_table(table)
             signature = tuple(tuple(str(value) for value in row) for row in rows)
             key = id(table)
             if self._table_signatures.get(key) == signature:
@@ -1738,7 +1768,12 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                     f"最大并行 {scheduler.get('max_assignments_per_tick', '-') }"
                 )
                 tasks = state.get("tasks", [])
-                if isinstance(tasks, list) and self.tabs.currentWidget() is self.task_page:
+                current_tab = self.tabs.currentWidget()
+                if (
+                    isinstance(tasks, list)
+                    and isinstance(current_tab, QScrollArea)
+                    and current_tab.widget() is self.task_page
+                ):
                     self._refresh_task_graph()
                 selected_ids = {
                     str(item.get("task_id"))
@@ -2119,9 +2154,19 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     panel = ControlPanel()
-    panel.resize(1300, 850)
+    panel.setMinimumSize(720, 480)
+    screen = app.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry()
+        panel.resize(
+            min(1300, max(760, int(available.width() * 0.86))),
+            min(850, max(560, int(available.height() * 0.80))),
+        )
+    else:
+        panel.resize(1300, 850)
     panel.show()
     camera = CameraWindow()
+    camera.setMinimumSize(320, 240)
     camera.resize(760, 620)
     camera.show()
     # Keep Python references alive for the lifetime of the event loop.

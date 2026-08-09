@@ -59,10 +59,12 @@ class TaskType(StrEnum):
     VERIFY_COMB = "VERIFY_COMB"
     DISPENSE_BRAZING = "DISPENSE_BRAZING"
     INSPECT_BRAZING = "INSPECT_BRAZING"
+    REVIEW_BRAZING_CLOSEUP = "REVIEW_BRAZING_CLOSEUP"
     REWORK_BRAZING = "REWORK_BRAZING"
     PICK_FIN = "PICK_FIN"
     INSTALL_FIN = "INSTALL_FIN"
     INSPECT_FINS = "INSPECT_FINS"
+    REVIEW_FINS_CLOSEUP = "REVIEW_FINS_CLOSEUP"
     REINSTALL_FIN = "REINSTALL_FIN"
     FETCH_PRESS_MODULE = "FETCH_PRESS_MODULE"
     INSTALL_PRESS_MODULE = "INSTALL_PRESS_MODULE"
@@ -113,10 +115,12 @@ TASK_TYPE_LABELS_ZH: dict[TaskType, str] = {
     TaskType.VERIFY_COMB: "验证梳齿模块锁定",
     TaskType.DISPENSE_BRAZING: "涂覆钎料",
     TaskType.INSPECT_BRAZING: "检测钎料涂覆",
+    TaskType.REVIEW_BRAZING_CLOSEUP: "S3B钎料近景复核",
     TaskType.REWORK_BRAZING: "局部补涂钎料",
     TaskType.PICK_FIN: "夹取翅片",
     TaskType.INSTALL_FIN: "安装翅片",
     TaskType.INSPECT_FINS: "检测翅片安装",
+    TaskType.REVIEW_FINS_CLOSEUP: "S3B翅片近景复核",
     TaskType.REINSTALL_FIN: "重新安装翅片",
     TaskType.FETCH_PRESS_MODULE: "龙门取出短压梁",
     TaskType.INSTALL_PRESS_MODULE: "安装两根短压梁",
@@ -217,6 +221,7 @@ def task_detail_label_zh(task: Mapping[str, Any]) -> str:
     elif task_type in {
         TaskType.DISPENSE_BRAZING,
         TaskType.INSPECT_BRAZING,
+        TaskType.REVIEW_BRAZING_CLOSEUP,
         TaskType.REWORK_BRAZING,
     }:
         path_ids = payload.get("path_ids", ())
@@ -262,6 +267,8 @@ def task_detail_label_zh(task: Mapping[str, Any]) -> str:
         detail = "高可靠路线 · 基板位姿二次确认"
     elif task_type is TaskType.SECOND_POST_BRAZE_VIEW:
         detail = "高可靠路线 · 侧视检测"
+    elif task_type is TaskType.REVIEW_FINS_CLOSEUP:
+        detail = "高可靠路线 · S3B翅片近景复核"
     elif task_type is TaskType.APPLY_PRESS:
         force = payload.get("target_force_n")
         detail = f"目标夹紧力{float(force):g}牛" if isinstance(force, (int, float)) else "订单目标夹紧力"
