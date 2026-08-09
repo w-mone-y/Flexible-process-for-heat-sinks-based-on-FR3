@@ -194,6 +194,7 @@ class ManufacturingRuntime:
         context: Any = None,
         max_wip_units: int = 3,
         flexible_cell: bool = False,
+        camera_coordination: bool = False,
         enable_motion_planning: bool | None = None,
         execution_profile: LineExecutionProfile | None = None,
         track_changeover: bool = False,
@@ -218,6 +219,7 @@ class ManufacturingRuntime:
         self.scenario: FaultScenario | None = None
         self.max_wip_units = int(max_wip_units)
         self.flexible_cell = bool(flexible_cell)
+        self.camera_coordination = bool(camera_coordination)
         self.motion_planning_enabled = (
             self.flexible_cell if enable_motion_planning is None else bool(enable_motion_planning)
         )
@@ -317,6 +319,7 @@ class ManufacturingRuntime:
             raise ValueError(f"duplicate order id: {order_id}")
         builder = ProcessPlanTaskGraphBuilder(
             flexible_cell=self.flexible_cell,
+            camera_coordination=self.camera_coordination,
             catalog=default_capability_catalog(),
             routing=default_routing(),
             resources=self.resources.states.values(),

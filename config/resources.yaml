@@ -78,7 +78,9 @@ resources:
       narrow_gripper: GRIPPER
     capabilities:
       - INSPECT_BRAZING
+      - REVIEW_BRAZING_CLOSEUP
       - INSPECT_FINS
+      - REVIEW_FINS_CLOSEUP
       - POST_BRAZE_INSPECTION
       - VERIFY_BASE_ALIGNMENT
       - SECOND_POST_BRAZE_VIEW

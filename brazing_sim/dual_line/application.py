@@ -64,8 +64,6 @@ class V2ControlSurface:
             # so a preferred layer cannot be reserved.
             ignored.append("首选料架层（V2 按装炉顺序分配层位）")
         strategy = str(command.get("route_strategy") or "").strip().upper()
-        if strategy and strategy != "STANDARD":
-            raise ValueError(f"V2 当前不支持工艺路线 {strategy}，订单未加入")
         requested_quantity = int(command.get("quantity", 1) if quantity is None else quantity)
         custom_product = command.get("custom_product")
         if custom_product is not None:
@@ -96,6 +94,7 @@ class V2ControlSurface:
                 priority=int(command.get("priority", 10)),
                 due_at=self._due_at(command),
                 urgent=bool(command.get("urgent", False)),
+                route_strategy=strategy or "STANDARD",
             )
         if ignored:
             self.ignored_order_fields = ignored

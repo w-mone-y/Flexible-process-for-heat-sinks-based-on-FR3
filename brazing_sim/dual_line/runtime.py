@@ -16,6 +16,7 @@ from ..flexible import build_inline_plan
 from ..flexible.models import ProcessPlan
 from ..recovery.fault_models import RecoveryStatus
 from .faults import V2FaultController
+from .camera_coordination import CameraCoordinationPolicy, CameraReviewReason
 from .dispatch import (
     DualInstallDispatcher,
     InstallBranch,
@@ -35,8 +36,12 @@ class UnitStage(str, Enum):
     DISPENSING = "DISPENSING"
     WAITING_S2B = "WAITING_S2B"
     MATERIAL_INSPECTION = "MATERIAL_INSPECTION"
+    WAITING_BRAZING_REVIEW = "WAITING_BRAZING_REVIEW"
+    BRAZING_REVIEW = "BRAZING_REVIEW"
     WAITING_INSTALL = "WAITING_INSTALL"
     FIN_INSTALLATION = "FIN_INSTALLATION"
+    WAITING_FINS_REVIEW = "WAITING_FINS_REVIEW"
+    FINS_REVIEW = "FINS_REVIEW"
     WAITING_MERGE = "WAITING_MERGE"
     MERGING = "MERGING"
     WAITING_S4 = "WAITING_S4"
@@ -266,6 +271,7 @@ class DualLineRuntime:
         # resource isolation.  Holds no MuJoCo reference, so the logical runtime
         # stays testable headless.
         self.faults = V2FaultController()
+        self.camera_coordination = CameraCoordinationPolicy()
         # unit_id -> duration multiplier for its next operation (rework surcharge)
         self._rework_effort: dict[str, _RecoveryWork] = {}
         self._execution_gate: RuntimeExecutionGate | None = None
@@ -300,6 +306,7 @@ class DualLineRuntime:
         priority: int = 10,
         due_at: float | None = None,
         urgent: bool = False,
+        route_strategy: str = "STANDARD",
     ) -> V2OrderState:
         preset = str(preset).strip().upper()
         if preset not in {"A", "B", "C", "D"}:
@@ -312,6 +319,7 @@ class DualLineRuntime:
             order_id=identifier,
             quantity=int(quantity),
             priority=int(priority),
+            route_strategy=str(route_strategy).strip().upper() or "STANDARD",
         )
         return self.submit_plan(plan, due_at=due_at, urgent=urgent)
 
@@ -331,9 +339,6 @@ class DualLineRuntime:
             raise ValueError("priority must be non-negative")
         if due_at is not None and not isfinite(float(due_at)):
             raise ValueError("due time must be finite")
-        if plan.route_strategy.value != "STANDARD":
-            raise ValueError(f"V2 当前不支持工艺路线 {plan.route_strategy.value}，订单未加入")
-
         geometry = V2ProcessGeometry.from_plan(plan)
         batch_recipe = BatchRecipe(
             name=plan.recipe.name,
@@ -399,6 +404,94 @@ class DualLineRuntime:
 
     def _event(self, event_type: str, **payload: Any) -> None:
         self.events.append({"time": round(self.sim_time, 6), "type": event_type, **payload})
+
+    @staticmethod
+    def _camera_review_reason(unit: V2UnitState) -> CameraReviewReason | None:
+        strategy = str(unit.route_strategy).upper()
+        if strategy == "HIGH_RELIABILITY":
+            return CameraReviewReason.HIGH_RELIABILITY
+        if strategy == "FIRST_ARTICLE" and unit.unit_id.endswith("_UNIT_01"):
+            return CameraReviewReason.FIRST_ARTICLE
+        return None
+
+    def _unit_requires_camera_review(self, unit: V2UnitState, inspection_kind: str) -> bool:
+        if inspection_kind not in {"MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"}:
+            return False
+        return self._camera_review_reason(unit) is not None
+
+    def camera_review_required(self, unit_id: str, inspection_kind: str) -> bool:
+        """Whether an active Arm3 operation is the S3B route review."""
+
+        unit = self.units.get(str(unit_id))
+        if unit is None or not self._unit_requires_camera_review(unit, inspection_kind):
+            return False
+        return (inspection_kind == "MATERIAL_INSPECTION" and unit.stage is UnitStage.BRAZING_REVIEW) or (
+            inspection_kind == "PRE_BRAZE_INSPECTION" and unit.stage is UnitStage.FINS_REVIEW
+        )
+
+    def _start_camera_review(self, unit: V2UnitState, inspection_kind: str) -> None:
+        reason = self._camera_review_reason(unit)
+        if reason is None:
+            return
+        request = self.camera_coordination.request(
+            unit_id=unit.unit_id,
+            inspection_kind=inspection_kind,
+            station_id="S3B_ARM3_INSTALL",
+            reason=reason,
+            now=self.sim_time,
+        )
+        if request.status == "QUEUED":
+            self.camera_coordination.mark_started(unit.unit_id, inspection_kind, self.sim_time)
+
+    def camera_coordination_snapshot(self) -> dict[str, Any]:
+        arm3_online = self._resource_online("ARM3")
+        blocked_reason = "Arm3相机离线，工件原位阻塞，等待恢复"
+        stations = [
+            {
+                "station_id": "S2B_MATERIAL_INSPECTION",
+                "primary_camera": "ARM3_CAMERA",
+                "secondary_camera": None,
+                "inspection_kinds": ["MATERIAL_INSPECTION"],
+            },
+            {
+                "station_id": "S4_PRE_BRAZE_INSPECTION",
+                "primary_camera": "ARM3_CAMERA",
+                "secondary_camera": None,
+                "inspection_kinds": ["PRE_BRAZE_INSPECTION"],
+            },
+            {
+                "station_id": "S3B_ARM3_INSTALL",
+                "primary_camera": "ARM3_CAMERA",
+                "secondary_camera": None,
+                "inspection_kinds": ["MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"],
+            },
+            {
+                "station_id": "POST_BRAZE_SCAN",
+                "primary_camera": "POST_CAMERA",
+                "secondary_camera": None,
+                "inspection_kinds": ["POST_BRAZE_INSPECTION"],
+            },
+        ]
+        for station in stations:
+            if station["primary_camera"] == "ARM3_CAMERA" and not arm3_online:
+                station["status"] = "BLOCKED"
+                station["reason_zh"] = blocked_reason
+            else:
+                station["status"] = "READY"
+                station["reason_zh"] = ""
+        active_units = [
+            unit
+            for unit in self.units.values()
+            if self._camera_review_reason(unit) is not None and unit.stage is not UnitStage.COMPLETE
+        ]
+        snapshot = self.camera_coordination.snapshot()
+        snapshot["stations"] = stations
+        snapshot["active_plan"] = {
+            "status": "RUNNING" if snapshot["pending_reviews"] or active_units else "STANDBY",
+            "unit_ids": [unit.unit_id for unit in active_units],
+            "policy": "SINGLE_ARM3_CAMERA_WITH_S3B_CLOSEUPS",
+        }
+        return snapshot
 
     def _set_stage(self, unit: V2UnitState, stage: UnitStage) -> None:
         unit.stage = stage
@@ -473,6 +566,8 @@ class DualLineRuntime:
             recovery_fault_type="" if recovery_work is None else recovery_work.fault_type,
             recovery_target_index=(None if recovery_work is None else recovery_work.target_index),
         )
+        if self.camera_review_required(unit.unit_id, kind):
+            self._start_camera_review(unit, kind)
         self._event("OPERATION_STARTED", resource=resource, unit_id=unit.unit_id, kind=kind)
         return True
 
@@ -634,6 +729,8 @@ class DualLineRuntime:
         }.get(str(preferred_resource).upper())
         if preferred_branch is not None:
             selected_branch = preferred_branch
+        if self._camera_review_reason(unit) is not None:
+            selected_branch = InstallBranch.ARM3_B
         unit.branch = selected_branch
         self.install_branch_counts[selected_branch] += 1
         selected_candidate = decision.candidates[selected_branch]
@@ -662,7 +759,7 @@ class DualLineRuntime:
                 for candidate in decision.candidates.values()
             ],
         )
-        return decision.branch
+        return selected_branch
 
     def _reroute_blocked_install(self, unit: V2UnitState) -> bool:
         """Move an S2B pallet to the other physically clear install branch.
@@ -734,8 +831,22 @@ class DualLineRuntime:
             self._set_stage(unit, UnitStage.WAITING_S2B)
         elif operation.kind == "MATERIAL_INSPECTION":
             self.faults.complete_recovery(unit.unit_id, self.sim_time)
-            self._set_stage(unit, UnitStage.WAITING_INSTALL)
-            self._assign_branch(unit)
+            if unit.stage is UnitStage.BRAZING_REVIEW:
+                self.camera_coordination.complete(
+                    unit.unit_id,
+                    operation.kind,
+                    now=self.sim_time,
+                    result="PASS",
+                )
+                self._set_stage(unit, UnitStage.WAITING_INSTALL)
+            else:
+                self._assign_branch(unit)
+                next_stage = (
+                    UnitStage.WAITING_BRAZING_REVIEW
+                    if self._unit_requires_camera_review(unit, operation.kind)
+                    else UnitStage.WAITING_INSTALL
+                )
+                self._set_stage(unit, next_stage)
         elif operation.kind == "INSTALL_FIN":
             installed_index = unit.rework_fin_index or (unit.fins_installed + 1)
             if unit.rework_fin_index is None:
@@ -750,14 +861,28 @@ class DualLineRuntime:
                 branch=None if unit.branch is None else unit.branch.value,
             )
             if unit.fins_installed >= unit.fin_count:
-                self._set_stage(unit, UnitStage.WAITING_MERGE)
+                next_stage = (
+                    UnitStage.WAITING_FINS_REVIEW
+                    if self._unit_requires_camera_review(unit, "PRE_BRAZE_INSPECTION")
+                    else UnitStage.WAITING_MERGE
+                )
+                self._set_stage(unit, next_stage)
             else:
                 self._set_stage(unit, UnitStage.FIN_INSTALLATION)
         elif operation.kind == "MERGING":
             self._set_stage(unit, UnitStage.WAITING_S4)
         elif operation.kind == "PRE_BRAZE_INSPECTION":
             self.faults.complete_recovery(unit.unit_id, self.sim_time)
-            self._set_stage(unit, UnitStage.WAITING_BUFFER)
+            if unit.stage is UnitStage.FINS_REVIEW:
+                self.camera_coordination.complete(
+                    unit.unit_id,
+                    operation.kind,
+                    now=self.sim_time,
+                    result="PASS",
+                )
+                self._set_stage(unit, UnitStage.WAITING_MERGE)
+            else:
+                self._set_stage(unit, UnitStage.WAITING_BUFFER)
         elif operation.kind == "POST_BRAZE_INSPECTION":
             self._set_stage(unit, UnitStage.WAITING_OUTPUT)
         elif operation.kind == "OUTPUT_GATE_OPEN":
@@ -966,8 +1091,33 @@ class DualLineRuntime:
                 self._set_stage(unit, UnitStage.MATERIAL_INSPECTION)
                 changed = True
                 break
+        for unit in self._waiting_units(UnitStage.WAITING_BRAZING_REVIEW):
+            if (
+                unit.branch is InstallBranch.ARM3_B
+                and self._tray_ready(unit)
+                and self._owner_free(TrayOwner.INSTALL_B)
+                and self._target_available(TrayOwner.INSTALL_B)
+            ):
+                self._handoff(
+                    unit,
+                    TrayOwner.S2B,
+                    TrayOwner.INSTALL_B,
+                    TrayPhase.FIN_INSTALLATION,
+                )
+                self._set_stage(unit, UnitStage.BRAZING_REVIEW)
+                changed = True
+                break
         for unit in self._waiting_units(UnitStage.WAITING_INSTALL):
             self._reroute_blocked_install(unit)
+            if (
+                unit.branch is InstallBranch.ARM3_B
+                and unit.tray_id is not None
+                and self._tray_ready(unit)
+                and self.flow.get(unit.tray_id).owner is TrayOwner.INSTALL_B
+            ):
+                self._set_stage(unit, UnitStage.FIN_INSTALLATION)
+                changed = True
+                break
             if (
                 self._tray_ready(unit)
                 and unit.branch is InstallBranch.ARM1_A
@@ -996,6 +1146,13 @@ class DualLineRuntime:
                     TrayPhase.FIN_INSTALLATION,
                 )
                 self._set_stage(unit, UnitStage.FIN_INSTALLATION)
+                changed = True
+                break
+        for unit in self._waiting_units(UnitStage.WAITING_FINS_REVIEW):
+            if unit.tray_id is None or not self._tray_ready(unit):
+                continue
+            if self.flow.get(unit.tray_id).owner is TrayOwner.INSTALL_B:
+                self._set_stage(unit, UnitStage.FINS_REVIEW)
                 changed = True
                 break
         for unit in self._waiting_units(UnitStage.WAITING_MERGE):
@@ -1091,10 +1248,35 @@ class DualLineRuntime:
         # Detection always gets Arm3 before another fin is picked. An active
         # INSTALL_FIN operation remains non-preemptible until this tick ends.
         if "ARM3" not in self.operations and self._resource_online("ARM3"):
-            waiting_s4 = [
-                unit for unit in self._waiting_units(UnitStage.PRE_BRAZE_INSPECTION) if self._tray_ready(unit)
+            waiting_s3 = [
+                unit
+                for unit in self._waiting_units(UnitStage.BRAZING_REVIEW, UnitStage.FINS_REVIEW)
+                if self._tray_ready(unit)
             ]
-            if waiting_s4:
+            if waiting_s3:
+                review_unit = waiting_s3[0]
+                review_kind = (
+                    "MATERIAL_INSPECTION"
+                    if review_unit.stage is UnitStage.BRAZING_REVIEW
+                    else "PRE_BRAZE_INSPECTION"
+                )
+                changed |= self._start(
+                    "ARM3",
+                    review_unit,
+                    review_kind,
+                    (
+                        self.durations.material_inspection
+                        if review_kind == "MATERIAL_INSPECTION"
+                        else self.durations.pre_braze_inspection
+                    ),
+                )
+            else:
+                waiting_s4 = [
+                    unit
+                    for unit in self._waiting_units(UnitStage.PRE_BRAZE_INSPECTION)
+                    if self._tray_ready(unit)
+                ]
+            if not waiting_s3 and waiting_s4:
                 changed |= self._start(
                     "ARM3",
                     waiting_s4[0],
@@ -1854,6 +2036,7 @@ class DualLineRuntime:
         self.upstream_work_during_brazing_s = 0.0
         self.maximum_wip = 0
         self.faults.reset()
+        self.camera_coordination.reset()
         self._rework_effort.clear()
 
     def snapshot(self) -> dict[str, Any]:
@@ -1921,6 +2104,8 @@ class DualLineRuntime:
                 "gate_open": self._output_gate_open,
                 "gate_ready": self._output_gate_ready,
             },
+            "camera_coordination": self.camera_coordination_snapshot(),
+            "arm3_camera_plan": self.camera_coordination_snapshot(),
             "metrics": {
                 "upstream_work_during_brazing_s": round(self.upstream_work_during_brazing_s, 6),
                 "maximum_wip": self.maximum_wip,

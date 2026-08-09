@@ -16,9 +16,15 @@ def _touchpad_pan_delta(dx: float, dy: float) -> tuple[float, float]:
 
 
 def _prepare_renderer_size(model: Any) -> tuple[int, int]:
-    model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), RENDER_WIDTH)
-    model.vis.global_.offheight = max(int(model.vis.global_.offheight), RENDER_HEIGHT)
-    return RENDER_WIDTH, RENDER_HEIGHT
+    return _prepare_renderer_size_for_viewport(model, RENDER_WIDTH, RENDER_HEIGHT)
+
+
+def _prepare_renderer_size_for_viewport(model: Any, width: int, height: int) -> tuple[int, int]:
+    width = max(1, int(width))
+    height = max(1, int(height))
+    model.vis.global_.offwidth = max(int(model.vis.global_.offwidth), width)
+    model.vis.global_.offheight = max(int(model.vis.global_.offheight), height)
+    return width, height
 
 
 @dataclass(slots=True)
@@ -95,8 +101,7 @@ def run_windows_viewer(application: Any) -> int:
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     model, data = application.scene.model, application.scene.data
-    render_width, render_height = _prepare_renderer_size(model)
-    renderer = mujoco.Renderer(model, height=render_height, width=render_width)
+    renderer: Any | None = None
     camera = mujoco.MjvCamera()
     controller = CameraController()
     controller.apply(camera)
@@ -110,6 +115,24 @@ def run_windows_viewer(application: Any) -> int:
             self._last_pos: Any | None = None
             self._frame = QImage()
             self._error = ""
+            self._renderer_size = (0, 0)
+
+        def _viewport_pixels(self) -> tuple[int, int]:
+            scale = max(1.0, float(self.devicePixelRatioF()))
+            width = min(4096, max(1, round(self.width() * scale)))
+            height = min(4096, max(1, round(self.height() * scale)))
+            return width, height
+
+        def _ensure_renderer(self) -> None:
+            nonlocal renderer
+            size = self._viewport_pixels()
+            if renderer is not None and self._renderer_size == size:
+                return
+            if renderer is not None:
+                renderer.close()
+            render_width, render_height = _prepare_renderer_size_for_viewport(model, *size)
+            renderer = mujoco.Renderer(model, height=render_height, width=render_width)
+            self._renderer_size = size
 
         def _zoom_from_wheel(self, event: Any) -> bool:
             pixel_delta = event.pixelDelta()
@@ -190,10 +213,10 @@ def run_windows_viewer(application: Any) -> int:
 
         def render_frame(self) -> None:
             try:
+                self._ensure_renderer()
                 controller.apply(camera)
+                assert renderer is not None
                 renderer.update_scene(data, camera=camera)
-                renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = 0
-                renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_REFLECTION)] = 0
                 frame = renderer.render()
                 self._frame = QImage(
                     frame.data,
@@ -223,6 +246,10 @@ def run_windows_viewer(application: Any) -> int:
                 image_size.height(),
             )
             painter.drawImage(image_rect, self._frame)
+
+        def resizeEvent(self, event: Any) -> None:  # type: ignore[override]
+            self._renderer_size = (0, 0)
+            super().resizeEvent(event)
 
     class ViewerWindow(QMainWindow):
         def __init__(self) -> None:
@@ -257,7 +284,8 @@ def run_windows_viewer(application: Any) -> int:
 
         def closeEvent(self, event: Any) -> None:  # type: ignore[override]
             self.timer.stop()
-            renderer.close()
+            if renderer is not None:
+                renderer.close()
             event.accept()
 
     window = ViewerWindow()

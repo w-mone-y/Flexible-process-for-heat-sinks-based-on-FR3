@@ -47,7 +47,7 @@
 | ✅ **验证修改没有破坏流程** | [测试与质量门槛](#quality) |
 
 > **只想最快看到效果？** macOS/Linux 运行 `mjpython brazing_line_v2.py`；Windows
-> 运行 `powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1`，再从 Qt 控制台加入
+> 运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1`，再从 Qt 控制台加入
 > A/B/C 普通订单即可。
 
 ## 👀 30 秒看懂这个项目
@@ -308,7 +308,7 @@ python scripts/capture_readme_gifs.py
 
 | 入口 | 适合场景 | 一条命令 |
 |---|---|---|
-| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | macOS/Linux: `mjpython brazing_line_v2.py`；Windows: `powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1` |
+| **V2 双安装线**（推荐体验） | 多订单、Arm1/Arm3 并行装配、前进后出三层炉 | macOS/Linux: `mjpython brazing_line_v2.py`；Windows: `pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1` |
 | **V1 稳定线** | 完整故障注入、自动恢复、单段演示和旧入口兼容 | `mjpython brazing_line.py` |
 | **精细视觉版** | 截图、录屏和展示 | `mjpython brazing_line_cinematic.py --order A` |
 | **YAML 柔性订单** | 配置驱动、自定义计划、dry-run 和调度实验 | `python run_flexible_order.py --order config/orders/order_001.yaml --dry-run` |
@@ -355,10 +355,10 @@ notepad .env
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1
 
 # 带订单运行 Viewer + Qt 控制台
-powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --orders A,B,C --fast
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --orders A,B,C --fast
 
 # 只运行 V2 headless，不创建 Viewer 或 Qt 窗口
-powershell -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --headless --orders A,B,C --fast
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1 --headless --orders A,B,C --fast
 ```
 
 Windows Viewer 的交互约定：左键拖动旋转，右键或中键拖动平移，鼠标滚轮或捏合缩放，

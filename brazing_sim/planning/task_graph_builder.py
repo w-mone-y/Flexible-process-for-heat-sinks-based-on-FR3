@@ -84,6 +84,7 @@ LEGACY_DURATIONS: dict[TaskType, float] = {
     # still coating the next tray at the process nest.
     TaskType.DISPENSE_BRAZING: 24.0,
     TaskType.INSPECT_BRAZING: 10.0,
+    TaskType.REVIEW_BRAZING_CLOSEUP: 6.0,
     TaskType.CONFIGURE_COMB: 2.0,
     TaskType.FETCH_COMB: 2.5,
     TaskType.INSTALL_COMB: 3.0,
@@ -91,6 +92,7 @@ LEGACY_DURATIONS: dict[TaskType, float] = {
     TaskType.PICK_FIN: 8.0,
     TaskType.INSTALL_FIN: 10.0,
     TaskType.INSPECT_FINS: 10.0,
+    TaskType.REVIEW_FINS_CLOSEUP: 6.0,
     TaskType.FETCH_PRESS_MODULE: 2.0,
     TaskType.INSTALL_PRESS_MODULE: 2.5,
     TaskType.APPLY_PRESS: 2.0,
@@ -144,6 +146,7 @@ class ProcessPlanTaskGraphBuilder:
         durations: dict[str | TaskType, float] | None = None,
         *,
         flexible_cell: bool = False,
+        camera_coordination: bool = False,
         catalog: CapabilityCatalog | None = None,
         routing: RoutingSpec | None = None,
         resources: Iterable[Any] = (),
@@ -164,6 +167,7 @@ class ProcessPlanTaskGraphBuilder:
         self._duration_overrides = {TaskType(key) for key in (durations or {})}
         self._sequence = 0
         self.flexible_cell = bool(flexible_cell)
+        self.camera_coordination = bool(camera_coordination)
         self.catalog = catalog
         self.routing = routing
         self.profile = profile
@@ -545,6 +549,24 @@ class ProcessPlanTaskGraphBuilder:
         )
         graph.add_task(configure_comb)
 
+        s3b_camera_review = self.camera_coordination and self._uses_high_reliability_route(plan, index)
+        review_brazing = None
+        if s3b_camera_review:
+            review_brazing = self._make(
+                task_id=prefix("REVIEW_BRAZING_CLOSEUP"),
+                task_type=TaskType.REVIEW_BRAZING_CLOSEUP,
+                plan=plan,
+                unit_index=index,
+                unit_id=unit_id,
+                tray_id=tray_id,
+                predecessors=(configure_comb.task_id,),
+                resources=("ARM3",),
+                zones=("ZONE_TABLE2_CORE",),
+                retry_limit=2,
+                payload={"inspection_kind": "MATERIAL_INSPECTION", "camera_view": "closeup"},
+            )
+            graph.add_task(review_brazing)
+
         install_ids: list[str] = []
         previous_install: str | None = None
         for target in plan.fin_targets:
@@ -553,6 +575,8 @@ class ProcessPlanTaskGraphBuilder:
             # needs the comb lock.  Prefetching the first fin removes the
             # otherwise idle Arm1 gap after the guides visibly seat.
             predecessors = [prepare_tool.task_id]
+            if review_brazing is not None:
+                predecessors.append(review_brazing.task_id)
             if previous_install is not None:
                 predecessors.append(previous_install)
             pick_fin = self._make(
@@ -590,6 +614,25 @@ class ProcessPlanTaskGraphBuilder:
             previous_install = install_fin.task_id
             install_ids.append(install_fin.task_id)
 
+        review_fins = None
+        inspect_fins_predecessors: Iterable[str] = install_ids
+        if s3b_camera_review:
+            review_fins = self._make(
+                task_id=prefix("REVIEW_FINS_CLOSEUP"),
+                task_type=TaskType.REVIEW_FINS_CLOSEUP,
+                plan=plan,
+                unit_index=index,
+                unit_id=unit_id,
+                tray_id=tray_id,
+                predecessors=install_ids,
+                resources=("ARM3",),
+                zones=("ZONE_TABLE2_CORE",),
+                retry_limit=2,
+                payload={"inspection_kind": "PRE_BRAZE_INSPECTION", "camera_view": "closeup"},
+            )
+            graph.add_task(review_fins)
+            inspect_fins_predecessors = (review_fins.task_id,)
+
         inspect_fins = self._make(
             task_id=prefix("INSPECT_FINS"),
             task_type=TaskType.INSPECT_FINS,
@@ -597,7 +640,7 @@ class ProcessPlanTaskGraphBuilder:
             unit_index=index,
             unit_id=unit_id,
             tray_id=tray_id,
-            predecessors=install_ids,
+            predecessors=inspect_fins_predecessors,
             resources=("ARM3",),
             zones=("ZONE_TABLE2_CORE",),
             retry_limit=2,
@@ -771,6 +814,16 @@ class ProcessPlanTaskGraphBuilder:
                 "MATERIAL_INSPECTION",
                 "AT_S2B",
             )
+            for review_key in ("REVIEW_BRAZING_CLOSEUP", "REVIEW_FINS_CLOSEUP"):
+                review = items.get(review_key)
+                if review is not None:
+                    station_task(
+                        review,
+                        "S3B_ARM3_INSTALL",
+                        "ZONE_S3B_ARM3",
+                        "VISION_CLOSEUP",
+                        "AT_S3B",
+                    )
 
             for suffix, task in items.items():
                 if task.task_type in {
@@ -803,8 +856,10 @@ class ProcessPlanTaskGraphBuilder:
             # S1 -> S2A.  A high-reliability route performs its extra base
             # view at S1 before the pallet is released to the first slide.
             transfer_12_predecessor = items["PLACE_BASE"].task_id
-            high_reliability = plan.route_strategy is RouteStrategy.HIGH_RELIABILITY or (
-                plan.route_strategy is RouteStrategy.FIRST_ARTICLE and index == 0
+            high_reliability = (
+                not self.flexible_cell
+                and not self.camera_coordination
+                and self._uses_high_reliability_route(plan, index)
             )
             if high_reliability:
                 verify_base = self._make(
@@ -875,6 +930,8 @@ class ProcessPlanTaskGraphBuilder:
             graph.add_task(transfer_2b_3)
             graph.remove_dependency(items["INSPECT_BRAZING"].task_id, items["CONFIGURE_COMB"].task_id)
             graph.add_dependency(transfer_2b_3.task_id, items["CONFIGURE_COMB"].task_id)
+            if items.get("REVIEW_BRAZING_CLOSEUP") is not None:
+                graph.add_dependency(items["INSPECT_BRAZING"].task_id, items["CONFIGURE_COMB"].task_id)
 
             transfer_3_rack = items["TRANSFER_OUT"]
             transfer_3_rack.task_type = TaskType.TRANSFER_S3_RACK
@@ -987,8 +1044,10 @@ class ProcessPlanTaskGraphBuilder:
             )
             graph.add_task(inspect)
             route_predecessor = inspect.task_id
-            high_reliability = plan.route_strategy is RouteStrategy.HIGH_RELIABILITY or (
-                plan.route_strategy is RouteStrategy.FIRST_ARTICLE and assignment.unit_index == 0
+            high_reliability = (
+                not self.flexible_cell
+                and not self.camera_coordination
+                and self._uses_high_reliability_route(plan, assignment.unit_index)
             )
             if high_reliability:
                 second_view = self._make(
