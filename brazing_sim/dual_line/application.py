@@ -64,6 +64,8 @@ class V2ControlSurface:
             # so a preferred layer cannot be reserved.
             ignored.append("首选料架层（V2 按装炉顺序分配层位）")
         strategy = str(command.get("route_strategy") or "").strip().upper()
+        if strategy and strategy not in {"STANDARD", "HIGH_RELIABILITY", "FIRST_ARTICLE"}:
+            raise ValueError(f"V2 不支持路线策略：{strategy}")
         requested_quantity = int(command.get("quantity", 1) if quantity is None else quantity)
         custom_product = command.get("custom_product")
         if custom_product is not None:

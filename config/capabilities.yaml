@@ -107,6 +107,14 @@ capabilities:
     effects: [brazing_verified]
     zones: [ZONE_TABLE2_CORE]
 
+  BRAZING_CLOSEUP_REVIEW:
+    task_type: REVIEW_BRAZING_CLOSEUP
+    requires_tool_class: CAMERA
+    description_zh: 高可靠路线钎料近景复核
+    duration_model: "6.0"
+    zones: [ZONE_S3B_ARM3]
+    preemptive: false
+
   # ---------------------------------------------------------------- 梳齿换型
   COMB_CONFIGURATION:
     task_type: CONFIGURE_COMB
@@ -151,6 +159,14 @@ capabilities:
     preconditions: [fins_installed]
     effects: [fins_verified]
     zones: [ZONE_TABLE2_CORE]
+    preemptive: false
+
+  FIN_CLOSEUP_REVIEW:
+    task_type: REVIEW_FINS_CLOSEUP
+    requires_tool_class: CAMERA
+    description_zh: 高可靠路线翅片近景复核
+    duration_model: "6.0"
+    zones: [ZONE_S3B_ARM3]
     preemptive: false
 
   # ---------------------------------------------------------------- 压紧锁定

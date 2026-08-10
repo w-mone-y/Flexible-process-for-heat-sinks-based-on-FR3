@@ -801,7 +801,8 @@ mjpython brazing_line_cinematic.py --batch A
 
 ## ✅ 测试与质量门槛
 
-当前支持范围的回归结果为 **618 项通过**，并额外完成 A/B/C/D 四订单真实 MuJoCo
+当前测试套件共收集 **637 项**；合并远端 Windows Viewer 与单 Arm3 相机协调更新后，
+已重新执行完整回归。项目还完成 A/B/C/D 四订单真实 MuJoCo
 闭环验收、Ruff、Black、`compileall`、XML 编译与 `git diff --check`。本轮修复没有修改
 [`brazing_line_v2.xml`](scenes/production/brazing_line_v2.xml)，因此只改变订单放行、炉批
 门控和任务状态投影，不改变已经确认的物理场景布局。
