@@ -1056,6 +1056,13 @@ class DualLineRuntime:
         ):
             return False
         queued = self._waiting_units(UnitStage.QUEUED)
+        admission_callback = (
+            None
+            if self._execution_gate is None
+            else getattr(self._execution_gate, "unit_admission_allowed", None)
+        )
+        if admission_callback is not None:
+            queued = [unit for unit in queued if admission_callback(unit.unit_id)]
         if not queued:
             return False
         unit = queued[0]

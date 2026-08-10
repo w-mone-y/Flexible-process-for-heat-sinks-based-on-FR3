@@ -7,9 +7,12 @@ import sys
 
 import pytest
 
+from brazing_sim.dual_line.application import V2BrazingApplication
+from brazing_sim.dual_line.cli import parse_args
 from brazing_sim.dual_line import DualLineRuntime, FurnacePhase, UnitStage
 from brazing_sim.dual_line.unified_runtime import UnifiedV2Runtime
 from brazing_sim.flexible import build_custom_plan
+from brazing_sim.planning import TaskType
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -135,6 +138,70 @@ def test_unified_v2_queues_fourth_order_when_three_furnace_layers_are_reserved()
     assert entry.admitted_unit_ids == set()
     assert entry.tray_assignments == {}
     assert runtime.manufacturing_runtime._active_wip() == 3
+
+
+def test_unified_v2_physical_admission_follows_global_release_order() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    for preset in ("A", "B", "C", "D"):
+        runtime.submit_order(preset, order_id=f"AUTHORITY_{preset}")
+
+    runtime.tick(0.05)
+
+    stages = {unit.unit_id: unit.stage for unit in runtime.physical_runtime.units.values()}
+    released = {
+        unit_id
+        for entry in runtime.manufacturing_runtime.orders.values()
+        for unit_id in entry.admitted_unit_ids
+    }
+    assert len(released) == 3
+    assert sum(stages[unit_id] is UnitStage.BASE_LOADING for unit_id in released) == 1
+    assert stages["AUTHORITY_D_UNIT_01"] is UnitStage.QUEUED
+
+
+def test_unified_v2_furnace_guard_ignores_the_queued_next_batch() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    for preset in ("A", "B", "C", "D"):
+        runtime.submit_order(preset, order_id=f"BATCH_GUARD_{preset}")
+
+    active_batch = sorted(
+        unit_id
+        for entry in runtime.manufacturing_runtime.orders.values()
+        for unit_id in entry.admitted_unit_ids
+    )
+    runtime.physical_runtime._active_batch_units = list(active_batch)
+    for unit_id in active_batch:
+        runtime.physical_runtime.units[unit_id].stage = UnitStage.BRAZING
+    task = next(
+        candidate
+        for candidate in runtime.manufacturing_runtime.graph
+        if candidate.task_type is TaskType.RUN_FURNACE and candidate.unit_id in active_batch
+    )
+
+    allowed, reason = runtime.bridge.task_dispatch_allowed(task)
+
+    assert allowed
+    assert reason == ""
+    assert runtime.physical_runtime.units["BATCH_GUARD_D_UNIT_01"].stage is UnitStage.QUEUED
+
+
+def test_v2_four_order_burst_completes_in_two_physical_furnace_batches() -> None:
+    args = parse_args(("--headless", "--fast", "--no-ui", "--orders", "A,B,C,D"))
+    application = V2BrazingApplication(args)
+    try:
+        application.submit_cli_orders()
+        for _ in range(6000):
+            application.advance_frame()
+            if application.runtime.complete:
+                break
+        state = application.publish(viewer_running=False)
+    finally:
+        application.close()
+
+    assert state["complete"] is True
+    assert state["physical_execution_complete"] is True
+    assert state["completed_orders"] == ["V2_A_01", "V2_B_02", "V2_C_03", "V2_D_04"]
+    assert state["furnace"]["completed_batches"] == 2
+    assert not [task for task in state["tasks"] if task["status"] not in {"SUCCEEDED", "CANCELLED"}]
 
 
 def test_v2_runtime_keeps_processing_the_next_batch_while_the_furnace_runs() -> None:

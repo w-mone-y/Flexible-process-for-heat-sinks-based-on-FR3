@@ -1756,6 +1756,30 @@ class ManufacturingRuntime:
         try:
             route.transition(target, now)
         except ValueError:
+            if not self.flexible_cell:
+                # V2 reuses the manufacturing DAG without the optional visible
+                # changeover/transfer milestones.  Its route projection may
+                # therefore jump over intermediate presentation phases even
+                # though the physical actor completed the corresponding motion.
+                sequence = (
+                    TrayRoutePhase.EMPTY_BUFFER,
+                    TrayRoutePhase.CHANGEOVER,
+                    TrayRoutePhase.MOLD_READY,
+                    TrayRoutePhase.BASE_READY,
+                    TrayRoutePhase.MATERIAL_READY,
+                    TrayRoutePhase.ASSEMBLY_READY,
+                    TrayRoutePhase.LOCKED,
+                    TrayRoutePhase.OUTFEED,
+                    TrayRoutePhase.FURNACE,
+                    TrayRoutePhase.FINISHED_GOODS,
+                    TrayRoutePhase.RETURNING,
+                )
+                current_index = sequence.index(route.phase)
+                target_index = sequence.index(target)
+                if target_index > current_index:
+                    for phase in sequence[current_index + 1 : target_index + 1]:
+                        route.transition(phase, now)
+                    return
             # Recovery/replay may complete an idempotent task after the route
             # already advanced; never move the route backwards.
             if route.phase is not target:

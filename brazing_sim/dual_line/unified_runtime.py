@@ -106,6 +106,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
     def __init__(self, runtime: DualLineRuntime) -> None:
         self.runtime = runtime
         self.physical_gate: RuntimeExecutionGate | None = None
+        self.manufacturing_runtime: ManufacturingRuntime | None = None
         self._permits: dict[tuple[str, str], dict[str, str]] = {}
         self._task_permits: dict[str, set[tuple[str, str]]] = {}
 
@@ -209,6 +210,23 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             else getattr(self.physical_gate, "operation_start_allowed", None)
         )
         return True if callback is None else bool(callback(resource, unit_id, kind))
+
+    def unit_admission_allowed(self, unit_id: str) -> bool:
+        """Allow physical S1 admission only for a unit released by the DAG.
+
+        The physical V2 runtime still owns motion and tray transfer, but it
+        must not independently choose a higher-priority queued unit than the
+        manufacturing scheduler selected.  Without this gate a burst such as
+        A/B/C/D could admit D physically while the DAG was running C, leaving
+        both authorities waiting on different trays.
+        """
+
+        if self.manufacturing_runtime is None:
+            # During construction the bridge is used by the physical runtime
+            # before the manufacturing facade is attached; keep legacy
+            # standalone DualLineRuntime behaviour unchanged.
+            return True
+        return any(unit_id in entry.admitted_unit_ids for entry in self.manufacturing_runtime.orders.values())
 
     def preferred_install_resource(self, unit_id: str) -> str | None:
         """Return the resource selected by the global DAG scheduler's OR branch."""
@@ -393,7 +411,20 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                     None,
                 )
                 allowed = next_unit == task.unit_id
-                return allowed, ("" if allowed else "等待更高物理炉层先完成卸载")
+                if not allowed:
+                    return False, "等待更高物理炉层先完成卸载"
+                # A closed rear door is not a blocker: the physical actor
+                # needs this logical permit to open it first.  Once the door
+                # is open, the same task continues to the unload transfer.
+                if "FURNACE_TRANSFER" in self.runtime.operations:
+                    return False, "等待上一托盘完成炉后移载"
+                if "POST_CAMERA" in self.runtime.operations:
+                    return False, "等待焊后检测位释放"
+                if not self.runtime._owner_free(TrayOwner.POST_SCAN):
+                    return False, "等待焊后检测托盘离开"
+                if not self.runtime._target_available(TrayOwner.POST_SCAN):
+                    return False, "等待焊后检测工位可接收托盘"
+                return True, ""
         if task.task_type is TaskType.INSPECT_FINS:
             unit = self.runtime.units.get(task.unit_id)
             allowed = bool(
@@ -436,8 +467,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             UnitStage.VIRTUAL_RETURN,
             UnitStage.COMPLETE,
         }
+        active_batch = tuple(self.runtime._active_batch_units)
+        if not active_batch or task.unit_id not in active_batch:
+            return False, "等待所属物理炉批完成装载"
         waiting = [
-            unit.unit_id for unit in self.runtime.units.values() if unit.stage not in batch_ready_stages
+            unit_id for unit_id in active_batch if self.runtime.units[unit_id].stage not in batch_ready_stages
         ]
         if waiting:
             return False, "等待同一滚动炉批的上游托盘到达炉前缓存"
@@ -462,6 +496,7 @@ class UnifiedV2Runtime:
             dispatch_guard=self.bridge.task_dispatch_allowed,
             external_batch_controller=True,
         )
+        self.bridge.manufacturing_runtime = self.manufacturing_runtime
         # Arm3's V2 head is a fixed camera + narrow-gripper composite, so fin
         # work does not pay the removable-tool change cost used by V1.
         # ``parallel_gripper`` is the task-level GRIPPER class token retained

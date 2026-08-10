@@ -8,6 +8,7 @@ from brazing_sim.manufacturing_runtime import ManufacturingRuntime
 from brazing_sim.manufacturing_config import BatchingConfig, load_scheduler_config
 from brazing_sim.planning.task_models import TaskStatus, TaskType
 from brazing_sim.recovery import FaultType
+from brazing_sim.workcells import TrayRoutePhase
 
 
 def _runtime_with_batch_wait(max_wait_time: float) -> ManufacturingRuntime:
@@ -270,3 +271,27 @@ def test_fourth_unit_waits_for_a_furnace_layer_then_is_admitted() -> None:
     assert entries[-1].status.value in {"RELEASED", "RUNNING", "COMPLETED"}
     _run(runtime)
     assert all(entry.status.value == "COMPLETED" for entry in entries)
+
+
+def test_v2_projection_advances_across_omitted_visual_route_phases() -> None:
+    runtime = ManufacturingRuntime(scheduler_mode="dynamic", flexible_cell=False)
+    entry = runtime.submit_plan(
+        build_inline_plan(
+            preset="A",
+            order_id="ROUTE_PROJECTION",
+            quantity=1,
+            priority=10,
+        ),
+        now=0.0,
+    )
+    lock_task = next(
+        runtime.graph.get(task_id)
+        for task_id in entry.graph_task_ids
+        if runtime.graph.get(task_id).task_type is TaskType.LOCK_RACK_LAYER
+    )
+
+    runtime._advance_cell_state(lock_task, 1.0)
+
+    route = runtime.tray_routes[lock_task.tray_id]
+    assert route.phase is TrayRoutePhase.FURNACE
+    assert runtime.last_error == ""

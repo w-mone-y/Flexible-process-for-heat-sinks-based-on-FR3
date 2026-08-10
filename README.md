@@ -10,7 +10,7 @@
   <a href="pyproject.toml"><img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white"></a>
   <a href="https://mujoco.org/"><img alt="MuJoCo 3.1+" src="https://img.shields.io/badge/MuJoCo-3.1%2B-00599C"></a>
   <a href="assets/robots/fr3/README.md"><img alt="FR3 x3" src="https://img.shields.io/badge/FR3-3%20Robots-7B61FF"></a>
-  <a href="config/products/"><img alt="Flexible orders" src="https://img.shields.io/badge/Orders-A%20%2F%20B%20%2F%20C-00A67E"></a>
+  <a href="config/products/"><img alt="Flexible orders" src="https://img.shields.io/badge/Orders-A%20%2F%20B%20%2F%20C%20%2F%20D-00A67E"></a>
   <a href="tests/v1/test_simulation_speed.py"><img alt="Simulation speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B"></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-See%20LICENSE-4B5563"></a>
 </p>
@@ -37,7 +37,7 @@
 | 你现在想做什么？ | 最短入口 |
 |---|---|
 | ▶️ **第一次运行项目** | [三步启动 Viewer](#quick-start) |
-| 🔀 **体验多订单双支路 V2** | [选择 V2 并运行 A/B/C](#version-choice) |
+| 🔀 **体验多订单双支路 V2** | [选择 V2 并运行 A/B/C/D](#version-choice) |
 | 🎥 **先看机械臂怎么动** | [三段加速真实工艺动图](#animations) |
 | 🎬 **先看真实仿真效果** | [V1 / V2 实际画面对照](#screenshots) |
 | 🧩 **看懂项目如何体现“柔性”** | [柔性能力全景](#flexibility) |
@@ -48,11 +48,11 @@
 
 > **只想最快看到效果？** macOS/Linux 运行 `mjpython brazing_line_v2.py`；Windows
 > 运行 `pwsh -NoProfile -ExecutionPolicy Bypass -File .\run_v2_windows.ps1`，再从 Qt 控制台加入
-> A/B/C 普通订单即可。
+> A/B/C/D 普通订单即可。
 
 ## 👀 30 秒看懂这个项目
 
-这是一个面向低压配电柜散热组件的柔性制造仿真 MVP。用户提交 A、B、C 或 YAML
+这是一个面向低压配电柜散热组件的柔性制造仿真 MVP。用户提交 A、B、C、D 或 YAML
 自定义订单后，系统会自动生成产品几何、钎料路径、工装选择、任务图和料架分配，
 再由三台 FR3 协作完成：
 
@@ -68,10 +68,10 @@
 
 ### ✨ 核心能力
 
-- 📦 **订单参数驱动**：A/B/C 物理订单与严格 YAML 配置共用一套执行主线，D 型用于验证免改代码扩展。
+- 📦 **订单参数驱动**：A/B/C/D 预设与通过校验的自定义产品共用统一规划和 V2 物理执行主线。
 - 🧩 **订单驱动工装**：15/20/30 mm 梳齿、短压梁和托盘随产品参数变化，并记录序列相关换型成本。
-- 🔀 **多订单异步流水**：V1 三托盘、V2 六托盘 WIP，不同机械臂可在不同工位并行。
-- 🧠 **任务图动态调度**：`ProcessPlan → Task DAG → Scheduler → Skills`。
+- 🔀 **多订单异步流水**：V2 预分配六套物理托盘对象；统一运行时按炉层和下游容量实施背压放行。
+- 🧠 **任务图动态调度**：`ProcessPlan → Task DAG → Scheduler → Physical Skill Bridge`，节点只在物理反馈满足后完成。
 - 🛠️ **可见故障与恢复**：漏涂、偏位、设备离线、输送超时、炉门互锁等。
 - 🔥 **完整炉体闭环**：三层前门装炉、30 秒演示热循环、后门卸载、检测与交付。
 - 🖥️ **规划控制台**：订单、任务图、工程示意、资源、故障、物流与实验指标。
@@ -81,12 +81,12 @@
 
 | 能力 | V1 稳定线 | V2 双安装线 | 当前边界 |
 |---|:---:|:---:|---|
-| A/B/C 实体订单 | ✅ | ✅ | 共用产品与配方语义，使用独立物理运行时 |
-| D 型 / 自定义 YAML | ✅ 规划与 dry-run | ⚠️ 规划可见、实体执行未开放 | 无实体模块或超容量时在启动前拒绝 |
-| 多订单协同 | ✅ 三托盘 | ✅ 六托盘、双安装支路 | 单炉最多三件，超出 WIP 的订单留在虚拟队列 |
+| A/B/C 实体订单 | ✅ | ✅ | 共用产品、配方与任务语义；V1 保持冻结兼容 |
+| D 型 / 自定义 YAML | ✅ 规划与 dry-run | ✅ 通过校验后实体执行 | 无实体模块或超容量时在启动前拒绝 |
+| 多订单协同 | ✅ 三托盘 | ✅ 六托盘对象池、双安装支路 | 统一 V2 当前按三层炉容量放行；后续订单留在虚拟队列 |
 | 可见故障与返工 | ✅ | ✅ | 质量故障由相机检出后返工；安全故障不能自动绕过 |
-| 动态任务 DAG | ✅ | ⚠️ V2 使用异步阶段状态机 | V2 UI 会实时投影物理任务，但不是同一套 DAG 执行器 |
-| 自动换型规划与 KPI | ✅ | ✅ 展示 | 换型动作与成本已建模；实体换型龙门仍是后续工作 |
+| 动态任务 DAG | ✅ | ✅ 统一逻辑权威 | `ManufacturingRuntime` 授权 V2 actor，物理完成事件反向更新 DAG |
+| 换型规划与 KPI | ✅ | ✅ | 当前采用参数/工装状态切换与成本建模，不建设可见换型龙门 |
 
 > `✅` 表示当前代码和回归测试覆盖；`⚠️` 表示已具备规划、展示或部分执行能力，
 > 但仍保留明确的物理边界。项目不会用动画或 UI 文案冒充尚未接通的 actor。
@@ -244,8 +244,8 @@ python scripts/capture_readme_gifs.py
 
 | 柔性类型 | 变化了什么 | 系统如何应对 | 在哪里看 |
 |---|---|---|---|
-| 📦 **产品制造柔性** | A/B/C 的基板、翅片、节距、涂覆路径和压紧力不同 | 从订单参数生成 `ProcessPlan`，调整实体几何、梳齿、涂覆和安装节拍 | Qt“订单规划”与 MuJoCo 工件 |
-| 🧠 **调度与资源柔性** | 多订单、紧急程度、Arm3 检测与安装任务竞争 | 按预计最早完工时间分配 S3A/S3B，以托盘所有权和 S4 单占用区防止重叠 | Qt“任务图/调度”与双安装支路 |
+| 📦 **产品制造柔性** | A/B/C/D 或自定义产品的基板、翅片、节距、涂覆路径和压紧力不同 | 从订单参数生成 `ProcessPlan`，调整实体几何、梳齿、涂覆和安装节拍 | Qt“订单规划”与 MuJoCo 工件 |
+| 🧠 **调度与资源柔性** | 多订单、紧急程度、Arm3 检测与安装任务竞争 | 统一 DAG 放行，按预计最早完工时间分配 S3A/S3B，以托盘所有权和 S4 单占用区防止重叠 | Qt“任务图/调度”与双安装支路 |
 | 🛠️ **故障修复柔性** | 漏涂、偏轨、翅片偏位、机械臂离线、输送/炉门异常 | 先在物理世界产生故障，再由检测或监控发现，最后局部返工或安全转人工 | Qt“故障与恢复规划” |
 | 🔥 **批次与物流柔性** | 到达顺序、在制品数量、炉内空闲层位不同 | 单件到达即可装入空层，满足批次条件后再关门热循环，后门逐层卸载 | Qt“批次与物流”与三层炉 |
 
@@ -255,18 +255,20 @@ python scripts/capture_readme_gifs.py
 |:---:|:---:|
 | ![Arm2 根据产品路径逐条涂覆](docs/images/readme/v2_dispensing_current.png) | ![Arm1 和 Arm3 使用对应梳齿完成双支路安装](docs/images/readme/v2_parallel_install_current.png) |
 
-- 📐 基板尺寸、翅片数量/节距、钎料路径和压紧力来自产品数据，不是为 A/B/C 各复制一条动画。
+- 📐 基板尺寸、翅片数量/节距、钎料路径和压紧力来自产品数据，不是为 A/B/C/D 各复制一条动画。
 - 🧱 每张托盘绑定自己的基板、翅片、钎料、梳齿和压条状态，多订单同时运行时不会串料。
 - 🧪 新参数先通过容量、路径边界和实体模块校验；超出 12 片翅片或 24 条路径会在启动前拒绝。
 
 ### 🧠 2. 多订单与资源柔性：让机械臂各干其事
 
-![V2 六托盘、双翅片安装支路与共享 S4 的实际场景](docs/images/readme/v2_current_overview.png)
+![V2 六套托盘对象、双翅片安装支路与共享 S4 的实际场景](docs/images/readme/v2_current_overview.png)
 
 - 🤖 Arm1 在 S3A 安装时，Arm3 可在 S3B 处理另一张托盘；Arm2 仍可在 S2A 为后续订单涂覆。
+- 🧠 订单是否进入 S1 由统一任务 DAG 决定，物理运行时不能自行挑选另一张托盘，避免逻辑计划与真实工件错位。
 - 🚦 每次输送前先预留目标工位与平面通道，后到托盘停在支路等待位，不靠几何穿模“提速”。
 - ↕️ S3B 右侧通道先在南侧绕行，最后与 `x=1.40 m` 中心线对齐，再像左侧一样垂直进入 S4 正中心；可见滑轨和托盘后端路径使用同一组坐标。
 - 🎯 普通与紧急订单只在下一个安全派工点重新竞争，不会在夹取、涂覆或输送中途强行抢占。
+- 🧰 Arm1 会结合后续基板/翅片任务减少无意义的“吸盘 → 夹爪 → 吸盘”往返；Arm3 的翅片任务会避开检测预约窗口。
 
 ### 🛠️ 3. 故障修复柔性：先看得见故障，再看得见修复
 
@@ -292,6 +294,23 @@ python scripts/capture_readme_gifs.py
 - 🔒 炉门、层位、托盘所有权与批次兼容性同时满足后才开始热循环。
 - 🚪 出炉顺序是“后门完全打开 → 炉内托盘全部离开 → 后门关闭”，不会在托盘途中突然关门。
 - 📤 黄色成品门打开后整托盘进入箱体，产品完成交付，空托盘以虚拟方式回流并释放 WIP 容量。
+
+#### 四订单突发提交现在如何处理？
+
+当 A/B/C/D 同时到达时，前三张获准进入当前三层炉批，第四张保持 `QUEUED`，不会
+提前占用不存在的第四个炉层。前三张完成热循环并依次通过炉后检测后，第四张自动取得
+释放的托盘与层位，进入第二个炉批。当前真实 MuJoCo 验收结果为：
+
+```text
+完成订单：A / B / C / D
+炉批数量：2
+物理执行完成：true
+仿真时间：275.0 s（--fast 验收节拍）
+异常任务：0
+```
+
+这条背压链同时解决了“第四单触发 `StopIteration`”和“下一炉批反向阻塞当前炉批关门”
+两个问题；`--fast` 只用于缩短演示动作，不代表真实钎焊节拍。
 
 <p align="right"><a href="#top">回到顶部 ↑</a></p>
 
@@ -385,21 +404,25 @@ mjpython brazing_line.py --batch A
 
 ### 4. V2 双安装支路
 
-V2 使用独立入口和独立 MJCF，不覆盖 V1。它提供六托盘、Arm1/Arm3 双翅片
+V2 使用独立入口和独立 MJCF，不覆盖 V1。它提供六套预分配托盘对象、Arm1/Arm3 双翅片
 安装支路、Y 形合流、三层贯通炉（前门装载、后门卸载）以及相同的十页签 Qt
 控制台。
 
 ```bash
-# Viewer 空载启动，再从 UI 加入 A/B/C 普通或紧急订单
+# Viewer 空载启动，再从 UI 加入 A/B/C/D 或合法自定义普通/紧急订单
 mjpython brazing_line_v2.py
 
 # Headless 运行混合三订单
 python brazing_line_v2.py --headless --orders A,B,C --fast
+
+# Headless 验证三层首批 + 第四单安全排队并进入第二炉批
+python brazing_line_v2.py --headless --orders A,B,C,D --fast --max-sim-time 300
 ```
 
 > V2 已接通机器人动作、抓取、工位运输、三层炉批、实时任务投影，以及质量/设备
-> 故障的“物理形成 → 检测 → 实体返工或安全保持”。当前仍未开放 V2 自定义产品实体
-> 执行、九个单段 actor 和可见换型龙门；界面会明确禁用或提示，不会静默假装成功。
+> 故障的“物理形成 → 检测 → 实体返工或安全保持”。D 型和通过容量、几何与工艺校验
+> 的自定义产品已接入 V2 实体执行；九个旧单段演示仍以 V1 为完整兼容入口。可见换型
+> 龙门已从当前范围移除，换型仅保留参数化工装状态与成本建模。
 > 完整边界见 [V2 规格](docs/specs/v2-dual-install-line.md)与
 > [V2 扰动柔性说明](docs/specs/v2-disturbance-flexibility.md)。
 
@@ -467,7 +490,8 @@ mjpython brazing_line.py
 | 路径管理 | [`brazing_sim/paths.py`](brazing_sim/paths.py) | 根目录、配置、场景、资产和输出路径 |
 | 制造运行时 | [`manufacturing_runtime.py`](brazing_sim/manufacturing_runtime.py) | 订单队列、任务图、调度、事件和恢复 |
 | 任务图构建 | [`task_graph_builder.py`](brazing_sim/planning/task_graph_builder.py) | 将产品工艺转换为依赖 DAG |
-| V2 异步运行时 | [`dual_line/runtime.py`](brazing_sim/dual_line/runtime.py) | 双支路、六托盘、炉批与成品交付 |
+| V2 统一门面 | [`dual_line/unified_runtime.py`](brazing_sim/dual_line/unified_runtime.py) | 将统一 DAG 授权映射为 V2 物理动作并接收完成证据 |
+| V2 物理适配器 | [`dual_line/runtime.py`](brazing_sim/dual_line/runtime.py) | 双支路、托盘对象池、炉批与成品交付 actor 编排 |
 | 物理技能 | [`async_line_skills.py`](brazing_sim/execution/async_line_skills.py) | Arm1/2/3 和工位动作适配 |
 | MuJoCo 场景 | [`V1 XML`](scenes/production/brazing_line.xml) · [`V2 XML`](scenes/production/brazing_line_v2.xml) | 设备、机器人、托盘、约束与执行器 |
 | 回归测试 | [`tests/`](tests/) | V1、V2、领域模型、场景和完整流程验证 |
@@ -486,10 +510,10 @@ mjpython brazing_line.py
 | **C** | 0.34 × 0.20 × 0.008 m | 7 | 15 mm | 15 mm | 14 | 22 N |
 | **D** | 0.36 × 0.24 × 0.008 m | 9 | 15 mm | 15 mm | 18 | 30 N |
 
-> **D 型是换型免编程的证据**：加入它只需
+> **D 型是产品扩展免改执行代码的证据**：加入它只需
 > [`product_d.yaml`](config/products/product_d.yaml) 与
 > [`order_004.yaml`](config/orders/order_004.yaml) 两个文件，没有一行 Python、
-> 没有一处示教点。涂覆节拍自动由 24.0 s 增至 29.4 s，翅片检测由 10.0 s 增至
+> 没有一处示教点，且已通过 V2 实体执行。涂覆节拍自动由 24.0 s 增至 29.4 s，翅片检测由 10.0 s 增至
 > 11.2 s，全部来自
 > [能力本体](config/capabilities.yaml)的参数化节拍模型。
 
@@ -520,12 +544,14 @@ MuJoCo 实体动作时，仍必须提供对应 actor、可达性和安全验收�
 
 ## 🔀 多订单协同
 
-稳定 V1 使用三张在制托盘；V2 预分配六张托盘，允许“炉内最多三件 + 上游下一批
-最多三件”。超出物理 WIP 的订单留在虚拟队列，托盘完成虚拟回流后再释放。
+稳定 V1 使用三张在制托盘；V2 场景预分配六套托盘/产品对象以避免重建 Viewer。
+在当前统一执行模式下，订单放行同时受三层炉位、托盘所有权和下游工位约束：首批
+最多三件进入物理主线，其余订单安全停留在虚拟队列，层位释放后自动继续。
 
 ```mermaid
 flowchart TB
-    Q["订单队列<br/>普通 + 紧急"] --> G["每张托盘独立 Task DAG"]
+    Q["订单队列<br/>普通 + 紧急"] --> ADM["炉层 / WIP 背压放行"]
+    ADM --> G["每张托盘独立 Task DAG"]
     G --> SCH["动态优先级调度器<br/>每 tick 最多派发 3 个任务"]
     SCH --> A1["Arm1<br/>S1 / S3A"]
     SCH --> A2["Arm2<br/>S2A"]
@@ -545,6 +571,13 @@ flowchart TB
 - 两条平面路线在 S4 前实施单占用合流，后到托盘在支路等待位停车。
 - 紧急订单不会打断正在进行的抓取、涂覆或输送，只竞争下一次资源释放。
 - 动态调度冲突会保持 READY 并等待，不会因为暂时无路可走就直接进入 ERROR。
+- 同族、交期、优先级、资源可用时间与工具切换成本参与排序；临时冲突不会改变物理安全约束。
+- 炉批以兼容配方和三层容量为硬约束，可在等待上限、交期风险或满载条件满足时启动部分/完整批次。
+
+> `dual_line/optimization.py` 还保留了有界滚动时域 Beam Search 与动态 WIP 策略的
+> 纯逻辑实现，用于后续对照实验；当前生产 V2 的权威放行仍是
+> `ManufacturingRuntime + V2PhysicalExecutionBridge`，README 不把未接入主链的优化器
+> 宣称为已经控制 MuJoCo。
 
 <a id="benchmark"></a>
 
@@ -601,9 +634,9 @@ Qt 的“故障与恢复规划”页可以直接选择中文故障、目标和�
 | 故障 | MuJoCo 中的可见表现 | 默认恢复 |
 |---|---|---|
 | 钎料漏涂 | 黄色焊缝出现真实断口 | Arm3 检出 → Arm2 局部补涂 → 复检 |
-| 钎料偏轨 | 实际焊缝偏移并显示红色标准线 | 重规划缺陷路径并补涂 |
-| 翅片偏位 | 翅片发生真实平移或倾斜 | Arm1 重抓、重装并复检 |
-| Arm 离线 | 对应机械臂停止并变红 | 停止派工，资源恢复后继续 |
+| 钎料偏轨 | 实际焊缝偏移并显示红色标准线 | 缺陷轨迹逐段移除，Arm2 重新涂覆并复检 |
+| 翅片偏位 | 目标翅片横向偏离梳齿槽 | 原安装支路机械臂重抓、平移对准、缓降并复检 |
+| Arm 离线 | 对应机械臂停止并变红 | 保持安全状态，进入 10 秒模拟人工审核 |
 | 输送超时 | 带面停在故障位置并变红 | 所有权确认、回零、重试一次 |
 | 炉门互锁 | 炉门卡在半开位置 | 保持托盘锁定，恢复后重新检查互锁 |
 | 炉温异常 | 热区与加热管颜色变化 | 输出返工或报废分级 |
@@ -615,7 +648,7 @@ Qt 的“故障与恢复规划”页可以直接选择中文故障、目标和�
 
 | 页签 | 可以做什么 |
 |---|---|
-| 📦 **订单规划** | 选择 A/B/C、数量、优先级、交期，预览并加入普通/紧急订单 |
+| 📦 **订单规划** | 选择 A/B/C/D 或自定义产品、数量、优先级、交期，预览并加入普通/紧急订单 |
 | 🧠 **任务图 / 调度** | 查看实时 DAG、节点状态、依赖、资源和失败原因 |
 | 📐 **产品工程图规划** | 查看俯视/正视/侧视尺寸示意，导出 PNG/SVG |
 | 🚦 **资源与区域** | 查看机械臂、工具、炉体、输送和区域锁状态 |
@@ -635,13 +668,13 @@ Qt 的“故障与恢复规划”页可以直接选择中文故障、目标和�
   ↓
 ProcessPlan（产品几何 + 路径 + 工装 + 配方 + 层位）
   ↓
-TaskGraph（每张托盘独立 DAG）
+TaskGraph（每张托盘独立 DAG，ManufacturingRuntime 为唯一逻辑权威）
   ↓
 FixedSequenceScheduler / DynamicPriorityScheduler
   ↓
-SkillRegistry → Arm1 / Arm2 / Arm3 / 输送 / 炉体 actor
+SkillRegistry → V2PhysicalExecutionBridge → Arm1 / Arm2 / Arm3 / 输送 / 炉体 actor
   ↓
-事件总线 → 质量检测 → RecoveryPolicy → 在线重规划
+MuJoCo 完成证据 → 事件总线 → 质量检测 → RecoveryPolicy → 在线重规划
   ↓
 JSONL / CSV / KPI / Qt / HTTP API
 ```
@@ -739,7 +772,7 @@ mjpython brazing_line_cinematic.py --batch A
 | 接口 | 作用 |
 |---|---|
 | `GET /state` | 订单、任务、机械臂、物流、炉体、质检和 KPI |
-| `POST /order` | 启动 A/B/C 单订单 |
+| `POST /order` | 启动 A/B/C/D 单订单 |
 | `POST /orders/plan` | 校验并预览运行时订单 |
 | `POST /orders/insert` | 加入普通或紧急订单 |
 | `GET /tasks` / `/resources` / `/metrics` | 查询调度与实验状态 |
@@ -753,7 +786,7 @@ mjpython brazing_line_cinematic.py --batch A
 
 | 命令 | 作用 |
 |---|---|
-| `order_a` / `order_b` / `order_c` | 启动 A/B/C |
+| `order_a` / `order_b` / `order_c` | 启动 V1 A/B/C；V2 推荐从订单规划页或 HTTP 提交 A/B/C/D |
 | `batch_a` | 启动三件 A 型批次 |
 | `pick_place` / `arm2_motion` / `fin_assembly` | 单独播放关键工序 |
 | `inspection_1` / `inspection_2` | 单独运行两类检测 |
@@ -768,6 +801,11 @@ mjpython brazing_line_cinematic.py --batch A
 
 ## ✅ 测试与质量门槛
 
+当前支持范围的回归结果为 **618 项通过**，并额外完成 A/B/C/D 四订单真实 MuJoCo
+闭环验收、Ruff、Black、`compileall`、XML 编译与 `git diff --check`。本轮修复没有修改
+[`brazing_line_v2.xml`](scenes/production/brazing_line_v2.xml)，因此只改变订单放行、炉批
+门控和任务状态投影，不改变已经确认的物理场景布局。
+
 ```bash
 make check
 make test
@@ -780,9 +818,14 @@ make test-cinematic
 make benchmark-help
 ```
 
-测试覆盖严格 YAML、A/B/C 几何、12/24 对象池、动态喷嘴、梳齿选型、Arm1 抓取安装、
+测试覆盖严格 YAML、A/B/C/D 与自定义几何、12/24 对象池、动态喷嘴、梳齿选型、Arm1 抓取安装、
 多托盘所有权、资源互斥、炉门互锁、暂停/继续、故障恢复、Task DAG、动态调度、
 headless 完整闭环和旧入口回归。
+
+> 现行 V2 使用一个 Arm3 末端相机完成 S2B/S4 主检与 S3B 高可靠近景复核，并保留
+> 独立的炉后固定相机；已经取消的 S2B/S4 门架相机不会占用物流净空。
+> `STANDARD`、`HIGH_RELIABILITY`、`FIRST_ARTICLE` 路线和 Arm3 离线阻塞均有回归覆盖。
+> 详见 [ADR-0006](docs/adr/0006-v2-single-arm3-camera.md)。
 
 焊后质量结果：
 
