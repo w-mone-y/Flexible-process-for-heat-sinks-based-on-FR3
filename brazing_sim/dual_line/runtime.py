@@ -17,6 +17,7 @@ from ..flexible.models import ProcessPlan
 from ..recovery.fault_models import RecoveryStatus
 from .faults import V2FaultController
 from .camera_coordination import CameraCoordinationPolicy, CameraReviewReason
+from .admission import validate_v2_plan
 from .dispatch import (
     DualInstallDispatcher,
     InstallBranch,
@@ -336,10 +337,21 @@ class DualLineRuntime:
     ) -> V2OrderState:
         """Bind one validated ``ProcessPlan`` to V2 logical and physical state."""
 
-        if not 1 <= int(plan.quantity) <= 3:
-            raise ValueError("one V2 order may contain one to three units")
-        if plan.order.priority < 0:
-            raise ValueError("priority must be non-negative")
+        # Admission is deliberately before geometry/state mutation.  A custom
+        # plan always takes the full gate; preset plans do so once a physical
+        # scene is bound.  Logical-only preset tests/callers keep the cheap
+        # state-machine validation and do not repeatedly compile the full DAG.
+        if (
+            not isinstance(plan, ProcessPlan)
+            or plan.product.preset == "CUSTOM"
+            or self._execution_gate is not None
+        ):
+            validate_v2_plan(plan)
+        else:
+            if not 1 <= int(plan.quantity) <= 3:
+                raise ValueError("one V2 order may contain one to three units")
+            if plan.order.priority < 0:
+                raise ValueError("priority must be non-negative")
         if due_at is not None and not isfinite(float(due_at)):
             raise ValueError("due time must be finite")
         geometry = V2ProcessGeometry.from_plan(plan)
@@ -353,10 +365,10 @@ class DualLineRuntime:
             # validation above.
             maximum_product_height_m=V2_MAX_PRODUCT_HEIGHT_M,
         )
-        self._order_sequence += 1
-        identifier = str(plan.order.order_id).strip() or f"V2_ORDER_{self._order_sequence:03d}"
+        identifier = str(plan.order.order_id).strip() or f"V2_ORDER_{self._order_sequence + 1:03d}"
         if identifier in self.orders:
             raise ValueError(f"duplicate V2 order id: {identifier}")
+        self._order_sequence += 1
         unit_ids = tuple(f"{identifier}_UNIT_{index:02d}" for index in range(1, int(plan.quantity) + 1))
         for unit_id in unit_ids:
             self.units[unit_id] = V2UnitState(

@@ -64,18 +64,25 @@ class V2ControlSurface:
             # so a preferred layer cannot be reserved.
             ignored.append("首选料架层（V2 按装炉顺序分配层位）")
         strategy = str(command.get("route_strategy") or "").strip().upper()
-        requested_quantity = int(command.get("quantity", 1) if quantity is None else quantity)
+        raw_quantity = command.get("quantity", 1) if quantity is None else quantity
         custom_product = command.get("custom_product")
         if custom_product is not None:
             if not isinstance(custom_product, Mapping):
                 raise ValueError("V2 自定义产品参数必须是对象")
-            identifier = str(command.get("order_id") or "").strip()
-            if not identifier:
+            requested_quantity = raw_quantity
+            raw_identifier = command.get("order_id")
+            if raw_identifier is None or raw_identifier == "":
                 identifier = self.runtime.next_order_id
+            elif not isinstance(raw_identifier, str):
+                raise ValueError("V2 自定义订单ID必须是字符串")
+            else:
+                identifier = raw_identifier.strip()
+                if not identifier:
+                    identifier = self.runtime.next_order_id
             plan = build_custom_plan(
                 order_id=identifier,
                 quantity=requested_quantity,
-                priority=int(command.get("priority", 10)),
+                priority=command.get("priority", 10),
                 due_time=command.get("due_time"),
                 preferred_rack_layer=command.get("preferred_rack_layer"),
                 product=dict(custom_product),
@@ -87,6 +94,7 @@ class V2ControlSurface:
                 urgent=bool(command.get("urgent", False)),
             )
         else:
+            requested_quantity = int(raw_quantity)
             self.runtime.submit_order(
                 str(command.get("preset", "A")),
                 order_id=str(command.get("order_id") or "").strip() or None,

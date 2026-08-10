@@ -744,7 +744,6 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
                 demo_layout.addWidget(button, index // 3, index % 3)
             for index, (title, tip) in enumerate(
                 (
-                    ("AND/OR 工艺路线", "V2 物理运行时尚未消费 OR 分支；当前只允许在订单预览中查看"),
                     ("实体自动换型", "V2 换型龙门尚未接入实体执行，禁止用瞬时显隐冒充换型"),
                     ("CP-SAT / 拍卖调度", "当前 V2 使用在线最早完成分派；优化器接口完成后再开放"),
                 )
@@ -874,7 +873,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             if not selected_profile.supports_custom_orders:
                 custom_item = self.order_mode_input.model().item(1)
                 custom_item.setEnabled(False)
-                custom_item.setToolTip("当前产线未接入自定义产品执行")
+                custom_item.setToolTip("当前产线配置未启用自定义产品执行")
             self.preset_input = QComboBox()
             self.preset_input.addItems(["A", "B", "C"])
             self.quantity_input = QSpinBox()
@@ -893,10 +892,6 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             if selected_profile.profile_id == "V2_DUAL_INSTALL":
                 self.layer_input.setEnabled(False)
                 self.layer_input.setToolTip("V2 由炉前实时空层状态分配，不接受静态层位占用")
-                for index in (1, 2):
-                    item = self.route_strategy_input.model().item(index)
-                    item.setEnabled(False)
-                    item.setToolTip("该 AND/OR 路线尚未接入 V2 物理运行时，只可在柔性报告中评估")
             form.addRow("订单ID", self.order_id_input)
             form.addRow("规划模式", self.order_mode_input)
             form.addRow("产品", self.preset_input)
@@ -907,7 +902,7 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
             form.addRow("工艺路线", self.route_strategy_input)
             order_root.addWidget(form_group)
 
-            self.custom_product_group = QGroupBox("自定义产品与工艺参数（仅匹配实体模块后才允许执行）")
+            self.custom_product_group = QGroupBox("自定义产品与工艺参数（经能力、路线与物理托盘约束校验后执行）")
             custom_form = QFormLayout(self.custom_product_group)
 
             def millimetres(value: float, minimum: float, maximum: float) -> Any:

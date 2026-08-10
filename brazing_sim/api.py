@@ -425,15 +425,27 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
         from .planning import build_task_graph
 
         preset = str(payload.get("preset", "A")).strip().upper()
-        order_id = str(payload.get("order_id", f"UI_{datetime.now().strftime('%H%M%S%f')}")).strip()
-        quantity = int(payload.get("quantity", 1))
-        priority = int(payload.get("priority", 10))
+        raw_order_id = payload.get("order_id")
+        if raw_order_id is None or raw_order_id == "":
+            order_id = f"UI_{datetime.now().strftime('%H%M%S%f')}"
+        elif not isinstance(raw_order_id, str):
+            raise ValueError("订单ID必须是字符串")
+        else:
+            order_id = raw_order_id.strip()
+        mode = str(payload.get("mode", "preset")).strip().lower()
+        raw_quantity = payload.get("quantity", 1)
+        raw_priority = payload.get("priority", 10)
+        quantity = raw_quantity if mode == "custom" else int(raw_quantity)
+        priority = raw_priority if mode == "custom" else int(raw_priority)
         due_time = payload.get("due_time")
         preferred = payload.get("preferred_rack_layer")
-        if preferred in {"", "null"}:
+        if isinstance(preferred, str) and preferred in {"", "null"}:
             preferred = None
+        if mode == "custom" and preferred is not None and (
+            isinstance(preferred, bool) or not isinstance(preferred, int)
+        ):
+            raise ValueError("自定义订单首选料架层必须是0、1、2或空值")
         preferred = None if preferred is None else int(preferred)
-        mode = str(payload.get("mode", "preset")).strip().lower()
         route_strategy = str(payload.get("route_strategy", "STANDARD")).strip().upper()
         custom_product = payload.get("custom_product")
         if mode == "custom":
@@ -463,11 +475,13 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
             raise ValueError("mode must be preset or custom")
         line_profile = str(payload.get("line_profile", "")).strip().upper()
         if line_profile in {"V2", "V2_DUAL_INSTALL"}:
-            from .dual_line.process_geometry import V2ProcessGeometry
+            from .dual_line.admission import build_v2_task_graph, validate_v2_plan
 
-            V2ProcessGeometry.from_plan(plan)
+            validate_v2_plan(plan)
+            preview_graph = build_v2_task_graph(plan)
+        else:
+            preview_graph = build_task_graph(plan, flexible_cell=True)
         summary = plan.summary()
-        preview_graph = build_task_graph(plan, flexible_cell=True)
         summary["estimated_task_count"] = len(preview_graph)
         # Step A/B visibility: how much of the plan is flexible rather than
         # single-resource bound, straight from the capability-derived graph.
