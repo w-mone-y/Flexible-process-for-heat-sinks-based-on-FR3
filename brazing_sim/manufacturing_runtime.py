@@ -981,6 +981,81 @@ class ManufacturingRuntime:
             return int(request.target) == int(task.payload["layer_index"])
         return True
 
+    @staticmethod
+    def _select_capability_choice(
+        task: ManufacturingTask,
+        resource_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve an OR branch against the resource actually reserved.
+
+        The graph keeps every viable alternative so the scheduler can see the
+        real decision space. This finalizes the choice only after reservation,
+        when a resource-dependent branch becomes real.
+        """
+
+        if not task.payload.get("capability"):
+            return None
+        choices = task.payload.get("capability_choices")
+        if not isinstance(choices, list):
+            selected = task.payload.get("selected_alternative")
+            result = dict(selected) if isinstance(selected, dict) else {
+                "mode": "PRIMARY",
+                "capability": task.payload.get("capability"),
+                "cost_hint": 1.0,
+            }
+            result["selected_resource"] = str(resource_id).upper()
+            result["selection_source"] = "dispatch"
+            return result
+
+        resource = str(resource_id).upper()
+        matching: list[dict[str, Any]] = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            if any(
+                isinstance(candidate, dict)
+                and str(candidate.get("resource_id", "")).upper() == resource
+                for candidate in choice.get("candidates", ())
+            ):
+                matching.append(choice)
+        if not matching:
+            selected = task.payload.get("selected_alternative")
+            if not isinstance(selected, dict):
+                return None
+            matching = [selected]
+
+        def choice_key(choice: dict[str, Any]) -> tuple[float, float, str]:
+            candidates = [
+                candidate
+                for candidate in choice.get("candidates", ())
+                if isinstance(candidate, dict)
+                and str(candidate.get("resource_id", "")).upper() == resource
+            ]
+            duration = min(
+                (float(candidate.get("duration", float("inf"))) for candidate in candidates),
+                default=float(choice.get("duration", float("inf"))),
+            )
+            return (
+                float(choice.get("cost_hint", 1.0)) * duration,
+                duration,
+                str(choice.get("mode", "PRIMARY")),
+            )
+
+        selected = dict(min(matching, key=choice_key))
+        selected_candidates = [
+            candidate
+            for candidate in selected.get("candidates", ())
+            if isinstance(candidate, dict)
+            and str(candidate.get("resource_id", "")).upper() == resource
+        ]
+        if selected_candidates:
+            selected["duration"] = min(
+                float(candidate.get("duration", 0.0)) for candidate in selected_candidates
+            )
+        selected["selected_resource"] = resource
+        selected["selection_source"] = "dispatch"
+        return selected
+
     def arm_manual_fault(
         self,
         fault_type: FaultType | str,
@@ -1250,6 +1325,10 @@ class ManufacturingRuntime:
                 continue
             try:
                 task.reserve(assignment.resource_id)
+                capability_choice = self._select_capability_choice(task, assignment.resource_id)
+                if capability_choice is not None:
+                    task.payload["selected_alternative"] = capability_choice
+                    task.payload["selected_duration_s"] = capability_choice.get("duration")
                 self.events.publish(
                     EventType.TASK_RESERVED,
                     sim_time=timestamp,
@@ -1269,12 +1348,31 @@ class ManufacturingRuntime:
                     except (KeyError, ValueError):
                         pass
                 self.resources.mark_busy(assignment.resource_id, task.task_id, timestamp)
-                self.assignment_history.append({"sim_time": timestamp, **assignment.as_dict()})
+                assignment_record = {"sim_time": timestamp, **assignment.as_dict()}
+                if capability_choice is not None:
+                    assignment_record.update(
+                        {
+                            "capability": capability_choice.get("capability"),
+                            "capability_mode": capability_choice.get("mode"),
+                            "route_strategy": task.payload.get("route_strategy"),
+                        }
+                    )
+                self.assignment_history.append(assignment_record)
                 self.events.publish(
                     EventType.TASK_STARTED,
                     sim_time=timestamp,
                     source=assignment.resource_id,
-                    payload={"task_id": task.task_id, "task_type": task.task_type.value},
+                    payload={
+                        "task_id": task.task_id,
+                        "task_type": task.task_type.value,
+                        "route_strategy": task.payload.get("route_strategy"),
+                        "capability": None
+                        if capability_choice is None
+                        else capability_choice.get("capability"),
+                        "capability_mode": None
+                        if capability_choice is None
+                        else capability_choice.get("mode"),
+                    },
                 )
             except Exception as exc:
                 self._abort_cell_state(task)

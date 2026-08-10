@@ -8,8 +8,11 @@
 其中 12 项是 A/B/C × 1/3 件 × V1/V2 拓扑的**图等价性**断言：数据驱动构图
 必须与重构前手写 DAG 完全一致（节点集、依赖边、区域、节拍、资源绑定）。
 
-V1 行为不变；V2 独立运行时（`brazing_sim/dual_line/`）本阶段未接入，
-仍由其自有拓扑逻辑运行。
+V1 行为不变；V2 统一运行时（`brazing_sim/dual_line/`）已接入同一份
+AND/OR 能力选择：任务在实际资源预留后确定 OR 分支，选择沿 V2 bridge
+进入物理技能、事件快照和 UI。V2 场景当前仍按 `V2_DUAL_INSTALL_PROFILE`
+禁用 `FIXED_GANTRY`，因为生产 XML 没有独立的焊料固定视觉执行器；该分支
+会保留在候选/拒绝原因中，不会被伪装成可执行资源。
 
 ## Problem
 
@@ -121,6 +124,13 @@ ARM3 被排除：资源 ARM3：参数 fin_pitch_m=0.04 超出该资源许可范�
 
 `GET /orders/plan` 的 `capability_summary` 给出 `flexible_task_count`
 （候选数 >1 的节点数），即调度器真实决策空间的规模。步骤 B 之前该值恒为 0。
+
+V2 的延迟绑定在 `ManufacturingRuntime` 的实际资源预留点完成，结果写入
+`selected_alternative`。`V2PhysicalExecutionBridge` 将能力模式与资源许可
+一起交给 `DualLineRuntime`；因此 `DUAL_NOZZLE` / `SINGLE_TWO_PASS` 会改变
+Arm2 的物理路径，`HIGH_RELIABILITY` / `FIRST_ARTICLE` 会在同一套 Arm3
+相机协调、S3B 近景复核和状态/UI 中保持一致。Arm3 检测优先与已开始的单片
+安装不可抢占约束仍由 V2 物理运行时的单一 `_start` 入口执行。
 
 ## 关键取舍
 

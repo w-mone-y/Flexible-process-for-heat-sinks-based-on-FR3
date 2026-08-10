@@ -259,6 +259,19 @@ class ProcessPlanTaskGraphBuilder:
         self._sequence += 1
         resources = list(resources)
         payload = dict(payload or {})
+        payload.setdefault("route_strategy", plan.route_strategy.value)
+        if route_phase is not None:
+            payload.setdefault("route_phase", route_phase)
+        if task_type is TaskType.REVIEW_BRAZING_CLOSEUP:
+            payload.setdefault("route_branch", "S3B_CLOSEUP")
+            payload.setdefault("capability", "VISUAL_INSPECTION_BRAZING")
+            payload.setdefault("capability_params", {"path_count": len(plan.brazing_paths)})
+            payload.setdefault("non_preemptive", True)
+        elif task_type is TaskType.REVIEW_FINS_CLOSEUP:
+            payload.setdefault("route_branch", "S3B_CLOSEUP")
+            payload.setdefault("capability", "VISUAL_INSPECTION_FINS")
+            payload.setdefault("capability_params", {"fin_count": len(plan.fin_targets)})
+            payload.setdefault("non_preemptive", True)
         duration: float | None = None
 
         if unit_index is not None:
@@ -271,6 +284,9 @@ class ProcessPlanTaskGraphBuilder:
                     payload,
                     task_id=task_id,
                 )
+                selected = payload.get("selected_alternative")
+                if isinstance(selected, dict) and isinstance(selected.get("duration"), (int, float)):
+                    duration = float(selected["duration"])
         return ManufacturingTask(
             task_id=task_id,
             task_type=task_type,
@@ -325,13 +341,31 @@ class ProcessPlanTaskGraphBuilder:
             base_duration=operation.nominal_duration,
         )
         alternatives: dict[str, Any] = {}
+        choices: list[dict[str, Any]] = []
         if operation.alternatives:
-            for mode, result in self.binder.bind_alternatives(operation.alternatives).items():
+            bound_alternatives = self.binder.bind_alternatives(operation.alternatives)
+            for option in operation.alternatives:
+                mode = str(option.mode)
+                result = bound_alternatives[mode]
                 alternatives[mode] = result.as_dict()
+                choices.append(
+                    {
+                        "mode": mode,
+                        "capability": option.capability,
+                        "cost_hint": float(option.cost_hint),
+                        "params": dict(option.params),
+                        "nominal_duration": float(option.nominal_duration),
+                        "candidates": [item.as_dict() for item in result.candidates],
+                        "rejected": [
+                            {"resource_id": key, "reason": value}
+                            for key, value in result.rejected
+                        ],
+                    }
+                )
             payload["capability_alternatives"] = alternatives
 
         candidates = list(binding.resource_ids)
-        if not candidates:
+        if not candidates and not any(choice["candidates"] for choice in choices):
             # Never silently widen or empty the candidate set: keep the authored
             # binding and record why capability binding produced nothing.
             payload["capability_binding_warning"] = (
@@ -348,6 +382,60 @@ class ProcessPlanTaskGraphBuilder:
             payload["capability_rejected"] = [
                 {"resource_id": key, "reason": value} for key, value in binding.rejected
             ]
+        if operation.alternatives:
+            # The explicit alternatives are the dispatch decision space.  Keep
+            # the authored primary capability as a choice too when the routing
+            # author did not repeat it in the OR list; this makes fallback
+            # selection work for both forms of route declaration.
+            if not any(choice["capability"] == operation.capability for choice in choices):
+                choices.insert(
+                    0,
+                    {
+                        "mode": "PRIMARY",
+                        "capability": operation.capability,
+                        "cost_hint": 1.0,
+                        "params": dict(operation.params),
+                        "nominal_duration": float(operation.nominal_duration),
+                        "candidates": [item.as_dict() for item in binding.candidates],
+                        "rejected": [
+                            {"resource_id": key, "reason": value}
+                            for key, value in binding.rejected
+                        ],
+                    },
+                )
+            payload["capability_choices"] = choices
+            # A route can fall back to an alternative when its primary
+            # capability is unavailable.  The scheduler still sees every
+            # viable branch and makes the final choice after reservation.
+            candidates = sorted(
+                {
+                    str(candidate["resource_id"]).upper()
+                    for choice in choices
+                    for candidate in choice["candidates"]
+                }
+            )
+            viable = [choice for choice in choices if choice["candidates"]]
+            if viable:
+                selected = min(
+                    viable,
+                    key=lambda choice: (
+                        float(choice["cost_hint"])
+                        * min(float(item["duration"]) for item in choice["candidates"]),
+                        float(choice["cost_hint"]),
+                        min(float(item["duration"]) for item in choice["candidates"]),
+                        str(choice["mode"]),
+                    ),
+                )
+                selected_candidate = min(
+                    selected["candidates"],
+                    key=lambda item: (float(item["duration"]), str(item["resource_id"])),
+                )
+                payload["selected_alternative"] = {
+                    **selected,
+                    "selected_resource": str(selected_candidate["resource_id"]).upper(),
+                    "duration": float(selected_candidate["duration"]),
+                    "selection_source": "planning_default",
+                }
         self._binding_snapshots.append({"task_id": task_id, "fallback": False, **binding.as_dict()})
         return candidates, payload
 
@@ -857,8 +945,7 @@ class ProcessPlanTaskGraphBuilder:
             # view at S1 before the pallet is released to the first slide.
             transfer_12_predecessor = items["PLACE_BASE"].task_id
             high_reliability = (
-                not self.flexible_cell
-                and not self.camera_coordination
+                not self.camera_coordination
                 and self._uses_high_reliability_route(plan, index)
             )
             if high_reliability:
@@ -1045,8 +1132,7 @@ class ProcessPlanTaskGraphBuilder:
             graph.add_task(inspect)
             route_predecessor = inspect.task_id
             high_reliability = (
-                not self.flexible_cell
-                and not self.camera_coordination
+                not self.camera_coordination
                 and self._uses_high_reliability_route(plan, assignment.unit_index)
             )
             if high_reliability:

@@ -107,6 +107,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         self.runtime = runtime
         self.physical_gate: RuntimeExecutionGate | None = None
         self._permits: dict[tuple[str, str], dict[str, str]] = {}
+        self._operation_choices: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
         self._task_permits: dict[str, set[tuple[str, str]]] = {}
 
     def bind_physical_gate(self, gate: RuntimeExecutionGate | None) -> None:
@@ -126,9 +127,16 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
 
     def authorize(self, task: ManufacturingTask, resource_id: str) -> None:
         keys: set[tuple[str, str]] = set()
+        selected = task.payload.get("selected_alternative")
+        choice = dict(selected) if isinstance(selected, dict) else {
+            "mode": "PRIMARY",
+            "capability": task.payload.get("capability"),
+        }
+        choice["selected_resource"] = str(resource_id).upper()
         for kind in _OPERATION_PERMITS.get(task.task_type, ()):
             key = (task.unit_id, kind)
             self._permits.setdefault(key, {})[task.task_id] = resource_id
+            self._operation_choices.setdefault(key, {})[task.task_id] = choice
             keys.add(key)
         self._task_permits[task.task_id] = keys
 
@@ -138,8 +146,34 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             if holders is None:
                 continue
             holders.pop(task_id, None)
+            choices = self._operation_choices.get(key)
+            if choices is not None:
+                choices.pop(task_id, None)
+                if not choices:
+                    self._operation_choices.pop(key, None)
             if not holders:
                 self._permits.pop(key, None)
+
+    def operation_route_metadata(self, resource: str, unit_id: str, kind: str) -> dict[str, Any]:
+        """Return the route choice for the latest permit held by a resource."""
+
+        key = (str(unit_id), str(kind))
+        holders = self._permits.get(key, {})
+        choices = self._operation_choices.get(key, {})
+        resource_name = str(resource).upper()
+        for task_id, holder in reversed(tuple(holders.items())):
+            if str(holder).upper() == resource_name:
+                selected = choices.get(task_id)
+                if selected is not None:
+                    return dict(selected)
+        return {}
+
+    def reset(self) -> None:
+        """Drop scheduled permits together with the physical runtime reset."""
+
+        self._permits.clear()
+        self._operation_choices.clear()
+        self._task_permits.clear()
 
     def tray_ready(self, tray_id: str, owner: TrayOwner) -> bool:
         if self.physical_gate is None:
@@ -623,6 +657,7 @@ class UnifiedV2Runtime:
         self.manufacturing_runtime.resume(self.sim_time)
 
     def reset(self) -> None:
+        self.bridge.reset()
         self.physical_runtime.reset()
         self.manufacturing_runtime.reset(self.sim_time)
         self.physical_runtime.set_execution_gate(self.bridge)

@@ -231,6 +231,11 @@ def task_detail_label_zh(task: Mapping[str, Any]) -> str:
             detail = f"共{len(path_ids)}条钎料路径"
         else:
             detail = "钎料路径"
+        if task_type is TaskType.DISPENSE_BRAZING:
+            selected = payload.get("selected_alternative", {})
+            mode = selected.get("mode") if isinstance(selected, Mapping) else ""
+            if mode:
+                detail = f"{detail} · {'单喷嘴两遍涂覆' if mode == 'SINGLE_TWO_PASS' else '双喷嘴连续涂覆'}"
     elif task_type is TaskType.CONFIGURE_COMB:
         module = str(payload.get("comb_module_name", ""))
         spacing = "".join(character for character in module if character.isdigit())
@@ -268,7 +273,19 @@ def task_detail_label_zh(task: Mapping[str, Any]) -> str:
     elif task_type is TaskType.SECOND_POST_BRAZE_VIEW:
         detail = "高可靠路线 · 侧视检测"
     elif task_type is TaskType.REVIEW_FINS_CLOSEUP:
-        detail = "高可靠路线 · S3B翅片近景复核"
+        strategy = str(payload.get("route_strategy", "HIGH_RELIABILITY"))
+        route_label = {
+            "FIRST_ARTICLE": "首件高可靠路线",
+            "HIGH_RELIABILITY": "高可靠路线",
+        }.get(strategy, strategy)
+        detail = f"{route_label} · S3B翅片近景复核"
+    if task_type is TaskType.REVIEW_BRAZING_CLOSEUP:
+        strategy = str(payload.get("route_strategy", "HIGH_RELIABILITY"))
+        route_label = {
+            "FIRST_ARTICLE": "首件高可靠路线",
+            "HIGH_RELIABILITY": "高可靠路线",
+        }.get(strategy, strategy)
+        detail = f"{route_label} · S3B焊料近景复核"
     elif task_type is TaskType.APPLY_PRESS:
         force = payload.get("target_force_n")
         detail = f"目标夹紧力{float(force):g}牛" if isinstance(force, (int, float)) else "订单目标夹紧力"

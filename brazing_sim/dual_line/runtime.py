@@ -147,6 +147,9 @@ class _Operation:
     remaining_s: float
     started_at: float
     duration_s: float
+    route_mode: str = "PRIMARY"
+    capability: str = ""
+    route_phase: str = ""
     recovery: bool = False
     recovery_strategy: str = ""
     recovery_fault_type: str = ""
@@ -528,6 +531,30 @@ class DualLineRuntime:
         # check here makes ``_start`` the single physical dispatch choke point.
         if not self._operation_start_allowed(resource, unit, kind):
             return False
+        route_metadata: dict[str, Any] = {}
+        metadata_callback = (
+            None
+            if self._execution_gate is None
+            else getattr(self._execution_gate, "operation_route_metadata", None)
+        )
+        if callable(metadata_callback):
+            candidate = metadata_callback(resource, unit.unit_id, kind)
+            if isinstance(candidate, dict):
+                route_metadata = candidate
+        route_mode = str(route_metadata.get("mode") or "PRIMARY")
+        capability = str(route_metadata.get("capability") or "")
+        route_phase = (
+            "S3B_CLOSEUP"
+            if self.camera_review_required(unit.unit_id, kind)
+            else {
+                "MATERIAL_INSPECTION": "S2B_PRIMARY",
+                "PRE_BRAZE_INSPECTION": "S4_PRIMARY",
+            }.get(kind, kind)
+        )
+        if kind == "DISPENSING" and route_mode == "SINGLE_TWO_PASS":
+            # The configured single-nozzle alternative is a real slower
+            # physical route, not merely a scheduler label.
+            duration = float(duration) * 1.8
         # A unit carrying pending rework performs the next operation at rework
         # effort, then the surcharge is consumed.
         recovery_work = self._rework_effort.pop(unit.unit_id, None)
@@ -561,6 +588,9 @@ class DualLineRuntime:
             remaining_s=float(duration),
             started_at=self.sim_time,
             duration_s=float(duration),
+            route_mode=route_mode,
+            capability=capability,
+            route_phase=route_phase,
             recovery=recovery,
             recovery_strategy="" if recovery_work is None else recovery_work.strategy,
             recovery_fault_type="" if recovery_work is None else recovery_work.fault_type,
@@ -568,7 +598,16 @@ class DualLineRuntime:
         )
         if self.camera_review_required(unit.unit_id, kind):
             self._start_camera_review(unit, kind)
-        self._event("OPERATION_STARTED", resource=resource, unit_id=unit.unit_id, kind=kind)
+        self._event(
+            "OPERATION_STARTED",
+            resource=resource,
+            unit_id=unit.unit_id,
+            kind=kind,
+            route_strategy=unit.route_strategy,
+            route_mode=route_mode,
+            capability=capability,
+            route_phase=route_phase,
+        )
         return True
 
     def _resource_available_at(self, resource: str) -> float:
@@ -824,6 +863,10 @@ class DualLineRuntime:
             resource=operation.resource,
             unit_id=unit.unit_id,
             kind=operation.kind,
+            route_strategy=unit.route_strategy,
+            route_mode=operation.route_mode,
+            capability=operation.capability,
+            route_phase=operation.route_phase,
         )
         if operation.kind == "BASE_LOADING":
             self._set_stage(unit, UnitStage.WAITING_S2A)
@@ -2068,11 +2111,36 @@ class DualLineRuntime:
             "orders": [order.as_dict(self.units) for order in self.orders.values()],
             "completed_orders": completed_orders,
             "units": [unit.as_dict() for unit in self.units.values()],
+            "route_execution": {
+                "units": [
+                    {
+                        "unit_id": unit.unit_id,
+                        "route_strategy": unit.route_strategy,
+                        "install_branch": None if unit.branch is None else unit.branch.value,
+                        "camera_review_required": self._camera_review_reason(unit) is not None,
+                    }
+                    for unit in self.units.values()
+                ],
+                "active_operations": [
+                    {
+                        "resource": operation.resource,
+                        "unit_id": operation.unit_id,
+                        "kind": operation.kind,
+                        "route_mode": operation.route_mode,
+                        "capability": operation.capability,
+                        "route_phase": operation.route_phase,
+                    }
+                    for operation in self.operations.values()
+                ],
+            },
             "trays": tray_states,
             "operations": {
                 resource: {
                     "unit_id": operation.unit_id,
                     "kind": operation.kind,
+                    "route_mode": operation.route_mode,
+                    "capability": operation.capability,
+                    "route_phase": operation.route_phase,
                     "remaining_s": max(0.0, operation.remaining_s),
                     "duration_s": operation.duration_s,
                     "started_at": operation.started_at,
