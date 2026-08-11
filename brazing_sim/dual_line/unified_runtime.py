@@ -412,6 +412,19 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
     def task_dispatch_allowed(self, task: ManufacturingTask) -> tuple[bool, str]:
         """Apply physical WIP/batch feasibility before resource reservation."""
 
+        if task.task_type is TaskType.PICK_BASE_PLATE:
+            selected = self.runtime.next_release_unit_id()
+            if selected is not None:
+                allowed = selected == task.unit_id
+                return allowed, ("" if allowed else "等待遗传算法选择的V2订单进入S1")
+        if task.task_type is TaskType.DISPENSE_BRAZING and self.runtime.optimizer_mode == "GENETIC":
+            # The global task scheduler can see a downstream dispense node as
+            # ready before the selected unit has physically handed its tray to
+            # S2A.  Do not let that task reserve Arm2 and block the unit that
+            # is already occupying S2A under the GA release order.
+            unit = self.runtime.units.get(task.unit_id)
+            allowed = bool(unit is not None and unit.stage is UnitStage.DISPENSING)
+            return allowed, ("" if allowed else "等待托盘完成S1至S2A物理交接")
         if task.task_type is TaskType.LOAD_RACK_LAYER:
             position = self.runtime._furnace_load_position
             queue = self.runtime._furnace_load_queue
@@ -481,8 +494,18 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
 class UnifiedV2Runtime:
     """Compatibility facade: one manufacturing authority, one V2 physical adapter."""
 
-    def __init__(self, *, fast: bool = False) -> None:
-        self.physical_runtime = DualLineRuntime(fast=fast)
+    def __init__(
+        self,
+        *,
+        fast: bool = False,
+        optimizer: str = "RULE",
+        genetic_seed: int = 42,
+    ) -> None:
+        self.physical_runtime = DualLineRuntime(
+            fast=fast,
+            optimizer=optimizer,
+            genetic_seed=genetic_seed,
+        )
         self.bridge = V2PhysicalExecutionBridge(self.physical_runtime)
         self.physical_runtime.set_execution_gate(self.bridge)
         self.manufacturing_runtime = ManufacturingRuntime(

@@ -15,16 +15,17 @@ from typing import Any, Protocol
 from ..flexible import build_inline_plan
 from ..flexible.models import ProcessPlan
 from ..recovery.fault_models import RecoveryStatus
-from .faults import V2FaultController
-from .camera_coordination import CameraCoordinationPolicy, CameraReviewReason
 from .admission import validate_v2_plan
+from .camera_coordination import CameraCoordinationPolicy, CameraReviewReason
 from .dispatch import (
     DualInstallDispatcher,
     InstallBranch,
     InstallRequest,
     InstallResourceState,
 )
+from .faults import V2FaultController
 from .furnace import BatchRecipe, FurnacePhase, ThroughBatchFurnace
+from .optimization import GeneticReleasePlanner, ReleaseCandidate, ReleasePlan
 from .process_geometry import V2_MAX_PRODUCT_HEIGHT_M, V2ProcessGeometry
 from .topology import DualLineTopology
 from .tray_flow import TrayFlowController, TrayOwner, TrayPhase
@@ -232,8 +233,15 @@ _STAGE_ORDER: dict[UnitStage, int] = {stage: index for index, stage in enumerate
 class DualLineRuntime:
     """Asynchronous six-tray runtime with shared Arm3 and a batch furnace."""
 
-    def __init__(self, *, fast: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fast: bool = False,
+        optimizer: str = "RULE",
+        genetic_seed: int = 42,
+    ) -> None:
         self.fast = bool(fast)
+        self.optimizer_mode = self._normalize_optimizer(optimizer)
         self.topology = DualLineTopology.standard()
         topology_errors = self.topology.validate()
         if topology_errors:
@@ -250,6 +258,9 @@ class DualLineRuntime:
             nominal_max_wait_seconds=600.0,
         )
         self.durations = _Durations.for_mode(fast)
+        self.genetic_planner = (
+            GeneticReleasePlanner(seed=int(genetic_seed)) if self.optimizer_mode == "GENETIC" else None
+        )
         self.orders: dict[str, V2OrderState] = {}
         self.units: dict[str, V2UnitState] = {}
         self.operations: dict[str, _Operation] = {}
@@ -279,6 +290,18 @@ class DualLineRuntime:
         # unit_id -> duration multiplier for its next operation (rework surcharge)
         self._rework_effort: dict[str, _RecoveryWork] = {}
         self._execution_gate: RuntimeExecutionGate | None = None
+        self._genetic_queue_signature: tuple[tuple[object, ...], ...] | None = None
+        self._genetic_release_plan: ReleasePlan | None = None
+        self._last_release_family: str | None = None
+
+    @staticmethod
+    def _normalize_optimizer(value: str) -> str:
+        mode = str(value).strip().upper()
+        aliases = {"DEFAULT": "RULE", "RULE": "RULE", "GA": "GENETIC", "GENETIC": "GENETIC"}
+        mode = aliases.get(mode, mode)
+        if mode not in {"RULE", "GENETIC"}:
+            raise ValueError("V2 optimizer must be rule or genetic")
+        return mode
 
     def set_execution_gate(self, gate: RuntimeExecutionGate | None) -> None:
         """Bind physical readiness feedback, or restore logical-only mode."""
@@ -1010,6 +1033,70 @@ class DualLineRuntime:
                 self._furnace_load_queue = []
                 self._event("FURNACE_BATCH_COMPLETED", **record)
 
+    @staticmethod
+    def _genetic_family(unit: V2UnitState) -> str:
+        return unit.comb_module or unit.product_id or unit.preset
+
+    def _genetic_flow_estimate(self, unit: V2UnitState) -> float:
+        return (
+            self.durations.base_load
+            + self.durations.dispensing
+            + self.durations.material_inspection
+            + unit.fin_count * min(self.durations.arm1_fin, self.durations.arm3_fin)
+            + self.durations.merge
+            + self.durations.pre_braze_inspection
+            + self.durations.furnace_transfer
+        )
+
+    def _genetic_candidates(self, queued: list[V2UnitState]) -> tuple[ReleaseCandidate, ...]:
+        return tuple(
+            ReleaseCandidate(
+                order_id=unit.order_id,
+                unit_id=unit.unit_id,
+                family=self._genetic_family(unit),
+                priority=unit.priority,
+                urgent=unit.urgent,
+                inserted_at=unit.stage_started_at,
+                due_at=unit.due_at,
+                estimated_flow_s=self._genetic_flow_estimate(unit),
+            )
+            for unit in queued
+        )
+
+    def _ensure_genetic_release_plan(self) -> ReleasePlan | None:
+        if self.genetic_planner is None:
+            return None
+        queued = self._waiting_units(UnitStage.QUEUED)
+        signature = tuple(
+            (
+                unit.unit_id,
+                unit.order_id,
+                unit.comb_module,
+                unit.priority,
+                unit.urgent,
+                unit.due_at,
+                unit.fin_count,
+            )
+            for unit in queued
+        )
+        if signature != self._genetic_queue_signature:
+            self._genetic_queue_signature = signature
+            self._genetic_release_plan = self.genetic_planner.plan(
+                self._genetic_candidates(queued),
+                now=self.sim_time,
+                current_family=self._last_release_family,
+            )
+            self._event("GENETIC_RELEASE_PLAN", **self._genetic_release_plan.as_dict())
+        return self._genetic_release_plan
+
+    def next_release_unit_id(self) -> str | None:
+        """Return the V2 unit allowed to enter S1 under the selected policy."""
+
+        if self.optimizer_mode != "GENETIC":
+            return None
+        plan = self._ensure_genetic_release_plan()
+        return None if plan is None or not plan.unit_ids else plan.unit_ids[0]
+
     def _advance_operations(self, dt: float) -> None:
         arm1_installing = (
             operation := self.operations.get("ARM1")
@@ -1114,9 +1201,13 @@ class DualLineRuntime:
         if not queued:
             return False
         unit = queued[0]
+        if self.optimizer_mode == "GENETIC":
+            selected_id = self.next_release_unit_id()
+            unit = next((item for item in queued if item.unit_id == selected_id), unit)
         tray = self.flow.assign_order(unit.order_id, unit.unit_id, now=self.sim_time)
         unit.tray_id = tray.tray_id
         self._set_stage(unit, UnitStage.BASE_LOADING)
+        self._last_release_family = self._genetic_family(unit)
         return True
 
     def _dispatch_transfers(self) -> bool:
@@ -2093,6 +2184,11 @@ class DualLineRuntime:
         self.faults.reset()
         self.camera_coordination.reset()
         self._rework_effort.clear()
+        if self.genetic_planner is not None:
+            self.genetic_planner.reset()
+        self._genetic_queue_signature = None
+        self._genetic_release_plan = None
+        self._last_release_family = None
 
     def snapshot(self) -> dict[str, Any]:
         completed_orders = [
@@ -2109,6 +2205,14 @@ class DualLineRuntime:
         return {
             "schema_version": 2,
             "line": "V2_DUAL_INSTALL",
+            "optimization": {
+                "mode": self.optimizer_mode,
+                "planner": None if self.genetic_planner is None else self.genetic_planner.snapshot(),
+                "last_release_plan": (
+                    None if self._genetic_release_plan is None else self._genetic_release_plan.as_dict()
+                ),
+                "last_release_family": self._last_release_family,
+            },
             # The independent V2 line now gates runtime progress on physical
             # carriers, solved robot paths, tool ownership and constrained
             # in-flight workpiece proxies. It remains a rehearsal because

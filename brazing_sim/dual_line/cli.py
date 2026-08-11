@@ -31,6 +31,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="comma-separated A/B/C/D presets; omitted viewer sessions start idle",
     )
     parser.add_argument("--fast", action="store_true", help="shorten upstream demo operations")
+    parser.add_argument(
+        "--optimizer",
+        choices=("rule", "genetic"),
+        default="rule",
+        help="V2订单释放策略（默认规则调度）",
+    )
+    parser.add_argument("--genetic-seed", type=int, default=42, help="V2遗传算法随机种子")
     parser.add_argument("--max-sim-time", type=float, default=300.0)
     parser.add_argument("--dt", type=float, default=0.05)
     parser.add_argument("--xml", default=str(DEFAULT_V2_XML))

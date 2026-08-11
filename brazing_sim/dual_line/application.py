@@ -244,7 +244,11 @@ class V2BrazingApplication:
             # avoiding 25 substeps for every 50 ms application tick.  Viewer
             # sessions retain the authored 2 ms physics step.
             self.scene.model.opt.timestep = min(0.010, float(args.dt))
-        self.runtime = UnifiedV2Runtime(fast=bool(args.fast))
+        self.runtime = UnifiedV2Runtime(
+            fast=bool(args.fast),
+            optimizer=str(getattr(args, "optimizer", "rule")),
+            genetic_seed=int(getattr(args, "genetic_seed", 42)),
+        )
         self.controls = V2ControlSurface(self.runtime)
         self.presenter = V2StatePresenter()
         self.shared = SharedState()

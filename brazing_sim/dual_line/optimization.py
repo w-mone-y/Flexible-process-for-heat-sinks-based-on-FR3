@@ -7,10 +7,11 @@ interlocks and physical completion remain authoritative in the runtimes.
 
 from __future__ import annotations
 
+import random
+from collections.abc import Iterable
 from dataclasses import dataclass
 from math import isfinite
 from time import perf_counter
-from typing import Iterable
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +34,16 @@ class ReleasePlan:
     timed_out: bool
     fallback_used: bool
     explanation_zh: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "unit_ids": list(self.unit_ids),
+            "cost": self.cost,
+            "explored": self.explored,
+            "timed_out": self.timed_out,
+            "fallback_used": self.fallback_used,
+            "explanation_zh": self.explanation_zh,
+        }
 
 
 class RollingHorizonBeamPlanner:
@@ -144,6 +155,188 @@ class RollingHorizonBeamPlanner:
         )
 
 
+class GeneticReleasePlanner:
+    """Deterministic GA for V2 order-release permutations.
+
+    The chromosome is only a permutation of already admitted V2 units.  It
+    cannot create an unsafe task, bypass a furnace constraint, or change a
+    physical trajectory; the V2 runtime remains the feasibility authority.
+    """
+
+    def __init__(
+        self,
+        *,
+        population_size: int = 24,
+        generations: int = 20,
+        mutation_rate: float = 0.2,
+        elite_count: int = 2,
+        seed: int = 42,
+        lateness_weight: float = 3.0,
+        priority_weight: float = 0.1,
+        family_change_cost: float = 8.0,
+        urgent_delay_cost: float = 1000.0,
+    ) -> None:
+        if population_size < 2 or generations < 1 or not 1 <= elite_count < population_size:
+            raise ValueError("invalid genetic planner population or generation limits")
+        if not 0.0 <= mutation_rate <= 1.0:
+            raise ValueError("mutation_rate must be between 0 and 1")
+        if min(lateness_weight, priority_weight, family_change_cost, urgent_delay_cost) < 0.0:
+            raise ValueError("genetic planner weights must be non-negative")
+        self.population_size = int(population_size)
+        self.generations = int(generations)
+        self.mutation_rate = float(mutation_rate)
+        self.elite_count = int(elite_count)
+        self.seed = int(seed)
+        self.lateness_weight = float(lateness_weight)
+        self.priority_weight = float(priority_weight)
+        self.family_change_cost = float(family_change_cost)
+        self.urgent_delay_cost = float(urgent_delay_cost)
+        self._plan_count = 0
+
+    def reset(self) -> None:
+        self._plan_count = 0
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "mode": "GENETIC_RELEASE",
+            "population_size": self.population_size,
+            "generations": self.generations,
+            "mutation_rate": self.mutation_rate,
+            "elite_count": self.elite_count,
+            "seed": self.seed,
+            "plan_count": self._plan_count,
+        }
+
+    @staticmethod
+    def _ids(sequence: tuple[ReleaseCandidate, ...]) -> tuple[str, ...]:
+        return tuple(item.unit_id for item in sequence)
+
+    def _cost(
+        self,
+        sequence: tuple[ReleaseCandidate, ...],
+        *,
+        now: float,
+        current_family: str | None,
+    ) -> float:
+        cursor = float(now)
+        family = current_family
+        total = 0.0
+        remaining_weight = len(sequence)
+        for index, candidate in enumerate(sequence):
+            change = 0.0 if family in {None, candidate.family} else self.family_change_cost
+            finish = cursor + max(0.01, candidate.estimated_flow_s) + change
+            lateness = 0.0 if candidate.due_at is None else max(0.0, finish - candidate.due_at)
+            urgent_delay = self.urgent_delay_cost * index if candidate.urgent else 0.0
+            priority_credit = self.priority_weight * remaining_weight * candidate.priority
+            total += finish + self.lateness_weight * lateness + urgent_delay - priority_credit
+            cursor = finish
+            family = candidate.family
+            remaining_weight -= 1
+        return total
+
+    @staticmethod
+    def _ordered_crossover(
+        first: tuple[ReleaseCandidate, ...],
+        second: tuple[ReleaseCandidate, ...],
+        rng: random.Random,
+    ) -> tuple[ReleaseCandidate, ...]:
+        if len(first) < 2:
+            return first
+        left, right = sorted(rng.sample(range(len(first)), 2))
+        child: list[ReleaseCandidate | None] = [None] * len(first)
+        child[left : right + 1] = first[left : right + 1]
+        used = {item.unit_id for item in child if item is not None}
+        fill = [item for item in second if item.unit_id not in used]
+        cursor = (right + 1) % len(child)
+        for item in fill:
+            while child[cursor] is not None:
+                cursor = (cursor + 1) % len(child)
+            child[cursor] = item
+        return tuple(item for item in child if item is not None)
+
+    def _mutate(
+        self,
+        sequence: tuple[ReleaseCandidate, ...],
+        rng: random.Random,
+    ) -> tuple[ReleaseCandidate, ...]:
+        if len(sequence) < 2 or rng.random() >= self.mutation_rate:
+            return sequence
+        left, right = rng.sample(range(len(sequence)), 2)
+        values = list(sequence)
+        values[left], values[right] = values[right], values[left]
+        return tuple(values)
+
+    @staticmethod
+    def _tournament(
+        population: list[tuple[ReleaseCandidate, ...]],
+        scores: dict[tuple[str, ...], float],
+        rng: random.Random,
+    ) -> tuple[ReleaseCandidate, ...]:
+        size = min(3, len(population))
+        contenders = [population[rng.randrange(len(population))] for _ in range(size)]
+        return min(
+            contenders,
+            key=lambda item: (scores[GeneticReleasePlanner._ids(item)], GeneticReleasePlanner._ids(item)),
+        )
+
+    def plan(
+        self,
+        values: Iterable[ReleaseCandidate],
+        *,
+        now: float,
+        current_family: str | None,
+    ) -> ReleasePlan:
+        plan_index = self._plan_count
+        self._plan_count += 1
+        candidates = RollingHorizonBeamPlanner.fallback_rank(values, now)
+        if not candidates:
+            return ReleasePlan((), 0.0, 0, False, False, "当前无可释放订单")
+        if len(candidates) == 1:
+            return ReleasePlan(
+                (candidates[0].unit_id,),
+                self._cost(candidates, now=now, current_family=current_family),
+                1,
+                False,
+                False,
+                "遗传算法候选仅有一个单元，直接释放",
+            )
+
+        rng = random.Random(self.seed + plan_index)
+        population: list[tuple[ReleaseCandidate, ...]] = [candidates]
+        while len(population) < self.population_size:
+            candidate = list(candidates)
+            rng.shuffle(candidate)
+            population.append(tuple(candidate))
+
+        scores: dict[tuple[str, ...], float] = {}
+
+        def score(sequence: tuple[ReleaseCandidate, ...]) -> float:
+            key = self._ids(sequence)
+            if key not in scores:
+                scores[key] = self._cost(sequence, now=now, current_family=current_family)
+            return scores[key]
+
+        for _ in range(self.generations):
+            ranked = sorted(population, key=lambda item: (score(item), self._ids(item)))
+            next_population = ranked[: self.elite_count]
+            while len(next_population) < self.population_size:
+                first = self._tournament(population, scores, rng)
+                second = self._tournament(population, scores, rng)
+                child = self._ordered_crossover(first, second, rng)
+                next_population.append(self._mutate(child, rng))
+            population = next_population
+
+        best = min(population, key=lambda item: (score(item), self._ids(item)))
+        return ReleasePlan(
+            self._ids(best),
+            score(best),
+            len(scores),
+            False,
+            False,
+            "遗传算法已优化V2订单释放顺序，并由物理运行时执行约束校验",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class DynamicWipDecision:
     limit: int
@@ -184,6 +377,7 @@ def merge_time_windows(values: Iterable[tuple[float, float]]) -> tuple[tuple[flo
 __all__ = [
     "DynamicWipDecision",
     "DynamicWipPolicy",
+    "GeneticReleasePlanner",
     "ReleaseCandidate",
     "ReleasePlan",
     "RollingHorizonBeamPlanner",
