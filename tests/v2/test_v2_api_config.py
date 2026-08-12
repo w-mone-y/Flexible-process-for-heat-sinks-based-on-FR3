@@ -40,6 +40,9 @@ def test_v2_configuration_and_multi_order_files_load() -> None:
     scenario = load_fault_scenario(ROOT / "config" / "faults" / "scenario_01.yaml")
     plans = load_order_plans(ROOT / "config" / "orders" / "batch_abc.yaml")
     assert scheduler.max_assignments_per_tick == 3
+    assert scheduler.arm1_tool_policy.max_base_microbatch == 2
+    assert scheduler.arm1_tool_policy.lookahead_seconds == pytest.approx(12.0)
+    assert scheduler.arm1_tool_policy.starvation_seconds == pytest.approx(30.0)
     assert {resource.resource_id for resource in resources} >= {"ARM1", "ARM2", "ARM3", "FURNACE"}
     assert "ZONE_TABLE2_CORE" in zones
     assert scenario.random_seed == 42

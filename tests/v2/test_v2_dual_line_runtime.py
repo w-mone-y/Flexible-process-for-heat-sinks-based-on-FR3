@@ -9,7 +9,7 @@ import pytest
 
 from brazing_sim.dual_line.application import V2BrazingApplication
 from brazing_sim.dual_line.cli import parse_args
-from brazing_sim.dual_line import DualLineRuntime, FurnacePhase, UnitStage
+from brazing_sim.dual_line import DualLineRuntime, FurnacePhase, InstallBranch, TrayOwner, UnitStage
 from brazing_sim.dual_line.unified_runtime import UnifiedV2Runtime
 from brazing_sim.flexible import build_custom_plan
 from brazing_sim.planning import TaskType
@@ -126,7 +126,7 @@ def test_v2_runtime_schedules_three_mixed_orders_across_both_install_branches() 
         assert stages.index("PRODUCT_REMOVED") < stages.index("VIRTUAL_RETURN")
 
 
-def test_unified_v2_queues_fourth_order_when_three_furnace_layers_are_reserved() -> None:
+def test_unified_v2_admits_fourth_order_into_the_next_upstream_wip_cohort() -> None:
     runtime = UnifiedV2Runtime(fast=True)
     for preset in ("A", "B", "C"):
         runtime.submit_order(preset, order_id=f"LAYER_FULL_{preset}")
@@ -134,10 +134,12 @@ def test_unified_v2_queues_fourth_order_when_three_furnace_layers_are_reserved()
     runtime.submit_order("A", order_id="LAYER_WAITING_D")
 
     entry = runtime.manufacturing_runtime.orders["LAYER_WAITING_D"]
-    assert entry.status.value == "QUEUED"
-    assert entry.admitted_unit_ids == set()
-    assert entry.tray_assignments == {}
-    assert runtime.manufacturing_runtime._active_wip() == 3
+    assert entry.status.value == "RELEASED"
+    assert entry.admitted_unit_ids == {"LAYER_WAITING_D_UNIT_01"}
+    assert entry.tray_assignments == {"tray_01": "tray_04"}
+    assert runtime.manufacturing_runtime._active_wip() == 4
+    assert len(runtime.manufacturing_runtime.tray_routes) == 6
+    assert runtime.physical_runtime._active_batch_units == []
 
 
 def test_unified_v2_physical_admission_follows_global_release_order() -> None:
@@ -146,6 +148,7 @@ def test_unified_v2_physical_admission_follows_global_release_order() -> None:
         runtime.submit_order(preset, order_id=f"AUTHORITY_{preset}")
 
     runtime.tick(0.05)
+    runtime.tick(0.05)
 
     stages = {unit.unit_id: unit.stage for unit in runtime.physical_runtime.units.values()}
     released = {
@@ -153,9 +156,27 @@ def test_unified_v2_physical_admission_follows_global_release_order() -> None:
         for entry in runtime.manufacturing_runtime.orders.values()
         for unit_id in entry.admitted_unit_ids
     }
-    assert len(released) == 3
+    assert len(released) == 4
     assert sum(stages[unit_id] is UnitStage.BASE_LOADING for unit_id in released) == 1
+    assert runtime.physical_runtime.operations["ARM1"].unit_id == "AUTHORITY_A_UNIT_01"
     assert stages["AUTHORITY_D_UNIT_01"] is UnitStage.QUEUED
+
+
+def test_unified_v2_binds_fin_tasks_to_the_selected_physical_install_branch() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    runtime.submit_order("A", order_id="BRANCH_BOUND")
+    unit = runtime.physical_runtime.units["BRANCH_BOUND_UNIT_01"]
+    unit.branch = InstallBranch.ARM3_B
+
+    runtime.tick(0.05)
+
+    fin_tasks = [
+        task
+        for task in runtime.manufacturing_runtime.graph
+        if task.unit_id == unit.unit_id and task.task_type in {TaskType.PICK_FIN, TaskType.INSTALL_FIN}
+    ]
+    assert fin_tasks
+    assert all(task.eligible_resources == ["ARM3"] for task in fin_tasks)
 
 
 def test_unified_v2_furnace_guard_ignores_the_queued_next_batch() -> None:
@@ -163,45 +184,179 @@ def test_unified_v2_furnace_guard_ignores_the_queued_next_batch() -> None:
     for preset in ("A", "B", "C", "D"):
         runtime.submit_order(preset, order_id=f"BATCH_GUARD_{preset}")
 
-    active_batch = sorted(
-        unit_id
-        for entry in runtime.manufacturing_runtime.orders.values()
-        for unit_id in entry.admitted_unit_ids
-    )
+    active_batch = [f"BATCH_GUARD_{preset}_UNIT_01" for preset in ("A", "B", "C")]
+    next_batch_unit = "BATCH_GUARD_D_UNIT_01"
     runtime.physical_runtime._active_batch_units = list(active_batch)
     for unit_id in active_batch:
         runtime.physical_runtime.units[unit_id].stage = UnitStage.BRAZING
-    task = next(
+    active_task = next(
         candidate
         for candidate in runtime.manufacturing_runtime.graph
         if candidate.task_type is TaskType.RUN_FURNACE and candidate.unit_id in active_batch
     )
+    next_batch_task = next(
+        candidate
+        for candidate in runtime.manufacturing_runtime.graph
+        if candidate.task_type is TaskType.RUN_FURNACE and candidate.unit_id == next_batch_unit
+    )
 
-    allowed, reason = runtime.bridge.task_dispatch_allowed(task)
+    allowed, reason = runtime.bridge.task_dispatch_allowed(active_task)
+    next_allowed, next_reason = runtime.bridge.task_dispatch_allowed(next_batch_task)
 
     assert allowed
     assert reason == ""
-    assert runtime.physical_runtime.units["BATCH_GUARD_D_UNIT_01"].stage is UnitStage.QUEUED
+    assert not next_allowed
+    assert "所属物理炉批" in next_reason
+    assert runtime.physical_runtime.units[next_batch_unit].stage is UnitStage.QUEUED
 
 
-def test_v2_four_order_burst_completes_in_two_physical_furnace_batches() -> None:
-    args = parse_args(("--headless", "--fast", "--no-ui", "--orders", "A,B,C,D"))
+def test_unified_v2_furnace_guard_waits_for_compatible_buffered_batch_member() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    for preset in ("A", "B", "C"):
+        runtime.submit_order(preset, order_id=f"OPEN_BATCH_{preset}")
+
+    physical = runtime.physical_runtime
+    loaded = ["OPEN_BATCH_A_UNIT_01", "OPEN_BATCH_B_UNIT_01"]
+    buffered = "OPEN_BATCH_C_UNIT_01"
+    physical._active_batch_units = list(loaded)
+    physical._furnace_load_queue = list(loaded)
+    physical._furnace_load_position = len(loaded)
+    physical.furnace.state.phase = FurnacePhase.LOADING
+    for unit_id in loaded:
+        physical.units[unit_id].stage = UnitStage.BRAZING
+    physical.units[buffered].stage = UnitStage.FURNACE_BUFFER
+    task = next(
+        candidate
+        for candidate in runtime.manufacturing_runtime.graph
+        if candidate.task_type is TaskType.RUN_FURNACE and candidate.unit_id in loaded
+    )
+
+    allowed, reason = runtime.bridge.task_dispatch_allowed(task)
+
+    assert not allowed
+    assert "兼容托盘" in reason
+
+
+def test_unified_v2_unload_guard_resolves_reused_tray_from_the_active_batch() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    for index, preset in enumerate(("A", "B", "C", "D", "A"), start=1):
+        runtime.submit_order(preset, order_id=f"REUSED_TRAY_{index}")
+
+    physical = runtime.physical_runtime
+    old_unit = physical.units["REUSED_TRAY_2_UNIT_01"]
+    lower_unit = physical.units["REUSED_TRAY_4_UNIT_01"]
+    top_unit = physical.units["REUSED_TRAY_5_UNIT_01"]
+    old_unit.tray_id = "V2_TRAY_02"
+    old_unit.stage = UnitStage.COMPLETE
+    lower_unit.tray_id = "V2_TRAY_01"
+    lower_unit.stage = UnitStage.BRAZING
+    top_unit.tray_id = "V2_TRAY_02"
+    top_unit.stage = UnitStage.BRAZING
+    physical._active_batch_units = [lower_unit.unit_id, top_unit.unit_id]
+    for layer in physical.furnace.state.layers:
+        layer.tray_id = None
+        layer.locked = False
+    physical.furnace.state.layers[1].tray_id = lower_unit.tray_id
+    physical.furnace.state.layers[1].locked = True
+    physical.furnace.state.layers[2].tray_id = top_unit.tray_id
+    physical.furnace.state.layers[2].locked = True
+
+    top_task = next(
+        task
+        for task in runtime.manufacturing_runtime.graph
+        if task.unit_id == top_unit.unit_id and task.task_type is TaskType.UNLOAD_RACK_LAYER
+    )
+    lower_task = next(
+        task
+        for task in runtime.manufacturing_runtime.graph
+        if task.unit_id == lower_unit.unit_id and task.task_type is TaskType.UNLOAD_RACK_LAYER
+    )
+
+    assert runtime.bridge.task_dispatch_allowed(top_task) == (True, "")
+    assert runtime.bridge.task_dispatch_allowed(lower_task)[0] is False
+
+
+def test_v2_five_order_burst_completes_in_two_physical_furnace_batches() -> None:
+    args = parse_args(("--headless", "--fast", "--no-ui", "--orders", "A,B,C,D,A"))
     application = V2BrazingApplication(args)
     try:
         application.submit_cli_orders()
-        for _ in range(6000):
+        for _ in range(7000):
             application.advance_frame()
             if application.runtime.complete:
                 break
         state = application.publish(viewer_running=False)
+        physical_events = list(application.runtime.physical_runtime.events)
     finally:
         application.close()
 
     assert state["complete"] is True
     assert state["physical_execution_complete"] is True
-    assert state["completed_orders"] == ["V2_A_01", "V2_B_02", "V2_C_03", "V2_D_04"]
+    assert state["completed_orders"] == [
+        "V2_A_01",
+        "V2_B_02",
+        "V2_C_03",
+        "V2_D_04",
+        "V2_A_05",
+    ]
     assert state["furnace"]["completed_batches"] == 2
     assert not [task for task in state["tasks"] if task["status"] not in {"SUCCEEDED", "CANCELLED"}]
+
+    first_arm1_fin_unit = next(
+        str(event["unit_id"])
+        for event in physical_events
+        if event["type"] == "OPERATION_STARTED"
+        and event.get("resource") == "ARM1"
+        and event.get("kind") == "INSTALL_FIN"
+    )
+    first_fin_unit_complete = max(
+        float(event["time"])
+        for event in physical_events
+        if event["type"] == "FIN_INSTALLED"
+        and event.get("unit_id") == first_arm1_fin_unit
+        and int(event["fin_index"]) == int(event["fin_count"])
+    )
+    next_base_start = min(
+        float(event["time"])
+        for event in physical_events
+        if event["type"] == "OPERATION_STARTED"
+        and event.get("resource") == "ARM1"
+        and event.get("kind") == "BASE_LOADING"
+        and float(event["time"]) > first_fin_unit_complete
+    )
+    assert next_base_start - first_fin_unit_complete <= 3.0
+
+    arm1_intervals: list[tuple[float, float]] = []
+    active_arm1_start: float | None = None
+    for event in physical_events:
+        if event.get("resource") != "ARM1":
+            continue
+        if event["type"] == "OPERATION_STARTED":
+            active_arm1_start = float(event["time"])
+        elif event["type"] == "OPERATION_COMPLETED" and active_arm1_start is not None:
+            arm1_intervals.append((active_arm1_start, float(event["time"])))
+            active_arm1_start = None
+    install_a_handoffs = [
+        event
+        for event in physical_events
+        if event["type"] == "TRAY_HANDOFF" and event.get("target") == "INSTALL_A"
+    ]
+    for handoff in install_a_handoffs:
+        arrived_at = float(handoff["time"])
+        started_at = min(
+            float(event["time"])
+            for event in physical_events
+            if event["type"] == "OPERATION_STARTED"
+            and event.get("resource") == "ARM1"
+            and event.get("kind") == "INSTALL_FIN"
+            and event.get("unit_id") == handoff.get("unit_id")
+            and float(event["time"]) >= arrived_at
+        )
+        occupied_until = max(
+            (finished_at for began_at, finished_at in arm1_intervals if began_at <= arrived_at < finished_at),
+            default=arrived_at,
+        )
+        assert started_at - occupied_until <= 1.0
 
 
 def test_v2_runtime_keeps_processing_the_next_batch_while_the_furnace_runs() -> None:
@@ -215,6 +370,28 @@ def test_v2_runtime_keeps_processing_the_next_batch_while_the_furnace_runs() -> 
     assert snapshot["furnace"]["completed_batches"] == 2
     assert snapshot["metrics"]["upstream_work_during_brazing_s"] > 0.0
     assert snapshot["metrics"]["maximum_wip"] == 6
+
+
+def test_s1_stages_the_next_tray_while_arm1_is_busy_installing_fins() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="INSTALL_BRANCH_B")
+    runtime.submit_order("B", order_id="INSTALL_IN_PROGRESS")
+
+    for _ in range(2_000):
+        runtime.tick(0.05)
+        operation = runtime.operations.get("ARM1")
+        if operation is not None and operation.kind == "INSTALL_FIN":
+            break
+    else:
+        raise AssertionError("Arm1 did not reach fin installation")
+
+    next_order = runtime.submit_order("B", order_id="S1_PRESTAGED")
+    next_unit = runtime.units[next_order.unit_ids[0]]
+
+    assert runtime.operations["ARM1"].kind == "INSTALL_FIN"
+    assert next_unit.stage is UnitStage.BASE_LOADING
+    assert next_unit.tray_id is not None
+    assert runtime.flow.get(next_unit.tray_id).owner is TrayOwner.S1
 
 
 def test_v2_loads_each_arriving_tray_top_down_before_the_batch_is_full() -> None:

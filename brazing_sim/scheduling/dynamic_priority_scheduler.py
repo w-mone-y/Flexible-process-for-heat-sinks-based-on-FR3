@@ -41,6 +41,24 @@ class DynamicPriorityScheduler(SchedulerBase):
     ) -> list[Assignment]:
         ready = list(ready_tasks)
         occupied_zones = set(system_state.get("occupied_zones", ()))
+        blocked_resource_tasks = {
+            (str(task_id), str(resource_id).upper())
+            for task_id, resource_id in system_state.get("blocked_resource_tasks", ())
+        }
+        blocked_resource_reasons = {
+            str(task_id): str(reason)
+            for task_id, reason in system_state.get("blocked_resource_reasons", {}).items()
+        }
+        task_type_priorities = {
+            str(resource_id).upper(): {
+                str(task_type): rank for rank, tier in enumerate(tiers) for task_type in tier
+            }
+            for resource_id, tiers in system_state.get(
+                "resource_task_type_priorities",
+                {},
+            ).items()
+        }
+        by_id = {task.task_id: task for task in ready}
         candidates: list[tuple[float, str, str, dict[str, float]]] = []
         blocked: list[dict[str, Any]] = []
         for task in ready:
@@ -56,6 +74,15 @@ class DynamicPriorityScheduler(SchedulerBase):
                 )
                 continue
             for resource_id in task.eligible_resources:
+                if (task.task_id, resource_id) in blocked_resource_tasks:
+                    blocked.append(
+                        {
+                            "task_id": task.task_id,
+                            "resource_id": resource_id,
+                            "reason": blocked_resource_reasons.get(task.task_id, "Arm1工具驻留策略等待"),
+                        }
+                    )
+                    continue
                 resource = resource_states.get(resource_id)
                 if resource is None:
                     blocked.append(
@@ -87,13 +114,33 @@ class DynamicPriorityScheduler(SchedulerBase):
                     continue
                 cost, components = calculate_cost(task, resource, system_state, sim_time, self.weights)
                 candidates.append((cost, task.task_id, resource.resource_id, components))
+        if task_type_priorities:
+            best_rank: dict[str, int] = {}
+            for _cost, task_id, resource_id, _components in candidates:
+                rank = task_type_priorities.get(resource_id, {}).get(by_id[task_id].task_type.value)
+                if rank is not None:
+                    best_rank[resource_id] = min(best_rank.get(resource_id, rank), rank)
+            prioritized: list[tuple[float, str, str, dict[str, float]]] = []
+            for candidate in candidates:
+                _cost, task_id, resource_id, _components = candidate
+                rank = task_type_priorities.get(resource_id, {}).get(by_id[task_id].task_type.value)
+                if rank is not None and rank > best_rank.get(resource_id, rank):
+                    blocked.append(
+                        {
+                            "task_id": task_id,
+                            "resource_id": resource_id,
+                            "reason": "等待该资源的高优先级检测任务先执行",
+                        }
+                    )
+                    continue
+                prioritized.append(candidate)
+            candidates = prioritized
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         self.last_candidates = [
             {"cost": cost, "task_id": task_id, "resource_id": resource_id, **components}
             for cost, task_id, resource_id, components in candidates
         ]
         self.last_blocked_candidates = blocked
-        by_id = {task.task_id: task for task in ready}
         selected: list[Assignment] = []
         used_tasks: set[str] = set()
         used_resources: set[str] = set()

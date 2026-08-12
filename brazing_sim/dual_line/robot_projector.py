@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
@@ -87,6 +88,7 @@ class _JointPlan:
     grasp_failed: bool = False
     next_tool: str | None = None
     base_grasp_start_position: np.ndarray | None = None
+    preposition_for: str = ""
 
 
 @dataclass(slots=True)
@@ -1093,7 +1095,11 @@ class V2RobotMotionProjector:
             geometry = V2ProcessGeometry.for_unit(unit)
             origin, rotation, yaw = self._tray_frame(
                 unit,
-                expected_dock_site="v2_station_s1_dock",
+                expected_dock_site=getattr(
+                    operation,
+                    "expected_dock_site",
+                    "v2_station_s1_dock",
+                ),
             )
             base_goal = origin + rotation @ np.asarray(
                 [
@@ -1181,7 +1187,14 @@ class V2RobotMotionProjector:
             )
         if arm_name == "arm1" and operation.kind == "INSTALL_FIN":
             geometry = V2ProcessGeometry.for_unit(unit)
-            origin, rotation, _tray_yaw = self._tray_frame(unit)
+            origin, rotation, _tray_yaw = self._tray_frame(
+                unit,
+                expected_dock_site=getattr(
+                    operation,
+                    "expected_dock_site",
+                    "v2_station_s3a_dock",
+                ),
+            )
             return (
                 "arm1_gripper",
                 self._fin_waypoints(
@@ -1204,7 +1217,14 @@ class V2RobotMotionProjector:
             )
         if arm_name == "arm2" and operation.kind == "DISPENSING":
             geometry = V2ProcessGeometry.for_unit(unit)
-            origin, rotation, yaw = self._tray_frame(unit)
+            origin, rotation, yaw = self._tray_frame(
+                unit,
+                expected_dock_site=getattr(
+                    operation,
+                    "expected_dock_site",
+                    "v2_station_s2a_dock",
+                ),
+            )
             points: list[_Waypoint] = []
             local_target = (
                 int(operation.recovery_target_index)
@@ -1306,7 +1326,14 @@ class V2RobotMotionProjector:
             return "arm2_dispenser", tuple(points)
         if arm_name == "arm3" and operation.kind == "MATERIAL_INSPECTION":
             geometry = V2ProcessGeometry.for_unit(unit)
-            origin, rotation, yaw = self._tray_frame(unit)
+            origin, rotation, yaw = self._tray_frame(
+                unit,
+                expected_dock_site=getattr(
+                    operation,
+                    "expected_dock_site",
+                    "v2_station_s2b_dock",
+                ),
+            )
             return (
                 "arm3_camera",
                 (
@@ -1323,7 +1350,14 @@ class V2RobotMotionProjector:
             )
         if arm_name == "arm3" and operation.kind == "PRE_BRAZE_INSPECTION":
             geometry = V2ProcessGeometry.for_unit(unit)
-            origin, rotation, yaw = self._tray_frame(unit)
+            origin, rotation, yaw = self._tray_frame(
+                unit,
+                expected_dock_site=getattr(
+                    operation,
+                    "expected_dock_site",
+                    "v2_station_s4_dock",
+                ),
+            )
             return (
                 "arm3_camera",
                 (
@@ -1340,7 +1374,14 @@ class V2RobotMotionProjector:
             )
         if arm_name == "arm3" and operation.kind == "INSTALL_FIN":
             geometry = V2ProcessGeometry.for_unit(unit)
-            origin, rotation, tray_yaw = self._tray_frame(unit)
+            origin, rotation, tray_yaw = self._tray_frame(
+                unit,
+                expected_dock_site=getattr(
+                    operation,
+                    "expected_dock_site",
+                    "v2_station_s3b_dock",
+                ),
+            )
             nominal_goal = geometry.world_fin_target(
                 self._active_fin_index(unit) - 1,
                 origin=origin,
@@ -1394,6 +1435,100 @@ class V2RobotMotionProjector:
                 ),
             )
         raise ValueError(f"unsupported V2 robot operation: {arm_name}/{operation.kind}")
+
+    def _build_preposition_plan(
+        self,
+        arm_name: str,
+        intent: dict[str, str],
+        unit: "V2UnitState",
+        *,
+        fast: bool,
+    ) -> _JointPlan | None:
+        """Move an idle robot to one aerial process approach without contact."""
+
+        operation_kind = str(intent["operation_kind"])
+        required_tool = self._required_tool(arm_name, operation_kind)
+        operation = SimpleNamespace(
+            unit_id=unit.unit_id,
+            kind=operation_kind,
+            started_at=0.0,
+            recovery=False,
+            recovery_strategy="",
+            recovery_fault_type="",
+            recovery_target_index=None,
+            expected_dock_site={
+                "S1_BASE_LOADING": "v2_station_s1_dock",
+                "S2A_DISPENSING": "v2_station_s2a_dock",
+                "S2B_MATERIAL_INSPECTION": "v2_station_s2b_dock",
+                "S3A_ARM1_INSTALL": "v2_station_s3a_dock",
+                "S3B_ARM3_INSTALL": "v2_station_s3b_dock",
+                "S4_PRE_BRAZE_INSPECTION": "v2_station_s4_dock",
+            }.get(str(intent["station_id"])),
+        )
+        if required_tool is not None and self._arm1_tools.current_tool != required_tool:
+            plan = self._build_arm1_tool_change_plan(
+                operation,
+                required_tool,
+                fast=fast,
+            )
+            plan.operation_key = f"{unit.unit_id}:PREPOSITION_{operation_kind}"
+            plan.instance_key = f"PREPOSITION:{unit.unit_id}:{operation_kind}:TOOL_CHANGE"
+            plan.preposition_for = operation_kind
+            return plan
+
+        tool_name, operation_waypoints = self._operation_waypoints(
+            arm_name,
+            operation,
+            unit,
+        )
+        if not operation_waypoints:
+            return None
+        first = operation_waypoints[0]
+        waypoint = _Waypoint(
+            first.pose,
+            f"预定位：{first.label_zh}",
+            interaction="",
+            cartesian_speed_m_s=first.cartesian_speed_m_s,
+        )
+        controller = self.controllers[arm_name]
+        controller.set_tool_transform(self._tool_transforms[tool_name])
+        start = np.asarray(self.data.qpos[controller.qpos_ids], dtype=float).copy()
+        goals, failure = self._solve_waypoint_chain(
+            controller,
+            (waypoint,),
+            seed=start,
+            operation_kind=operation_kind,
+        )
+        if failure:
+            goals, failure = self._solve_waypoint_chain(
+                controller,
+                (waypoint,),
+                seed=HOME_QPOS,
+                operation_kind=operation_kind,
+            )
+        first_goal = start if not goals else goals[0]
+        speed_scale = self._fast_process_speed_scale if fast else 1.0
+        return _JointPlan(
+            operation_key=f"{unit.unit_id}:PREPOSITION_{operation_kind}",
+            instance_key=f"PREPOSITION:{unit.unit_id}:{operation_kind}",
+            operation_kind="PREPOSITION",
+            tool_name=tool_name,
+            waypoints=(waypoint,),
+            joint_goals=tuple(goals),
+            waypoint_index=0,
+            segment_start=start,
+            segment_elapsed_s=0.0,
+            segment_duration_s=self._segment_duration(
+                start,
+                first_goal,
+                minimum_s=0.18 if not fast else 0.10,
+                speed_scale=speed_scale,
+            ),
+            failure=failure,
+            minimum_segment_s=0.18 if not fast else 0.10,
+            motion_speed_scale=speed_scale,
+            preposition_for=operation_kind,
+        )
 
     def _segment_duration(
         self,
@@ -1524,8 +1659,18 @@ class V2RobotMotionProjector:
         controller = self.controllers["arm1"]
         current_tool = self._arm1_tools.current_tool
         waypoints: list[_Waypoint] = []
+        rack_gate_offset_m = 0.12
 
-        def append_vertical(
+        safe_plane_z_m = float(self.data.site("v2_arm1_tool_rack_safe_plane").xpos[2])
+
+        def rack_change_poses(tool: str) -> tuple[Pose, Pose, Pose]:
+            _hover, dock, _retreat = self._arm1_tools.change_poses(tool, hover_m=0.0)
+            hover_m = safe_plane_z_m - float(dock.position[2])
+            if hover_m <= 0.0:
+                raise RuntimeError("Arm1快换架安全上方点必须高于末端停靠点")
+            return self._arm1_tools.change_poses(tool, hover_m=hover_m)
+
+        def append_cartesian_segment(
             start_pose: Pose,
             end_pose: Pose,
             label: str,
@@ -1549,38 +1694,72 @@ class V2RobotMotionProjector:
                     )
                 )
 
+        # Every rack crossing happens on one certified high plane.  The first
+        # joint-space move ends at a gate in front of the rack; after that all
+        # motion near the structure is an authored dense Cartesian segment.
+        # This prevents an IK-equivalent joint interpolation from bowing down
+        # through the beam while approaching or leaving a dock.
+        reference_tool = current_tool or target_tool
+        reference_hover, _dock, _retreat = rack_change_poses(reference_tool)
+        gate = Pose(
+            reference_hover.position + np.asarray([0.0, -rack_gate_offset_m, 0.0]),
+            reference_hover.quaternion,
+        )
+        waypoints.append(_Waypoint(gate, "换刀：进入工具架前方高位门点"))
+
         if current_tool is not None:
-            hover, dock, _retreat = self._arm1_tools.change_poses(current_tool, hover_m=0.10)
+            hover, dock, _retreat = rack_change_poses(current_tool)
             current_zh = "吸盘" if current_tool == "arm1_suction" else "夹爪"
-            waypoints.append(_Waypoint(hover, f"换刀：归还{current_zh}安全接近"))
-            append_vertical(
+            append_cartesian_segment(
+                gate,
+                hover,
+                f"换刀：高位横移至{current_zh}拆卸点正上方",
+                speed_m_s=0.055,
+            )
+            append_cartesian_segment(
                 hover,
                 dock,
-                f"换刀：归还{current_zh}到架并解锁",
+                f"换刀：从{current_zh}拆卸点正上方竖直慢降，归还{current_zh}到架并解锁",
                 speed_m_s=0.025,
                 final_interaction=f"tool_return:{current_tool}",
             )
-            append_vertical(
+            append_cartesian_segment(
                 dock,
                 hover,
-                f"换刀：空法兰退出{current_zh}工位",
+                f"换刀：空法兰退出{current_zh}工位，拆卸后竖直慢升回正上方",
                 speed_m_s=0.035,
             )
-        hover, dock, _retreat = self._arm1_tools.change_poses(target_tool, hover_m=0.10)
+        hover, dock, _retreat = rack_change_poses(target_tool)
         target_zh = "吸盘" if target_tool == "arm1_suction" else "夹爪"
-        waypoints.append(_Waypoint(hover, f"换刀：取用{target_zh}安全接近"))
-        append_vertical(
+        start_hover = gate if current_tool is None else rack_change_poses(current_tool)[0]
+        append_cartesian_segment(
+            start_hover,
+            hover,
+            f"换刀：高位横移至{target_zh}安装点正上方",
+            speed_m_s=0.055,
+        )
+        append_cartesian_segment(
             hover,
             dock,
-            f"换刀：取用{target_zh}并锁定",
+            f"换刀：从{target_zh}安装点正上方竖直慢降，取用{target_zh}并锁定",
             speed_m_s=0.025,
             final_interaction=f"tool_dock:{target_tool}",
         )
-        append_vertical(
+        append_cartesian_segment(
             dock,
             hover,
-            f"换刀：带{target_zh}平稳撤离工具架",
+            f"换刀：带{target_zh}平稳撤离，安装后竖直慢升回正上方",
             speed_m_s=0.035,
+        )
+        departure_gate = Pose(
+            hover.position + np.asarray([0.0, -rack_gate_offset_m, 0.0]),
+            hover.quaternion,
+        )
+        append_cartesian_segment(
+            hover,
+            departure_gate,
+            f"换刀：带{target_zh}高位离开工具架",
+            speed_m_s=0.055,
         )
         waypoint_tuple = tuple(waypoints)
         controller.set_tool_transform(self._tool_transforms["arm1_flange"])
@@ -1599,7 +1778,11 @@ class V2RobotMotionProjector:
                 operation_kind="TOOL_CHANGE",
             )
         first_goal = start if not goals else goals[0]
-        speed_scale = 2.0 if fast else 1.0
+        # Fast/headless mode must absorb the two new rack-clearance segments
+        # without regressing its established process windows.  The Cartesian
+        # geometry is identical; only its time parameterisation is compressed.
+        # Normal viewer mode retains the deliberately slow docking speeds.
+        speed_scale = 3.0 if fast else 1.0
         stop_indices = [index for index, waypoint in enumerate(waypoint_tuple) if waypoint.stop]
         continuous_ranges = tuple(
             (left, right) for left, right in zip(stop_indices, stop_indices[1:]) if right > left + 1
@@ -2161,6 +2344,7 @@ class V2RobotMotionProjector:
 
     def sync(self, runtime: "DualLineRuntime") -> None:
         self._sync_active_fin_faults(runtime)
+        prepositioning = runtime.prepositioning_snapshot()
         for arm_name, controller in self.controllers.items():
             operation = runtime.operations.get(arm_name.upper())
             resource_paused = not runtime.faults.resource_available(arm_name.upper())
@@ -2179,6 +2363,48 @@ class V2RobotMotionProjector:
             self._paused_arms.discard(arm_name)
             self._paused_joint_positions.pop(arm_name, None)
             if operation is None:
+                intent = prepositioning.get(arm_name.upper())
+                if intent is not None:
+                    key = f"PREPOSITION:{intent['unit_id']}:" f"{intent['operation_kind']}"
+                    if self._active_operation[arm_name] != key:
+                        prior_plan = self._plans[arm_name]
+                        if prior_plan is not None and prior_plan.proxy_key is not None:
+                            self._release_proxy(prior_plan)
+                        unit = runtime.units[intent["unit_id"]]
+                        self._plans[arm_name] = self._build_preposition_plan(
+                            arm_name,
+                            intent,
+                            unit,
+                            fast=bool(runtime.fast),
+                        )
+                        self._active_operation[arm_name] = key if self._plans[arm_name] is not None else ""
+                    plan = self._plans[arm_name]
+                    if (
+                        plan is not None
+                        and plan.operation_kind == "TOOL_CHANGE"
+                        and plan.complete
+                        and not plan.failure
+                        and self._arm1_tools.current_tool == plan.next_tool
+                    ):
+                        unit = runtime.units[intent["unit_id"]]
+                        self._plans[arm_name] = self._build_preposition_plan(
+                            arm_name,
+                            intent,
+                            unit,
+                            fast=bool(runtime.fast),
+                        )
+                        plan = self._plans[arm_name]
+                    if plan is not None and plan.failure:
+                        self._target_label[arm_name] = plan.failure
+                    elif plan is not None and plan.complete:
+                        self._target_label[arm_name] = f"{intent['station_id']} 安全等待，托盘到位后开始工艺"
+                    elif plan is not None:
+                        waypoint = plan.waypoints[plan.waypoint_index]
+                        controller.set_tool_transform(self._tool_transforms[plan.tool_name])
+                        controller.set_target(waypoint.pose, tcp=True)
+                        self._target_label[arm_name] = waypoint.label_zh
+                    if plan is not None:
+                        continue
                 idle_transform = {
                     "arm2": "arm2_dispenser",
                     "arm3": "arm3_camera",
@@ -2202,7 +2428,21 @@ class V2RobotMotionProjector:
             if self._active_operation[arm_name] != key:
                 unit = runtime.units[operation.unit_id]
                 required_tool = self._required_tool(arm_name, operation.kind)
-                if required_tool is not None and self._arm1_tools.current_tool != required_tool:
+                prior_plan = self._plans[arm_name]
+                continuing_prepositioned_tool_change = bool(
+                    self._active_operation[arm_name] == f"PREPOSITION:{operation.unit_id}:{operation.kind}"
+                    and prior_plan is not None
+                    and prior_plan.operation_kind == "TOOL_CHANGE"
+                    and prior_plan.next_tool == required_tool
+                    and not prior_plan.failure
+                )
+                if continuing_prepositioned_tool_change:
+                    # The tray has arrived while the already-started physical
+                    # exchange is still running.  Keep the same joint plan;
+                    # rebuilding it here would send the flange back to the
+                    # first rack waypoint and erase the overlap we just won.
+                    self._plans[arm_name] = prior_plan
+                elif required_tool is not None and self._arm1_tools.current_tool != required_tool:
                     self._plans[arm_name] = self._build_arm1_tool_change_plan(
                         operation,
                         required_tool,
@@ -2596,6 +2836,8 @@ class V2RobotMotionProjector:
                 "mode": "V1_COMPATIBLE_JOINT_PLAYBACK",
                 "planner": "POSE_LOCKED_CARTESIAN_QUINTIC",
                 "operation": self._active_operation[arm_name],
+                "prepositioning": bool(plan is not None and plan.preposition_for),
+                "preposition_for": "" if plan is None else plan.preposition_for,
                 "target_zh": (
                     self._target_label[arm_name]
                     if arm_name in self._paused_arms

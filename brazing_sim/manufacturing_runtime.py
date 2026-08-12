@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from math import isfinite
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -36,6 +37,7 @@ from .planning.task_models import ManufacturingTask, TaskStatus, TaskType
 from .planning.workcell_motion import WorkcellMotionPlanningService
 from .recovery import FaultRecord, FaultType, RecoveryPolicy, Replanner
 from .scheduling import (
+    Arm1ToolResidencyPolicy,
     DynamicPriorityScheduler,
     FixedSequenceScheduler,
     ResourceManager,
@@ -205,6 +207,10 @@ class ManufacturingRuntime:
         self.config = scheduler_config or load_scheduler_config(CONFIG_DIR / "scheduler.yaml")
         resources, zones = load_resource_config(resource_config_path or CONFIG_DIR / "resources.yaml")
         self.resources = ResourceManager(resources)
+        self.arm1_tool_policy = Arm1ToolResidencyPolicy(
+            self.config.arm1_tool_policy,
+            initial_tool=self.resources.get("ARM1").current_tool,
+        )
         self.zones = ZoneLockManager(zones)
         self.scheduler_mode = self._normalize_scheduler_mode(scheduler_mode)
         self.scheduler = self._make_scheduler(self.scheduler_mode)
@@ -384,7 +390,8 @@ class ManufacturingRuntime:
 
     def _admit_orders(self, now: float, *, refresh_ready: bool = True) -> None:
         available = self.max_wip_units - self._active_wip()
-        used_rack_layers = {
+        layer_reservation_counts = {layer: 0 for layer in range(3)}
+        for layer in (
             layer
             for entry in self.orders.values()
             if entry.status
@@ -394,9 +401,11 @@ class ManufacturingRuntime:
                 OrderRunStatus.MANUAL_REVIEW,
             }
             for layer in entry.rack_assignments.values()
-        }
-        # The fourth route is a UI-only spare. Only the first three tray IDs
-        # have complete MuJoCo product pools and may enter manufacturing.
+        ):
+            layer_reservation_counts[int(layer)] += 1
+        # V1 exposes its historical three production pallets plus one display
+        # spare. V2 raises ``max_wip_units`` to six and therefore receives six
+        # independently owned logical routes matching its physical tray pool.
         production_trays = set(sorted(self.tray_routes)[: self.max_wip_units])
         free_trays = sorted(
             tray.tray_id
@@ -431,16 +440,13 @@ class ManufacturingRuntime:
                 break
             unit_id = f"{entry.order_id}_UNIT_{assignment.unit_index + 1:02d}"
             preferred = int(assignment.layer_index)
-            available_layers = [layer for layer in range(3) if layer not in used_rack_layers]
-            if not available_layers:
-                # WIP trays can wait upstream while the three physical
-                # furnace layers are occupied.  Do not consume a tray or
-                # partially admit the unit: the next unload/reset tick will
-                # call _admit_orders() again and release it atomically.
-                break
+            minimum_reservations = min(layer_reservation_counts.values())
+            available_layers = [
+                layer for layer, count in layer_reservation_counts.items() if count == minimum_reservations
+            ]
             physical_tray = free_trays.pop(0)
-            selected_layer = preferred if preferred not in used_rack_layers else available_layers[0]
-            used_rack_layers.add(selected_layer)
+            selected_layer = preferred if preferred in available_layers else available_layers[0]
+            layer_reservation_counts[selected_layer] += 1
             entry.tray_assignments[assignment.tray_id] = physical_tray
             entry.rack_assignments[physical_tray] = selected_layer
             entry.admitted_unit_ids.add(unit_id)
@@ -756,6 +762,17 @@ class ManufacturingRuntime:
                 and self._arm1_payload_handoff.get("payload") == str(task.payload.get("fin_id", "fin_01"))
             ):
                 self._arm1_payload_handoff = None
+        fin_unit_done = not any(
+            candidate.unit_id == task.unit_id
+            and candidate.task_type in {TaskType.INSTALL_FIN, TaskType.REINSTALL_FIN}
+            and not candidate.status.terminal
+            for candidate in self.graph
+        )
+        self.arm1_tool_policy.observe_succeeded(
+            task,
+            task.assigned_resource or "",
+            fin_unit_done=fin_unit_done,
+        )
         if self.motion_planning is not None:
             self.motion_planning.release_task(task)
         if task.assigned_resource and task.required_tool:
@@ -818,6 +835,7 @@ class ManufacturingRuntime:
 
     def _fail_task(self, task: ManufacturingTask, code: str, metrics: dict[str, Any], now: float) -> None:
         self.graph.mark_failed(task.task_id, code, now)
+        self.arm1_tool_policy.observe_failed(task, task.assigned_resource or "")
         if task.task_type is TaskType.RUN_FURNACE:
             batch_id = self._furnace_task_batches.get(task.task_id)
             if batch_id is not None:
@@ -1200,8 +1218,26 @@ class ManufacturingRuntime:
         # DAG scans before the scheduler performed this authoritative refresh.
         self._admit_orders(timestamp, refresh_ready=False)
         ready = self._refresh_ready(timestamp)
+        blocked_resource_tasks: frozenset[tuple[str, str]] = frozenset()
+        blocked_resource_reasons: dict[str, str] = {}
         if self.flexible_cell:
             ready = [task for task in ready if self._cell_task_available(task)]
+        if self.flexible_cell and self.scheduler_mode == "DYNAMIC_PRIORITY":
+            tool_selection = self.arm1_tool_policy.select(
+                ready,
+                now=timestamp,
+                resource_tool=self.resources.get("ARM1").current_tool,
+                next_base_ready_in=self._next_arm1_base_ready_in(ready, timestamp),
+                next_fin_ready_in=self._next_arm1_fin_ready_in(ready, timestamp),
+            )
+            blocked_resource_tasks = tool_selection.blocked_pairs
+            blocked_resource_reasons = tool_selection.reasons
+            for task in ready:
+                reason = blocked_resource_reasons.get(task.task_id)
+                if reason is None:
+                    task.payload.pop("arm1_tool_blocker", None)
+                else:
+                    task.payload["arm1_tool_blocker"] = reason
         if self.dispatch_guard is not None:
             guarded: list[ManufacturingTask] = []
             for task in ready:
@@ -1222,7 +1258,30 @@ class ManufacturingRuntime:
         assignments = self.scheduler.select_assignments(
             ready,
             self.resources.states,
-            {"occupied_zones": occupied},
+            {
+                "occupied_zones": occupied,
+                "blocked_resource_tasks": blocked_resource_tasks,
+                "blocked_resource_reasons": blocked_resource_reasons,
+                # Arm3 may finish its current non-preemptible single-fin
+                # action, but at the next task boundary camera work wins.  A
+                # material inspection can unlock the idle Arm1 branch and is
+                # therefore line-level parallelism, not merely local delay.
+                "resource_task_type_priorities": {
+                    "ARM3": (
+                        (
+                            TaskType.INSPECT_BRAZING.value,
+                            TaskType.REVIEW_BRAZING_CLOSEUP.value,
+                            TaskType.INSPECT_FINS.value,
+                            TaskType.REVIEW_FINS_CLOSEUP.value,
+                        ),
+                        (
+                            TaskType.PICK_FIN.value,
+                            TaskType.INSTALL_FIN.value,
+                            TaskType.REINSTALL_FIN.value,
+                        ),
+                    )
+                },
+            },
             timestamp,
         )
         for assignment in assignments:
@@ -1263,6 +1322,7 @@ class ManufacturingRuntime:
                 self._begin_cell_state(task, timestamp)
                 self.executor.start_task(task, assignment.resource_id, now=timestamp)
                 task.mark_running(timestamp)
+                self.arm1_tool_policy.observe_started(task, assignment.resource_id)
                 if task.task_type is TaskType.RUN_FURNACE:
                     self._start_furnace_batch(task, timestamp)
                 if task.station_id:
@@ -1292,33 +1352,6 @@ class ManufacturingRuntime:
 
     def _cell_task_available(self, task: ManufacturingTask) -> bool:
         """Keep a READY task queued until its physical pallet/station is valid."""
-
-        if task.task_type is TaskType.PREPARE_FIN_TOOL:
-            # Batch Arm1's work by tool.  Once one pallet leaves S1, its
-            # PREPARE_FIN_TOOL branch becomes READY while the following
-            # admitted pallet may still be indexing into the base-loading
-            # station.  Dispatching the ready branch immediately produces the
-            # wasteful suction -> gripper -> suction sequence observed with
-            # adjacent orders.  Keep the suction cup mounted until every
-            # currently released base pickup/place pair has finished; Arm2
-            # and Arm3 remain free to process earlier pallets meanwhile.
-            unfinished_base_tasks = [
-                candidate
-                for candidate in self.graph
-                if candidate.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
-                and not candidate.payload.get("queue_held")
-                and candidate.status
-                not in {
-                    TaskStatus.SUCCEEDED,
-                    TaskStatus.FAILED,
-                    TaskStatus.BLOCKED,
-                    TaskStatus.CANCELLED,
-                }
-            ]
-            if unfinished_base_tasks:
-                task.payload["planning_blockers"] = ["保持Arm1吸盘，等待当前在制订单全部完成基板取放"]
-                return False
-            task.payload.pop("planning_blockers", None)
 
         handoff = self._arm1_payload_handoff
         if handoff is not None and "ARM1" in task.eligible_resources:
@@ -1381,6 +1414,120 @@ class ManufacturingRuntime:
         else:
             task.payload["station_blocker"] = reason
         return available
+
+    def _next_arm1_base_ready_in(
+        self,
+        feasible_ready: Iterable[ManufacturingTask],
+        now: float,
+    ) -> float:
+        """Estimate the next committed S1 release, never a speculative order."""
+
+        if any(
+            task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
+            and "ARM1" in task.eligible_resources
+            for task in feasible_ready
+        ):
+            return 0.0
+        unfinished = any(
+            task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
+            and not task.payload.get("queue_held")
+            and not task.status.terminal
+            for task in self.graph
+        )
+        if not unfinished:
+            return float("inf")
+        ready_releases = [
+            task.estimated_duration
+            for task in feasible_ready
+            if task.task_type in {TaskType.TRANSFER_S1_S2A, TaskType.INDEX_EMPTY_TRAY}
+        ]
+        if ready_releases:
+            return min(ready_releases)
+        committed_releases = [
+            task
+            for task in self.graph
+            if task.task_type in {TaskType.TRANSFER_S1_S2A, TaskType.INDEX_EMPTY_TRAY}
+            and task.status is TaskStatus.RUNNING
+            and task.started_at is not None
+        ]
+        if not committed_releases:
+            return float("inf")
+        return min(
+            max(0.0, task.started_at + task.estimated_duration - float(now)) for task in committed_releases
+        )
+
+    def _next_arm1_fin_ready_in(
+        self,
+        feasible_ready: Iterable[ManufacturingTask],
+        now: float,
+    ) -> float:
+        """Forecast the next committed Arm1 fin action from the current DAG.
+
+        This is deliberately advisory: task dependencies and the physical
+        station checks remain authoritative.  The estimate only opens the
+        short tool-change lookahead window; it never marks or dispatches a
+        task.  A READY fin task which is physically blocked is therefore not
+        treated as imminent.
+        """
+
+        feasible_ids = {task.task_id for task in feasible_ready}
+        terminal_failure = {
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }
+        memo: dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def completion_in(task: ManufacturingTask) -> float:
+            cached = memo.get(task.task_id)
+            if cached is not None:
+                return cached
+            if task.task_id in visiting:
+                return float("inf")
+            if task.payload.get("queue_held") or task.status in terminal_failure:
+                result = float("inf")
+            elif task.status is TaskStatus.SUCCEEDED:
+                result = 0.0
+            elif task.status is TaskStatus.RUNNING:
+                started_at = float(now) if task.started_at is None else task.started_at
+                result = max(0.0, started_at + task.estimated_duration - float(now))
+            elif task.status is TaskStatus.RESERVED:
+                result = task.estimated_duration
+            elif task.status is TaskStatus.READY:
+                result = task.estimated_duration
+            else:
+                visiting.add(task.task_id)
+                predecessor_times = [
+                    completion_in(self.graph.get(predecessor_id)) for predecessor_id in task.predecessors
+                ]
+                visiting.remove(task.task_id)
+                release_in = max(predecessor_times, default=0.0)
+                result = float("inf") if not isfinite(release_in) else release_in + task.estimated_duration
+            memo[task.task_id] = result
+            return result
+
+        candidates = [
+            task
+            for task in self.graph
+            if task.task_type in {TaskType.PICK_FIN, TaskType.REINSTALL_FIN}
+            and "ARM1" in task.eligible_resources
+            and not task.payload.get("queue_held")
+            and not task.status.terminal
+        ]
+        estimates: list[float] = []
+        for task in candidates:
+            if task.status is TaskStatus.READY:
+                if task.task_id in feasible_ids:
+                    estimates.append(0.0)
+                continue
+            predecessor_times = [
+                completion_in(self.graph.get(predecessor_id)) for predecessor_id in task.predecessors
+            ]
+            estimate = max(predecessor_times, default=0.0)
+            if isfinite(estimate):
+                estimates.append(estimate)
+        return min(estimates, default=float("inf"))
 
     def _update_order_status(self, now: float) -> None:
         for entry in self.orders.values():
@@ -1521,6 +1668,7 @@ class ManufacturingRuntime:
         self._max_parallel_arms = 0
         self._max_parallel_tasks = 0
         self._arm1_payload_handoff = None
+        self.arm1_tool_policy.reset(initial_tool=self.resources.get("ARM1").current_tool)
         self.furnace_batches.clear()
         self._furnace_task_batches.clear()
         self._furnace_batch_sequence = 0
@@ -1534,19 +1682,15 @@ class ManufacturingRuntime:
         self._reset_flexible_cell_state()
 
     def _reset_flexible_cell_state(self) -> None:
-        """Reset the four-station asynchronous line and its spare pallet."""
+        """Reset station state and the line-profile-sized logical tray pool."""
 
+        tray_count = max(4, self.max_wip_units)
         self.tray_routes = {
-            "tray_01": TrayRouteState(
-                "tray_01",
+            f"tray_{index:02d}": TrayRouteState(
+                f"tray_{index:02d}",
                 owner=TrayOwner.EMPTY_BUFFER,
-            ),
-            "tray_02": TrayRouteState(
-                "tray_02",
-                owner=TrayOwner.EMPTY_BUFFER,
-            ),
-            "tray_03": TrayRouteState("tray_03", owner=TrayOwner.EMPTY_BUFFER),
-            "tray_04": TrayRouteState("tray_04", owner=TrayOwner.EMPTY_BUFFER),
+            )
+            for index in range(1, tray_count + 1)
         }
         self.workstations = {
             WorkstationId.S1_BASE_LOADING: WorkstationState(
@@ -1840,6 +1984,7 @@ class ManufacturingRuntime:
             },
             "tasks": tasks,
             "resources_v2": self.resources.snapshot(),
+            "arm1_tool_policy": self.arm1_tool_policy.snapshot(),
             "zone_locks": self.zones.snapshot(),
             "orders": orders,
             "faults_v2": [fault.as_dict() for fault in self.faults.values()],
@@ -1860,6 +2005,8 @@ class ManufacturingRuntime:
                     "max_parallel_tasks": self._max_parallel_tasks,
                     "multi_arm_overlap_s": self._parallel_arm_seconds,
                     "arm_busy_s": dict(self._arm_busy_seconds),
+                    "arm1_idle_s": max(0.0, elapsed - self._arm_busy_seconds["ARM1"]),
+                    "arm1_utilization": (0.0 if elapsed <= 0.0 else self._arm_busy_seconds["ARM1"] / elapsed),
                 },
                 "spare_trays": [
                     tray.tray_id

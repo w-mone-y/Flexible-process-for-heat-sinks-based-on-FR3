@@ -12,6 +12,7 @@ from .flexible.capability_loader import parse_resource_capabilities
 from .flexible.capability_models import ResourceCapability
 from .flexible.loader import FlexibleConfigError
 from .recovery.fault_models import FaultType
+from .scheduling.arm1_tool_policy import Arm1ToolPolicyConfig
 from .scheduling.resource_manager import ResourceState
 from .scheduling.scheduling_cost import SchedulingWeights
 
@@ -75,6 +76,7 @@ class SchedulerConfig:
     max_assignments_per_tick: int
     weights: SchedulingWeights
     batching: BatchingConfig
+    arm1_tool_policy: Arm1ToolPolicyConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +109,13 @@ def load_scheduler_config(path: str | Path) -> SchedulerConfig:
     raw = data["scheduler"]
     if not isinstance(raw, dict):
         raise ManufacturingConfigError(f"{source} [scheduler]: 必须是映射")
-    _keys(source, raw, {"mode", "allow_parallel_tasks", "max_assignments_per_tick", "weights"}, "scheduler")
+    _keys(
+        source,
+        raw,
+        {"mode", "allow_parallel_tasks", "max_assignments_per_tick", "weights"},
+        "scheduler",
+        optional={"arm1_tool_policy"},
+    )
     batching = data["batching"]
     if not isinstance(batching, dict):
         raise ManufacturingConfigError(f"{source} [batching]: 必须是映射")
@@ -118,11 +126,41 @@ def load_scheduler_config(path: str | Path) -> SchedulerConfig:
     _expect(source, raw["mode"], str, "scheduler.mode")
     _expect(source, raw["allow_parallel_tasks"], bool, "scheduler.allow_parallel_tasks")
     _expect(source, raw["max_assignments_per_tick"], int, "scheduler.max_assignments_per_tick")
+    raw_arm1_policy = raw.get("arm1_tool_policy", {})
+    if not isinstance(raw_arm1_policy, dict):
+        raise ManufacturingConfigError(f"{source} [scheduler.arm1_tool_policy]: 必须是映射")
+    _keys(
+        source,
+        raw_arm1_policy,
+        set(),
+        "scheduler.arm1_tool_policy",
+        optional={"max_base_microbatch", "lookahead_seconds", "starvation_seconds"},
+    )
+    if "max_base_microbatch" in raw_arm1_policy:
+        _expect(
+            source,
+            raw_arm1_policy["max_base_microbatch"],
+            int,
+            "scheduler.arm1_tool_policy.max_base_microbatch",
+        )
+    for key in ("lookahead_seconds", "starvation_seconds"):
+        if key in raw_arm1_policy and (
+            isinstance(raw_arm1_policy[key], bool) or not isinstance(raw_arm1_policy[key], (int, float))
+        ):
+            raise ManufacturingConfigError(f"{source} [scheduler.arm1_tool_policy.{key}]: 必须是数值")
     _expect(source, batching["mode"], str, "batching.mode")
     _expect(source, batching["allow_partial_batch"], bool, "batching.allow_partial_batch")
     _expect(source, batching["maximum_units"], int, "batching.maximum_units")
     if isinstance(batching["max_wait_time"], bool) or not isinstance(batching["max_wait_time"], (int, float)):
         raise ManufacturingConfigError(f"{source} [batching.max_wait_time]: 必须是数值")
+    try:
+        arm1_tool_policy = Arm1ToolPolicyConfig(
+            max_base_microbatch=int(raw_arm1_policy.get("max_base_microbatch", 2)),
+            lookahead_seconds=float(raw_arm1_policy.get("lookahead_seconds", 12.0)),
+            starvation_seconds=float(raw_arm1_policy.get("starvation_seconds", 30.0)),
+        )
+    except ValueError as exc:
+        raise ManufacturingConfigError(f"{source} [scheduler.arm1_tool_policy]: {exc}") from exc
     result = SchedulerConfig(
         mode=str(raw["mode"]).upper(),
         allow_parallel_tasks=bool(raw["allow_parallel_tasks"]),
@@ -134,6 +172,7 @@ def load_scheduler_config(path: str | Path) -> SchedulerConfig:
             allow_partial_batch=bool(batching["allow_partial_batch"]),
             maximum_units=int(batching["maximum_units"]),
         ),
+        arm1_tool_policy=arm1_tool_policy,
     )
     if result.mode not in {"FIXED_SEQUENCE", "DYNAMIC_PRIORITY"}:
         raise ManufacturingConfigError(f"{source} [scheduler.mode]: 不支持{result.mode}")

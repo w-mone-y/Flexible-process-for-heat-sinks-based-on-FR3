@@ -3,6 +3,13 @@ scheduler:
   mode: DYNAMIC_PRIORITY
   allow_parallel_tasks: true
   max_assignments_per_tick: 3
+  arm1_tool_policy:
+    # 吸盘最多连续处理两张基板，然后重新评估已就绪的翅片托盘。
+    max_base_microbatch: 2
+    # 只为换刀时间窗内即将释放的基板/翅片任务保留当前工具。
+    lookahead_seconds: 12.0
+    # READY 夹爪任务超过此时间后强制获得下一安全换刀机会。
+    starvation_seconds: 30.0
   weights:
     estimated_finish_time: 1.0
     tool_change_cost: 0.8

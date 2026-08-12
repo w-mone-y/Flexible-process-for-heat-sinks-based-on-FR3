@@ -238,7 +238,7 @@ def test_multi_unit_order_is_admitted_one_tray_at_a_time() -> None:
     assert len(waiting.tray_assignments) == 2
 
 
-def test_fourth_unit_waits_for_a_furnace_layer_then_is_admitted() -> None:
+def test_fourth_unit_enters_upstream_wip_without_waiting_for_a_furnace_layer() -> None:
     runtime = ManufacturingRuntime(
         scheduler_mode="dynamic",
         flexible_cell=True,
@@ -257,17 +257,10 @@ def test_fourth_unit_waits_for_a_furnace_layer_then_is_admitted() -> None:
         )
         entries.append(entry)
 
-    assert entries[-1].status.value == "QUEUED"
-    assert entries[-1].admitted_unit_ids == set()
-
-    released = False
-    for index in range(12000):
-        runtime.tick((index + 1) * 0.25)
-        if entries[-1].status.value != "QUEUED":
-            released = True
-            break
-
-    assert released
+    assert entries[-1].status.value == "RELEASED"
+    assert entries[-1].admitted_unit_ids == {"LAYER_QUEUE_4_A_UNIT_01"}
+    assert len(runtime.tray_routes) == 6
+    assert runtime._active_wip() == 4
     assert entries[-1].status.value in {"RELEASED", "RUNNING", "COMPLETED"}
     _run(runtime)
     assert all(entry.status.value == "COMPLETED" for entry in entries)

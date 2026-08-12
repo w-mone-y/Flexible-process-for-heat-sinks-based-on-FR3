@@ -32,6 +32,10 @@ class FixedSequenceScheduler(SchedulerBase):
         selected: list[Assignment] = []
         used_resources: set[str] = set()
         used_zones = set(system_state.get("occupied_zones", ()))
+        blocked_resource_tasks = {
+            (str(task_id), str(resource_id).upper())
+            for task_id, resource_id in system_state.get("blocked_resource_tasks", ())
+        }
         first_sequence: int | None = None
         for task in sorted(ready_tasks, key=lambda item: (item.sequence_index, item.task_id)):
             if first_sequence is not None and task.sequence_index > first_sequence + 2:
@@ -44,6 +48,7 @@ class FixedSequenceScheduler(SchedulerBase):
                     for resource_id in task.eligible_resources
                     if resource_id in resource_states
                     and resource_id not in used_resources
+                    and (task.task_id, resource_id) not in blocked_resource_tasks
                     and resource_states[resource_id].status is ResourceStatus.IDLE
                     and resource_states[resource_id].supports(task.task_type.value, task.required_tool)
                 ),

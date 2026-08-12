@@ -13,7 +13,6 @@ from brazing_line import BrazingApplication, parse_args
 from brazing_sim.execution.async_line_skills import AsyncLinePhysicalSkill, _TransferState
 from brazing_sim.flexible import build_inline_plan
 from brazing_sim.layout import SHALLOW_U_LAYOUT
-from brazing_sim.manufacturing_runtime import ManufacturingRuntime
 from brazing_sim.planning import build_task_graph
 from brazing_sim.planning.task_models import TaskStatus, TaskType
 
@@ -261,35 +260,6 @@ def test_s3_and_furnace_junction_pallet_envelopes_have_real_clearance() -> None:
     edge_clearance = centre_distance - 2.0 * SHALLOW_U_LAYOUT.output_pallet_half_width_m
 
     assert edge_clearance >= 0.040
-
-
-def test_fin_tool_preparation_waits_for_all_admitted_base_placements() -> None:
-    runtime = ManufacturingRuntime(scheduler_mode="dynamic", flexible_cell=True)
-    runtime.submit_plan(
-        build_inline_plan(
-            preset="A",
-            order_id="GROUP_BASE_TOOL_WORK",
-            quantity=2,
-            priority=10,
-        ),
-        now=0.0,
-    )
-    runtime._admit_orders(0.0, refresh_ready=False)
-    prepare = next(task for task in runtime.graph if task.task_type is TaskType.PREPARE_FIN_TOOL)
-    base_tasks = [
-        task
-        for task in runtime.graph
-        if task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
-    ]
-
-    assert len(base_tasks) == 4
-    assert not runtime._cell_task_available(prepare)
-    assert "保持Arm1吸盘" in prepare.payload["planning_blockers"][0]
-
-    for task in base_tasks:
-        task.status = TaskStatus.SUCCEEDED
-    assert runtime._cell_task_available(prepare)
-    assert "planning_blockers" not in prepare.payload
 
 
 def test_two_adjacent_orders_do_not_switch_to_gripper_before_both_bases_are_placed() -> None:

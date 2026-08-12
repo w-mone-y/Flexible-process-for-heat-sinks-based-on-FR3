@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-12",
+  "machine": "macOS-26.5.2-arm64-arm-64bit",
+  "code_revision": "4ff5ad8 + 当前待发布改动",
+  "working_tree_dirty": true,
+  "profile": "full",
+  "measurement_basis": {
+    "simulation_seconds": "实际仿真事件完成时间",
+    "wall_seconds": "subprocess 端到端 perf_counter 中位数",
+    "throughput": "完成件数 / 仿真 makespan"
+  },
+  "results": [
+    {
+      "case": "single_a",
+      "version": "v2",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 206.8,
+      "wall_seconds": 19.232533540998702,
+      "units": 1,
+      "throughput_per_sim_hour": 17.408123791102515,
+      "parallel_install_seconds": 0.0,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line_v2.py",
+        "--headless",
+        "--orders",
+        "A",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "single_a",
+      "version": "v1",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 256.9740000004989,
+      "wall_seconds": 45.90448462500353,
+      "units": 1,
+      "throughput_per_sim_hour": 14.009199374228563,
+      "parallel_install_seconds": null,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line.py",
+        "--headless",
+        "--order",
+        "A",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "single_a",
+      "version": "v1-early",
+      "supported": true,
+      "completed": false,
+      "exit_code": 2,
+      "simulation_seconds": 333.6300000008649,
+      "wall_seconds": 93.7325203329965,
+      "units": 1,
+      "throughput_per_sim_hour": null,
+      "parallel_install_seconds": null,
+      "error": "unexpected contact furnace/furnace_roof <-> arm2_fr3_link3/arm2_fr3_link3_collision (-1.07 mm)",
+      "command": [
+        "python",
+        "brazing_line.py",
+        "--headless",
+        "--order",
+        "A",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "three_a",
+      "version": "v2",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 368.5,
+      "wall_seconds": 53.214401749995886,
+      "units": 3,
+      "throughput_per_sim_hour": 29.308005427408414,
+      "parallel_install_seconds": 64.1,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line_v2.py",
+        "--headless",
+        "--orders",
+        "A,A,A",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "three_a",
+      "version": "v1",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 835.1299999940755,
+      "wall_seconds": 147.0403784999944,
+      "units": 3,
+      "throughput_per_sim_hour": 12.932118352923037,
+      "parallel_install_seconds": null,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line.py",
+        "--headless",
+        "--batch",
+        "A",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "three_a",
+      "version": "v1-early",
+      "supported": false,
+      "completed": false,
+      "exit_code": null,
+      "simulation_seconds": null,
+      "wall_seconds": null,
+      "units": 3,
+      "throughput_per_sim_hour": null,
+      "parallel_install_seconds": null,
+      "error": "该历史版本不支持此订单模式",
+      "command": []
+    },
+    {
+      "case": "mixed_abc",
+      "version": "v2",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 359.65,
+      "wall_seconds": 54.9951967090019,
+      "units": 3,
+      "throughput_per_sim_hour": 30.02919505074378,
+      "parallel_install_seconds": 71.95,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line_v2.py",
+        "--headless",
+        "--orders",
+        "A,B,C",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "mixed_abc",
+      "version": "v1",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 562.4400000005238,
+      "wall_seconds": 79.90207604100578,
+      "units": 3,
+      "throughput_per_sim_hour": 19.202048218458753,
+      "parallel_install_seconds": null,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line.py",
+        "--headless",
+        "--orders-file",
+        "/var/folders/r0/xw74vdf55_z8sg9wvydmg_240000gn/T/fr3-benchmark-7d9ych43/v1-abc.yaml",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "mixed_abc",
+      "version": "v1-early",
+      "supported": false,
+      "completed": false,
+      "exit_code": null,
+      "simulation_seconds": null,
+      "wall_seconds": null,
+      "units": 3,
+      "throughput_per_sim_hour": null,
+      "parallel_install_seconds": null,
+      "error": "该历史版本不支持此订单模式",
+      "command": []
+    }
+  ]
+}

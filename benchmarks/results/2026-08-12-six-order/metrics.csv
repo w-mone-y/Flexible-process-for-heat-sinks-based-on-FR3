@@ -1,0 +1,4 @@
+case,version,supported,completed,exit_code,simulation_seconds,wall_seconds,units,throughput_per_sim_hour,parallel_install_seconds,error,command
+six_abcabc,v2,True,True,0,649.3,131.93009362499288,6,33.26659479439397,181.45,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A,B,C,A,B,C', '--max-sim-time', '2000']"
+six_abcabc,v1,True,True,0,1224.6599999848645,149.83428000001004,6,17.637548380993053,,,"['python', 'brazing_line.py', '--headless', '--orders-file', 'v1-abc.yaml', '--max-sim-time', '2000']"
+six_abcabc,v1-early,False,False,,,,6,,,该历史版本不支持此订单模式,[]

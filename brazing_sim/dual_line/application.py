@@ -335,8 +335,12 @@ class V2BrazingApplication:
             arm = state.get("arms", {}).get(arm_name)
             if not isinstance(arm, dict):
                 continue
+            prepositioning = bool(physical.get("prepositioning", False))
             arm.update(
                 {
+                    "status": "prepositioning" if prepositioning else arm.get("status", "idle"),
+                    "prepositioning": prepositioning,
+                    "preposition_for": physical.get("preposition_for", ""),
                     "physical_mode": physical.get("mode"),
                     "planner": physical.get("planner"),
                     "target_zh": physical.get("target_zh"),

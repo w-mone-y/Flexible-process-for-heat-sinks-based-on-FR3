@@ -21,6 +21,7 @@ from PIL import Image
 
 from brazing_sim.dual_line.application import V2BrazingApplication
 from brazing_sim.dual_line.cli import parse_args
+from brazing_sim.dual_line.furnace import FurnacePhase
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "docs" / "images" / "readme"
@@ -101,9 +102,7 @@ def _encode_animations(frames: list[np.ndarray], destination_stem: Path) -> tupl
             raw.stdin.write(np.ascontiguousarray(frame, dtype=np.uint8).tobytes())
         raw.stdin.close()
         if raw.wait() != 0:
-            raise RuntimeError(
-                f"failed to encode intermediate video for {destination_stem.name}"
-            )
+            raise RuntimeError(f"failed to encode intermediate video for {destination_stem.name}")
 
         palette = Path(directory) / "palette.png"
         subprocess.run(
@@ -153,18 +152,19 @@ def _render_clip(
     sample_sim_seconds: float,
     maximum_clip_sim_seconds: float,
     inject_fault: tuple[str, str] | None = None,
+    fast: bool = True,
 ) -> None:
-    args = parse_args(
-        [
-            "--headless",
-            "--no-ui",
-            "--orders",
-            orders,
-            "--fast",
-            "--max-sim-time",
-            "320",
-        ]
-    )
+    arguments = [
+        "--headless",
+        "--no-ui",
+        "--orders",
+        orders,
+        "--max-sim-time",
+        "320",
+    ]
+    if fast:
+        arguments.append("--fast")
+    args = parse_args(arguments)
     application = V2BrazingApplication(args)
     application.submit_cli_orders()
     if inject_fault is not None:
@@ -177,10 +177,7 @@ def _render_clip(
     clip_started_at: float | None = None
     last_sample_at = float("-inf")
     try:
-        while (
-            not application.runtime.complete
-            and application.runtime.sim_time < float(args.max_sim_time)
-        ):
+        while not application.runtime.complete and application.runtime.sim_time < float(args.max_sim_time):
             application.advance_frame()
             now = float(application.runtime.sim_time)
             if clip_started_at is None:
@@ -216,6 +213,63 @@ def _render_clip(
 
 def _operation(application: V2BrazingApplication, resource: str):
     return application.runtime.operations.get(resource)
+
+
+def _tool_change_clip() -> None:
+    seen = {"started": False}
+
+    def label(application: V2BrazingApplication) -> str:
+        return str(application.scene.robot_motion_snapshot()["arm1"].get("target_zh", ""))
+
+    def started(application: V2BrazingApplication) -> bool:
+        current = label(application)
+        active = "换刀" in current and "竖直慢降" in current
+        seen["started"] = seen["started"] or active
+        return active
+
+    def finished(application: V2BrazingApplication) -> bool:
+        return seen["started"] and "换刀" not in label(application)
+
+    _render_clip(
+        filename="v2_tool_change_process.gif",
+        orders="A",
+        camera=_camera(
+            lookat=(-0.50, 1.10, 0.27),
+            distance=0.92,
+            azimuth=225,
+            elevation=-18,
+        ),
+        started=started,
+        finished=finished,
+        sample_sim_seconds=0.15,
+        maximum_clip_sim_seconds=14.0,
+        fast=False,
+    )
+
+
+def _base_loading_clip() -> None:
+    seen = {"started": False}
+
+    def active(application: V2BrazingApplication) -> bool:
+        operation = _operation(application, "ARM1")
+        running = operation is not None and operation.kind == "BASE_LOADING"
+        seen["started"] = seen["started"] or running
+        return running
+
+    _render_clip(
+        filename="v2_base_loading_process.gif",
+        orders="A",
+        camera=_camera(
+            lookat=(-0.40, 0.67, 0.28),
+            distance=1.48,
+            azimuth=155,
+            elevation=-30,
+        ),
+        started=active,
+        finished=lambda application: seen["started"] and not active(application),
+        sample_sim_seconds=0.22,
+        maximum_clip_sim_seconds=20.0,
+    )
 
 
 def _dispensing_clip() -> None:
@@ -274,27 +328,25 @@ def _parallel_install_clip() -> None:
     )
 
 
-def _fault_recovery_clip() -> None:
-    seen = {"recovery": False}
+def _fault_detection_clip() -> None:
+    def _defect_status(application: V2BrazingApplication) -> str | None:
+        return next(
+            (
+                defect.status
+                for defect in application.runtime.faults.physical_faults.values()
+                if defect.visual_type == "BRAZING_MISSING"
+            ),
+            None,
+        )
 
     def started(application: V2BrazingApplication) -> bool:
-        return any(
-            defect.visual_type == "BRAZING_MISSING" and defect.status == "DETECTED"
-            for defect in application.runtime.faults.physical_faults.values()
-        )
+        return _defect_status(application) == "MANIFESTED"
 
     def finished(application: V2BrazingApplication) -> bool:
-        operation = _operation(application, "ARM2")
-        if operation is not None and operation.kind == "DISPENSING" and operation.recovery:
-            seen["recovery"] = True
-        unresolved = any(
-            defect.visual_type == "BRAZING_MISSING" and defect.status != "RESOLVED"
-            for defect in application.runtime.faults.physical_faults.values()
-        )
-        return seen["recovery"] and not unresolved
+        return _defect_status(application) == "DETECTED"
 
     _render_clip(
-        filename="v2_fault_recovery_process.gif",
+        filename="v2_fault_detection_process.gif",
         orders="A",
         camera=_camera(
             lookat=(0.00, 0.00, 0.28),
@@ -305,15 +357,48 @@ def _fault_recovery_clip() -> None:
         started=started,
         finished=finished,
         sample_sim_seconds=0.30,
-        maximum_clip_sim_seconds=32.0,
+        maximum_clip_sim_seconds=48.0,
         inject_fault=("BRAZING_MISSING", "path_02"),
     )
 
 
+def _furnace_delivery_clip() -> None:
+    seen = {"unloading": False}
+
+    def started(application: V2BrazingApplication) -> bool:
+        unloading = (
+            application.runtime.furnace.state.phase is FurnacePhase.UNLOADING
+            and application.runtime.furnace.state.rear_door_open
+        )
+        seen["unloading"] = seen["unloading"] or unloading
+        return unloading
+
+    def finished(application: V2BrazingApplication) -> bool:
+        return seen["unloading"] and application.runtime.complete
+
+    _render_clip(
+        filename="v2_furnace_delivery_process.gif",
+        orders="A,A,A",
+        camera=_camera(
+            lookat=(4.05, 0.00, 0.34),
+            distance=2.55,
+            azimuth=75,
+            elevation=-38,
+        ),
+        started=started,
+        finished=finished,
+        sample_sim_seconds=0.35,
+        maximum_clip_sim_seconds=42.0,
+    )
+
+
 def main() -> int:
+    _tool_change_clip()
+    _base_loading_clip()
     _dispensing_clip()
     _parallel_install_clip()
-    _fault_recovery_clip()
+    _fault_detection_clip()
+    _furnace_delivery_clip()
     return 0
 
 

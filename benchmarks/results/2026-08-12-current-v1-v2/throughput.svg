@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520">
+  <rect width="960" height="520" rx="24" fill="#0f172a"/>
+  <text x="48" y="54" fill="#f8fafc" font-family="Arial,sans-serif" font-size="28" font-weight="700">当前仿真吞吐</text>
+  <text x="48" y="84" fill="#94a3b8" font-family="Arial,sans-serif" font-size="15">2026-08-12 · 完成件数 / 仿真 makespan · 越高越好</text>
+  <line x1="220" y1="112" x2="220" y2="454" stroke="#475569"/>
+  <g font-family="Arial,sans-serif" font-size="17" fill="#e2e8f0">
+    <text x="48" y="154">单件 A</text>
+    <text x="48" y="264">三件 A</text>
+    <text x="48" y="374">A / B / C</text>
+  </g>
+  <g>
+    <rect x="220" y="126" width="371" height="28" rx="7" fill="#38bdf8"/>
+    <rect x="220" y="162" width="299" height="28" rx="7" fill="#64748b"/>
+    <rect x="220" y="236" width="625" height="28" rx="7" fill="#38bdf8"/>
+    <rect x="220" y="272" width="276" height="28" rx="7" fill="#64748b"/>
+    <rect x="220" y="346" width="641" height="28" rx="7" fill="#38bdf8"/>
+    <rect x="220" y="382" width="410" height="28" rx="7" fill="#64748b"/>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="15" font-weight="700" fill="#f8fafc">
+    <text x="601" y="146">V2 17.41 件/h</text><text x="529" y="182">V1 14.01 件/h</text>
+    <text x="855" y="256">V2 29.31</text><text x="506" y="292">V1 12.93</text>
+    <text x="871" y="366">V2 30.03</text><text x="640" y="402">V1 19.20</text>
+  </g>
+  <g font-family="Arial,sans-serif" font-size="16" fill="#7dd3fc">
+    <text x="220" y="220">↑ 24.3%</text><text x="625" y="330">↑ 126.6%</text><text x="641" y="440">↑ 56.4%</text>
+  </g>
+</svg>
