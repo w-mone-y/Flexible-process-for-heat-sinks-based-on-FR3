@@ -1226,6 +1226,7 @@ class V2RobotMotionProjector:
                 ),
             )
             points: list[_Waypoint] = []
+            single_nozzle = getattr(operation, "route_mode", "") == "SINGLE_TWO_PASS"
             local_target = (
                 int(operation.recovery_target_index)
                 if operation.recovery_strategy == "LOCAL_BRAZING_REWORK"
@@ -1272,57 +1273,89 @@ class V2RobotMotionProjector:
                     origin=origin,
                     rotation=rotation,
                 )
-                start, end = dispense_pass.start.copy(), dispense_pass.end.copy()
-                if local_target is not None:
-                    # The defect visual retains the first 36% of a missing
-                    # path.  Move one enabled nozzle only over the missing tail;
-                    # the paired nozzle is treated as shut off for touch-up.
-                    if operation.recovery_fault_type == "BRAZING_MISSING":
-                        start = start + 0.36 * (end - start)
-                elif pass_index % 2:
-                    start, end = end, start
-                if local_target is not None and operation.recovery_fault_type == "BRAZING_PATH_DEVIATION":
-                    append_dense_path(
-                        start,
-                        end,
-                        approach_label=f"S2A {local_target:02d}号偏轨钎料清除安全接近",
-                        start_label=f"S2A {local_target:02d}号偏轨钎料清除起点对准",
-                        travel_label=f"S2A {local_target:02d}号偏轨钎料从一端向另一端逐段清除",
-                        finish_label=f"S2A {local_target:02d}号偏轨钎料清除完成后抬枪",
+                if single_nozzle:
+                    # ``BrazingPath`` is authored at the base-top Z, while
+                    # ``DispensePass`` has already lifted the centre path to
+                    # the measured nozzle-tip height.  Keep each individual
+                    # path's X/Y but inherit that calibrated local Z; feeding
+                    # ``path.start`` through directly would drive the nozzle
+                    # into the tray/base instead of applying material.
+                    local_tip_z = float(
+                        (
+                            np.asarray(rotation, dtype=float).reshape(3, 3).T
+                            @ (dispense_pass.start - np.asarray(origin, dtype=float))
+                        )[2]
                     )
-                    append_dense_path(
-                        start,
-                        end,
-                        approach_label=f"S2A {local_target:02d}号目标焊道重新涂覆安全接近",
-                        start_label=f"S2A {local_target:02d}号目标焊道重新涂覆起点对准",
-                        travel_label=f"S2A {local_target:02d}号目标焊道从一端向另一端重新涂覆",
-                        finish_label=f"S2A {local_target:02d}号目标焊道重新涂覆完成后抬枪",
-                    )
+                    segments = [
+                        (
+                            geometry._world(
+                                np.asarray((*path.start[:2], local_tip_z), dtype=float),
+                                origin=origin,
+                                rotation=rotation,
+                            ),
+                            geometry._world(
+                                np.asarray((*path.end[:2], local_tip_z), dtype=float),
+                                origin=origin,
+                                rotation=rotation,
+                            ),
+                        )
+                        for path in dispense_pass.paths
+                    ]
                 else:
-                    append_dense_path(
-                        start,
-                        end,
-                        approach_label=(
-                            f"S2A {local_target:02d}号焊道局部补涂安全接近"
-                            if local_target is not None
-                            else f"S2A 第{pass_index + 1}道安全接近"
-                        ),
-                        start_label=(
-                            f"S2A {local_target:02d}号焊道缺口起点精确对准（关闭非目标喷嘴）"
-                            if local_target is not None
-                            else f"S2A 第{pass_index + 1}道起点精确对准"
-                        ),
-                        travel_label=(
-                            f"S2A {local_target:02d}号焊道局部连续补涂"
-                            if local_target is not None
-                            else f"S2A 第{pass_index + 1}道双喷嘴连续涂覆"
-                        ),
-                        finish_label=(
-                            f"S2A {local_target:02d}号焊道补涂完成后抬枪"
-                            if local_target is not None
-                            else f"S2A 第{pass_index + 1}道完成后抬枪"
-                        ),
-                    )
+                    segments = [(dispense_pass.start.copy(), dispense_pass.end.copy())]
+                for segment_index, (start, end) in enumerate(segments):
+                    if local_target is not None:
+                        # The defect visual retains the first 36% of a missing
+                        # path. Move one enabled nozzle only over the missing
+                        # tail; the paired nozzle is treated as shut off for
+                        # touch-up.
+                        if operation.recovery_fault_type == "BRAZING_MISSING":
+                            start = start + 0.36 * (end - start)
+                    elif not single_nozzle and pass_index % 2:
+                        start, end = end, start
+                    if local_target is not None and operation.recovery_fault_type == "BRAZING_PATH_DEVIATION":
+                        append_dense_path(
+                            start,
+                            end,
+                            approach_label=f"S2A {local_target:02d}号偏轨钎料清除安全接近",
+                            start_label=f"S2A {local_target:02d}号偏轨钎料清除起点对准",
+                            travel_label=f"S2A {local_target:02d}号偏轨钎料从一端向另一端逐段清除",
+                            finish_label=f"S2A {local_target:02d}号偏轨钎料清除完成后抬枪",
+                        )
+                        append_dense_path(
+                            start,
+                            end,
+                            approach_label=f"S2A {local_target:02d}号目标焊道重新涂覆安全接近",
+                            start_label=f"S2A {local_target:02d}号目标焊道重新涂覆起点对准",
+                            travel_label=f"S2A {local_target:02d}号目标焊道从一端向另一端重新涂覆",
+                            finish_label=f"S2A {local_target:02d}号目标焊道重新涂覆完成后抬枪",
+                        )
+                    else:
+                        route_label = "单喷嘴两遍" if single_nozzle else "双喷嘴连续"
+                        append_dense_path(
+                            start,
+                            end,
+                            approach_label=(
+                                f"S2A {local_target:02d}号焊道局部补涂安全接近"
+                                if local_target is not None
+                                else f"S2A 第{pass_index + 1}道第{segment_index + 1}遍安全接近"
+                            ),
+                            start_label=(
+                                f"S2A {local_target:02d}号焊道缺口起点精确对准（关闭非目标喷嘴）"
+                                if local_target is not None
+                                else f"S2A 第{pass_index + 1}道起点精确对准"
+                            ),
+                            travel_label=(
+                                f"S2A {local_target:02d}号焊道局部连续补涂"
+                                if local_target is not None
+                                else f"S2A 第{pass_index + 1}道{route_label}涂覆"
+                            ),
+                            finish_label=(
+                                f"S2A {local_target:02d}号焊道补涂完成后抬枪"
+                                if local_target is not None
+                                else f"S2A 第{pass_index + 1}道第{segment_index + 1}遍完成后抬枪"
+                            ),
+                        )
             return "arm2_dispenser", tuple(points)
         if arm_name == "arm3" and operation.kind == "MATERIAL_INSPECTION":
             geometry = V2ProcessGeometry.for_unit(unit)
@@ -1334,6 +1367,7 @@ class V2RobotMotionProjector:
                     "v2_station_s2b_dock",
                 ),
             )
+            closeup = getattr(operation, "route_phase", "") == "S3B_CLOSEUP"
             return (
                 "arm3_camera",
                 (
@@ -1344,7 +1378,7 @@ class V2RobotMotionProjector:
                             product_width_m=geometry.base_size_m[1],
                             product_yaw_rad=yaw,
                         ),
-                        "S2B 焊料检测",
+                        "S3B 高可靠路线焊料近景复核" if closeup else "S2B 焊料检测",
                     ),
                 ),
             )
@@ -1358,6 +1392,7 @@ class V2RobotMotionProjector:
                     "v2_station_s4_dock",
                 ),
             )
+            closeup = getattr(operation, "route_phase", "") == "S3B_CLOSEUP"
             return (
                 "arm3_camera",
                 (
@@ -1368,7 +1403,7 @@ class V2RobotMotionProjector:
                             product_width_m=geometry.base_size_m[1],
                             product_yaw_rad=yaw,
                         ),
-                        "S4 焊前检测",
+                        "S3B 高可靠路线翅片近景复核" if closeup else "S4 焊前检测",
                     ),
                 ),
             )

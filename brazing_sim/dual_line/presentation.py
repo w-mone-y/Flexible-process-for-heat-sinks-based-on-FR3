@@ -70,8 +70,12 @@ _STAGE_ORDER = (
     "DISPENSING",
     "WAITING_S2B",
     "MATERIAL_INSPECTION",
+    "WAITING_BRAZING_REVIEW",
+    "BRAZING_REVIEW",
     "WAITING_INSTALL",
     "FIN_INSTALLATION",
+    "WAITING_FINS_REVIEW",
+    "FINS_REVIEW",
     "WAITING_MERGE",
     "MERGING",
     "WAITING_S4",
@@ -312,6 +316,10 @@ class V2StatePresenter:
             stage = str(unit.get("stage", "QUEUED"))
             rank = _STAGE_RANK.get(stage, 0)
             branch = str(unit.get("branch") or "")
+            route_strategy = str(unit.get("route_strategy", "STANDARD"))
+            route_review = route_strategy == "HIGH_RELIABILITY" or (
+                route_strategy == "FIRST_ARTICLE" and unit_id.endswith("_UNIT_01")
+            )
             fin_count = int(unit.get("fin_count", 0))
             fins_installed = int(unit.get("fins_installed", 0))
             previous: str | None = None
@@ -327,6 +335,7 @@ class V2StatePresenter:
                 ready: bool,
                 resource: str,
                 detail: str = "",
+                event_completed: bool = True,
             ) -> None:
                 nonlocal previous
                 task_id = f"{unit_id}:{suffix}"
@@ -336,7 +345,11 @@ class V2StatePresenter:
                 status = cls._task_status(
                     completed=(
                         completed
-                        or (task_type != "INSTALL_FIN" and (unit_id, running_kind) in completed_operations)
+                        or (
+                            event_completed
+                            and task_type != "INSTALL_FIN"
+                            and (unit_id, running_kind) in completed_operations
+                        )
                     ),
                     running=running_resource is not None,
                     ready=ready,
@@ -401,7 +414,16 @@ class V2StatePresenter:
             append_task(
                 "dispense",
                 "DISPENSE_BRAZING",
-                "双喷嘴连续涂覆",
+                (
+                    "单喷嘴两遍涂覆"
+                    if any(
+                        operation.get("unit_id") == unit_id
+                        and operation.get("kind") == "DISPENSING"
+                        and operation.get("route_mode") == "SINGLE_TWO_PASS"
+                        for operation in operations.values()
+                    )
+                    else "双喷嘴连续涂覆"
+                ),
                 "S2A_DISPENSING",
                 completed=rank > _STAGE_RANK["DISPENSING"],
                 running_kind="DISPENSING",
@@ -418,6 +440,23 @@ class V2StatePresenter:
                 ready=rank >= _STAGE_RANK["MATERIAL_INSPECTION"],
                 resource="ARM3",
             )
+            if route_review:
+                append_task(
+                    "brazing_review",
+                    "REVIEW_BRAZING_CLOSEUP",
+                    "S3B焊料近景复核",
+                    "S3B_ARM3_INSTALL",
+                    completed=rank > _STAGE_RANK["BRAZING_REVIEW"],
+                    running_kind="MATERIAL_INSPECTION",
+                    ready=rank >= _STAGE_RANK["WAITING_BRAZING_REVIEW"],
+                    resource="ARM3",
+                    detail=(
+                        "首件高可靠路线 · S3B焊料近景复核"
+                        if route_strategy == "FIRST_ARTICLE"
+                        else "高可靠路线 · S3B焊料近景复核"
+                    ),
+                    event_completed=False,
+                )
             if branch == "ARM1_A":
                 install_station = "S3A_ARM1_INSTALL"
                 install_resource = "ARM1"
@@ -438,6 +477,23 @@ class V2StatePresenter:
                     ready=(rank >= _STAGE_RANK["FIN_INSTALLATION"] and fins_installed + 1 >= index),
                     resource=install_resource,
                     detail=f"{tray_id or '待分配托盘'} · {branch or '等待支路分配'}",
+                )
+            if route_review:
+                append_task(
+                    "fins_review",
+                    "REVIEW_FINS_CLOSEUP",
+                    "S3B翅片近景复核",
+                    "S3B_ARM3_INSTALL",
+                    completed=rank > _STAGE_RANK["FINS_REVIEW"],
+                    running_kind="PRE_BRAZE_INSPECTION",
+                    ready=rank >= _STAGE_RANK["WAITING_FINS_REVIEW"],
+                    resource="ARM3",
+                    detail=(
+                        "首件高可靠路线 · S3B翅片近景复核"
+                        if route_strategy == "FIRST_ARTICLE"
+                        else "高可靠路线 · S3B翅片近景复核"
+                    ),
+                    event_completed=False,
                 )
             append_task(
                 "merge",
@@ -742,6 +798,9 @@ class V2StatePresenter:
                 "status": ("FAULTED" if faulted else "BUSY" if operation is not None else "IDLE"),
                 "current_task_id": tasks_by_operation.get((unit_id, kind)),
                 "current_tool": tool,
+                "route_mode": None if operation is None else operation.get("route_mode", "PRIMARY"),
+                "capability": None if operation is None else operation.get("capability", ""),
+                "route_phase": None if operation is None else operation.get("route_phase", ""),
                 "fault_code": fault_codes.get(resource) if faulted else None,
                 "recover_at": isolated.get(resource) if faulted else None,
                 "occupied_zones": [],
@@ -943,9 +1002,17 @@ class V2StatePresenter:
             ),
             "arm2_process": {
                 "current_path": (
-                    "双喷嘴连续涂覆"
-                    if any(operation.get("kind") == "DISPENSING" for operation in operations.values())
-                    else ""
+                    "单喷嘴两遍涂覆"
+                    if any(
+                        operation.get("kind") == "DISPENSING"
+                        and operation.get("route_mode") == "SINGLE_TWO_PASS"
+                        for operation in operations.values()
+                    )
+                    else (
+                        "双喷嘴连续涂覆"
+                        if any(operation.get("kind") == "DISPENSING" for operation in operations.values())
+                        else ""
+                    )
                 ),
                 "completed_paths": (
                     2 * int(active.get("fin_count", 0))
@@ -990,6 +1057,29 @@ class V2StatePresenter:
                 "blocked_candidates": scheduler_blocked,
             },
             "tasks": tasks,
+            "route_execution": {
+                "orders": [
+                    {
+                        "order_id": str(order.get("order_id", "")),
+                        "route_strategy": str(order.get("route_strategy", "STANDARD")),
+                        "unit_ids": list(order.get("unit_ids", ())),
+                    }
+                    for order in snapshot.get("orders", ())
+                    if isinstance(order, Mapping)
+                ],
+                "selected_operations": [
+                    {
+                        "resource": str(resource),
+                        "unit_id": str(operation.get("unit_id", "")),
+                        "kind": str(operation.get("kind", "")),
+                        "route_mode": str(operation.get("route_mode", "PRIMARY")),
+                        "capability": str(operation.get("capability", "")),
+                        "route_phase": str(operation.get("route_phase", "")),
+                    }
+                    for resource, operation in operations.items()
+                    if isinstance(operation, Mapping)
+                ],
+            },
             "resources_v2": resources_v2,
             # V2 enforces exclusivity through single tray ownership rather than a
             # separate lock manager, so the occupied station *is* the held zone.

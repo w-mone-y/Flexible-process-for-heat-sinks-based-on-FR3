@@ -280,10 +280,11 @@ def test_dropped_order_fields_are_reported_not_swallowed():
     )
     with pytest.raises(ValueError) as excinfo:
         surface.process(command)
-    assert "未生效" in str(excinfo.value)
+    assert "炉层由实际装炉顺序分配" in str(excinfo.value)
     assert surface.ignored_order_fields
-    # The order itself is still accepted; only the unsupported field is refused.
-    assert runtime.orders
+    # Refusal is transactional: the unsupported field must not enqueue an order
+    # that the caller was told had not been honoured.
+    assert not runtime.orders
 
 
 def test_supported_order_fields_do_not_warn():

@@ -50,6 +50,108 @@
 
 ## 🎬 六段动图看完整流程
 
+- 📦 **订单参数驱动**：A/B/C 物理订单与严格 YAML 配置共用一套执行主线，D 型用于验证免改代码扩展。
+- 🧩 **订单驱动工装**：15/20/30 mm 梳齿、短压梁和托盘随产品参数变化，并记录序列相关换型成本。
+- 🔀 **多订单异步流水**：V1 三托盘、V2 六托盘 WIP，不同机械臂可在不同工位并行。
+- 🧬 **V2 遗传订单释放**：可选遗传算法优化进入 S1 的订单顺序，物理约束和安全调度仍由 V2 运行时兜底。
+- 🧠 **任务图动态调度**：`ProcessPlan → Task DAG → Scheduler → Skills`。
+- 🛠️ **可见故障与恢复**：漏涂、偏位、设备离线、输送超时、炉门互锁等。
+- 🔥 **完整炉体闭环**：三层前门装炉、30 秒演示热循环、后门卸载、检测与交付。
+- 🖥️ **规划控制台**：订单、任务图、工程示意、资源、故障、物流与实验指标。
+- ⚡ **0.25×～32× 倍速**：只改变仿真推进速度，不改变任务依赖与质量结果。
+
+### 当前能力边界（避免把规划能力当成物理能力）
+
+| 能力 | V1 稳定线 | V2 双安装线 | 当前边界 |
+|---|:---:|:---:|---|
+| A/B/C 实体订单 | ✅ | ✅ | 共用产品与配方语义，使用独立物理运行时 |
+| D 型 / 自定义 YAML | ✅ 规划与 dry-run | ⚠️ 规划可见、实体执行未开放 | 无实体模块或超容量时在启动前拒绝 |
+| 多订单协同 | ✅ 三托盘 | ✅ 六托盘、双安装支路 | 单炉最多三件，超出 WIP 的订单留在虚拟队列 |
+| 可见故障与返工 | ✅ | ✅ | 质量故障由相机检出后返工；安全故障不能自动绕过 |
+| 动态任务 DAG | ✅ | ⚠️ V2 使用异步阶段状态机 | V2 UI 会实时投影物理任务，但不是同一套 DAG 执行器 |
+| 自动换型规划与 KPI | ✅ | ✅ 展示 | 换型动作与成本已建模；实体换型龙门仍是后续工作 |
+
+> `✅` 表示当前代码和回归测试覆盖；`⚠️` 表示已具备规划、展示或部分执行能力，
+> 但仍保留明确的物理边界。项目不会用动画或 UI 文案冒充尚未接通的 actor。
+
+## 🏭 一张图看懂生产流程
+
+```mermaid
+flowchart LR
+    O["📦 订单 / YAML"] --> P["🧠 ProcessPlan"]
+    P --> S1["S1 基板上料<br/>Arm1 + 吸盘"]
+    S1 --> S2A["S2A 钎料涂覆<br/>Arm2 + 双喷嘴"]
+    S2A --> S2B["S2B 材料检测<br/>Arm3"]
+    S2B -->|漏涂| R1["🔧 局部补涂"]
+    R1 --> S2B
+    S2B -->|通过| D{"🧠 最早完工分流"}
+    D --> S3A["S3A 梳齿引导装配<br/>Arm1 + 夹爪"]
+    D --> S3B["S3B 梳齿引导装配<br/>Arm3 + 复合末端"]
+    S3A --> M["🔀 单占用合流"]
+    S3B --> M
+    M --> I2["📷 共享焊前检测"]
+    I2 -->|偏位| R2["🔧 重抓 / 重装"]
+    R2 --> I2
+    I2 -->|通过| L["🔒 双短压梁锁紧"]
+    L --> F["🔥 三层贯通炉 / 30 秒演示周期"]
+    F --> PI["📷 焊后检测"]
+    PI --> OUT["📤 成品出口"]
+```
+
+V2 采用从左向右的双安装支路布局；稳定 V1 仍保留浅 U 形单安装支路：
+
+```text
+S1 基板装载 → S2A 钎料涂覆 → S2B 焊料检测
+                                  ├→ S3A Arm1 安装 ┐
+                                  └→ S3B Arm3 安装 ┴→ S4 共享检测
+                                                     → 三位炉前缓存
+                                                     → 三层贯通炉
+                                                     → 固定焊后检测
+                                                     → 成品出口
+```
+
+<a id="animations"></a>
+
+## 🎥 动态工艺速览
+
+> 下面的动图由真实 V2 运行时离屏采集，不是手动摆放模型或概念动画。
+> 为了让 GitHub 页面上的演示更紧凑，它们使用 `--fast` 演示节拍并抽帧加速；
+> **动图速度不用于 KPI 或真实生产节拍结论**。
+
+### 💧 Arm2 蛇形钎料涂覆
+
+<p align="center">
+  <img src="docs/images/readme/v2_dispensing_process.webp" alt="Arm2 双喷嘴沿参数化蛇形路径逐条涂覆钎料" width="1000">
+</p>
+
+<p align="center"><sub>高清动态 WebP · <a href="docs/images/readme/v2_dispensing_process.gif">GIF 备用版</a></sub></p>
+
+👉 喷嘴沿奇偶路径交替反向扫描，黄色钎料会随喷头前进逐段增长，
+已完成的路径保持在基板上，而不是一次性闪现出完整线条。
+
+### 🤖 Arm1 + Arm3 双支路并行安装
+
+<p align="center">
+  <img src="docs/images/readme/v2_parallel_install_process.webp" alt="Arm1 与 Arm3 在 S3A 和 S3B 两张托盘上并行安装翅片" width="1000">
+</p>
+
+<p align="center"><sub>高清动态 WebP · <a href="docs/images/readme/v2_parallel_install_process.gif">GIF 备用版</a></sub></p>
+
+👉 左右两张托盘拥有独立的梳齿、翅片和任务状态。Arm3 遇到检测任务时保持
+检测优先；它处于空闲窗口时，才与 Arm1 分担逐片安装，因此这是调度结果，
+而不是两台机械臂的固定同步动画。
+
+### 🩹 钎料漏涂的“检出 → 返回 → 局部补涂”
+
+<p align="center">
+  <img src="docs/images/readme/v2_fault_recovery_process.webp" alt="S2B 检出钎料局部漏涂后托盘返回 S2A 由 Arm2 局部补涂" width="1000">
+</p>
+
+<p align="center"><sub>高清动态 WebP · <a href="docs/images/readme/v2_fault_recovery_process.gif">GIF 备用版</a></sub></p>
+
+👉 缺口先在涂覆阶段形成，到 S2B 检测后才进入恢复分支。返程中其他完好钎料
+继续保留，Arm2 只处理缺失区段，完成后再送往检测，体现“局部返工”而不是
+把整张基板重置后重播。
 <table>
   <tr>
     <td width="50%" align="center"><strong>① Arm1 物理换刀</strong><br><img src="docs/images/readme/v2_tool_change_process.webp" width="100%"><br><sub>高位横移 → 纯 Z 慢降 → 挂接 → 纯 Z 离架</sub></td>
@@ -299,6 +401,16 @@ flowchart TB
 
 <a id="project-map"></a>
 
+V2 可以用遗传算法比较订单释放顺序；该选项只作用于 V2，不改变 V1：
+
+```bash
+python brazing_line_v2.py --headless --fast --orders A,B,C --optimizer genetic --genetic-seed 42
+```
+
+遗传算法输出的是已准入产品单元的排列，不直接控制关节、托盘或炉门。托盘唯一所有权、
+炉批兼容、Arm3 检测优先、区域互斥和物理完成门控仍由 V2 运行时负责。
+
+<a id="benchmark"></a>
 ## 🗺️ 项目地图
 
 ```text

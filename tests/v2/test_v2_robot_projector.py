@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from brazing_sim.dual_line import DualLineRuntime, DualLineSceneAdapter, UnifiedV2Runtime, UnitStage
-from brazing_sim.flexible import build_custom_plan
+from brazing_sim.flexible import build_custom_plan, build_inline_plan
 from brazing_sim.motion import HOME_QPOS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1152,6 +1152,49 @@ def test_v2_fin_carry_and_dispensing_follow_v1_pose_locked_cartesian_semantics()
             tool_axes = np.stack([sample[2] for sample in line])[contact]
             down_error = np.arccos(np.clip(-tool_axes[:, 2], -1.0, 1.0))
             assert float(np.max(down_error)) <= np.deg2rad(0.2)
+    finally:
+        adapter.close()
+
+
+def test_v2_single_nozzle_route_keeps_calibrated_nozzle_tip_height() -> None:
+    """The single-nozzle OR branch must reuse the dual route's contact Z."""
+
+    pytest.importorskip("mujoco")
+    plan = build_inline_plan(
+        preset="A",
+        order_id="SINGLE_NOZZLE_HEIGHT",
+        quantity=1,
+        priority=10,
+    )
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    adapter.operation_route_metadata = lambda _resource, _unit_id, kind: (
+        {"mode": "SINGLE_TWO_PASS", "capability": "MATERIAL_DISPENSING_SINGLE"}
+        if kind == "DISPENSING"
+        else {}
+    )
+    runtime.set_execution_gate(adapter)
+    contact_z: list[float] = []
+    try:
+        runtime.submit_plan(plan)
+        unit = runtime.units["SINGLE_NOZZLE_HEIGHT_UNIT_01"]
+        for _ in range(12_000):
+            runtime.tick(0.01)
+            adapter.sync(runtime)
+            adapter.step_physics(0.01)
+            state = adapter.robot_motion_snapshot()["arm2"]
+            if ":DISPENSING:" not in str(state["operation"]):
+                continue
+            if "单喷嘴两遍涂覆" not in str(state["target_zh"]):
+                continue
+            contact_z.append(float(state["target_tcp_position_m"][2]))
+            if len(contact_z) >= 10:
+                break
+
+        assert len(contact_z) >= 10
+        tray_z = float(adapter.data.body(f"{unit.tray_id.lower()}_carrier").xpos[2])
+        expected_z = tray_z + 0.028 + plan.execution_spec.base_thickness + plan.product.nozzle_tip_height_m
+        assert min(contact_z) == pytest.approx(expected_z, abs=0.002)
     finally:
         adapter.close()
 

@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from ..flexible import build_inline_plan
 from ..flexible.models import ProcessPlan
 from ..recovery.fault_models import RecoveryStatus
-from .faults import V2FaultController
+from .admission import validate_v2_order_id, validate_v2_plan
 from .camera_coordination import CameraCoordinationPolicy, CameraReviewReason
 from .dispatch import (
     DualInstallDispatcher,
@@ -23,7 +23,9 @@ from .dispatch import (
     InstallRequest,
     InstallResourceState,
 )
+from .faults import V2FaultController
 from .furnace import BatchRecipe, FurnacePhase, ThroughBatchFurnace
+from .optimization import GeneticReleasePlanner, ReleaseCandidate, ReleasePlan
 from .process_geometry import V2_MAX_PRODUCT_HEIGHT_M, V2ProcessGeometry
 from .topology import DualLineTopology
 from .tray_flow import TrayFlowController, TrayOwner, TrayPhase
@@ -147,6 +149,9 @@ class _Operation:
     remaining_s: float
     started_at: float
     duration_s: float
+    route_mode: str = "PRIMARY"
+    capability: str = ""
+    route_phase: str = ""
     recovery: bool = False
     recovery_strategy: str = ""
     recovery_fault_type: str = ""
@@ -223,13 +228,21 @@ class _Durations:
 
 # Stage progression index, used to tell forward motion from a recovery rewind.
 _STAGE_ORDER: dict[UnitStage, int] = {stage: index for index, stage in enumerate(UnitStage)}
+EVENT_HISTORY_LIMIT = 2_000
 
 
 class DualLineRuntime:
     """Asynchronous six-tray runtime with shared Arm3 and a batch furnace."""
 
-    def __init__(self, *, fast: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fast: bool = False,
+        optimizer: str = "RULE",
+        genetic_seed: int = 42,
+    ) -> None:
         self.fast = bool(fast)
+        self.optimizer_mode = self._normalize_optimizer(optimizer)
         self.topology = DualLineTopology.standard()
         topology_errors = self.topology.validate()
         if topology_errors:
@@ -246,6 +259,9 @@ class DualLineRuntime:
             nominal_max_wait_seconds=600.0,
         )
         self.durations = _Durations.for_mode(fast)
+        self.genetic_planner = (
+            GeneticReleasePlanner(seed=int(genetic_seed)) if self.optimizer_mode == "GENETIC" else None
+        )
         self.orders: dict[str, V2OrderState] = {}
         self.units: dict[str, V2UnitState] = {}
         self.operations: dict[str, _Operation] = {}
@@ -278,6 +294,18 @@ class DualLineRuntime:
         # unit_id -> duration multiplier for its next operation (rework surcharge)
         self._rework_effort: dict[str, _RecoveryWork] = {}
         self._execution_gate: RuntimeExecutionGate | None = None
+        self._genetic_queue_signature: tuple[tuple[object, ...], ...] | None = None
+        self._genetic_release_plan: ReleasePlan | None = None
+        self._last_release_family: str | None = None
+
+    @staticmethod
+    def _normalize_optimizer(value: str) -> str:
+        mode = str(value).strip().upper()
+        aliases = {"DEFAULT": "RULE", "RULE": "RULE", "GA": "GENETIC", "GENETIC": "GENETIC"}
+        mode = aliases.get(mode, mode)
+        if mode not in {"RULE", "GENETIC"}:
+            raise ValueError("V2 optimizer must be rule or genetic")
+        return mode
 
     def set_execution_gate(self, gate: RuntimeExecutionGate | None) -> None:
         """Bind physical readiness feedback, or restore logical-only mode."""
@@ -320,8 +348,8 @@ class DualLineRuntime:
         plan = build_inline_plan(
             preset=preset,
             order_id=identifier,
-            quantity=int(quantity),
-            priority=int(priority),
+            quantity=quantity,
+            priority=priority,
             route_strategy=str(route_strategy).strip().upper() or "STANDARD",
         )
         return self.submit_plan(plan, due_at=due_at, urgent=urgent)
@@ -336,10 +364,22 @@ class DualLineRuntime:
     ) -> V2OrderState:
         """Bind one validated ``ProcessPlan`` to V2 logical and physical state."""
 
-        if not 1 <= int(plan.quantity) <= 3:
-            raise ValueError("one V2 order may contain one to three units")
-        if plan.order.priority < 0:
-            raise ValueError("priority must be non-negative")
+        # Admission is deliberately before geometry/state mutation.  A custom
+        # plan always takes the full gate; preset plans do so once a physical
+        # scene is bound.  Logical-only preset tests/callers keep the cheap
+        # state-machine validation and do not repeatedly compile the full DAG.
+        if (
+            not isinstance(plan, ProcessPlan)
+            or plan.product.preset == "CUSTOM"
+            or self._execution_gate is not None
+        ):
+            validate_v2_plan(plan)
+        else:
+            validate_v2_order_id(plan.order.order_id)
+            if not 1 <= int(plan.quantity) <= 3:
+                raise ValueError("one V2 order may contain one to three units")
+            if plan.order.priority < 0:
+                raise ValueError("priority must be non-negative")
         if due_at is not None and not isfinite(float(due_at)):
             raise ValueError("due time must be finite")
         geometry = V2ProcessGeometry.from_plan(plan)
@@ -353,10 +393,10 @@ class DualLineRuntime:
             # validation above.
             maximum_product_height_m=V2_MAX_PRODUCT_HEIGHT_M,
         )
-        self._order_sequence += 1
-        identifier = str(plan.order.order_id).strip() or f"V2_ORDER_{self._order_sequence:03d}"
+        identifier = str(plan.order.order_id).strip() or f"V2_ORDER_{self._order_sequence + 1:03d}"
         if identifier in self.orders:
             raise ValueError(f"duplicate V2 order id: {identifier}")
+        self._order_sequence += 1
         unit_ids = tuple(f"{identifier}_UNIT_{index:02d}" for index in range(1, int(plan.quantity) + 1))
         for unit_id in unit_ids:
             self.units[unit_id] = V2UnitState(
@@ -407,6 +447,8 @@ class DualLineRuntime:
 
     def _event(self, event_type: str, **payload: Any) -> None:
         self.events.append({"time": round(self.sim_time, 6), "type": event_type, **payload})
+        if len(self.events) > EVENT_HISTORY_LIMIT:
+            del self.events[: len(self.events) - EVENT_HISTORY_LIMIT]
 
     @staticmethod
     def _camera_review_reason(unit: V2UnitState) -> CameraReviewReason | None:
@@ -531,6 +573,30 @@ class DualLineRuntime:
         # check here makes ``_start`` the single physical dispatch choke point.
         if not self._operation_start_allowed(resource, unit, kind):
             return False
+        route_metadata: dict[str, Any] = {}
+        metadata_callback = (
+            None
+            if self._execution_gate is None
+            else getattr(self._execution_gate, "operation_route_metadata", None)
+        )
+        if callable(metadata_callback):
+            candidate = metadata_callback(resource, unit.unit_id, kind)
+            if isinstance(candidate, dict):
+                route_metadata = candidate
+        route_mode = str(route_metadata.get("mode") or "PRIMARY")
+        capability = str(route_metadata.get("capability") or "")
+        route_phase = (
+            "S3B_CLOSEUP"
+            if self.camera_review_required(unit.unit_id, kind)
+            else {
+                "MATERIAL_INSPECTION": "S2B_PRIMARY",
+                "PRE_BRAZE_INSPECTION": "S4_PRIMARY",
+            }.get(kind, kind)
+        )
+        if kind == "DISPENSING" and route_mode == "SINGLE_TWO_PASS":
+            # The configured single-nozzle alternative is a real slower
+            # physical route, not merely a scheduler label.
+            duration = float(duration) * 1.8
         # A unit carrying pending rework performs the next operation at rework
         # effort, then the surcharge is consumed.
         recovery_work = self._rework_effort.pop(unit.unit_id, None)
@@ -564,6 +630,9 @@ class DualLineRuntime:
             remaining_s=float(duration),
             started_at=self.sim_time,
             duration_s=float(duration),
+            route_mode=route_mode,
+            capability=capability,
+            route_phase=route_phase,
             recovery=recovery,
             recovery_strategy="" if recovery_work is None else recovery_work.strategy,
             recovery_fault_type="" if recovery_work is None else recovery_work.fault_type,
@@ -571,7 +640,16 @@ class DualLineRuntime:
         )
         if self.camera_review_required(unit.unit_id, kind):
             self._start_camera_review(unit, kind)
-        self._event("OPERATION_STARTED", resource=resource, unit_id=unit.unit_id, kind=kind)
+        self._event(
+            "OPERATION_STARTED",
+            resource=resource,
+            unit_id=unit.unit_id,
+            kind=kind,
+            route_strategy=unit.route_strategy,
+            route_mode=route_mode,
+            capability=capability,
+            route_phase=route_phase,
+        )
         return True
 
     def _resource_available_at(self, resource: str) -> float:
@@ -1004,6 +1082,10 @@ class DualLineRuntime:
             resource=operation.resource,
             unit_id=unit.unit_id,
             kind=operation.kind,
+            route_strategy=unit.route_strategy,
+            route_mode=operation.route_mode,
+            capability=operation.capability,
+            route_phase=operation.route_phase,
         )
         if operation.kind == "BASE_LOADING":
             self._set_stage(unit, UnitStage.WAITING_S2A)
@@ -1135,6 +1217,70 @@ class DualLineRuntime:
                 self._furnace_load_queue = []
                 self._event("FURNACE_BATCH_COMPLETED", **record)
 
+    @staticmethod
+    def _genetic_family(unit: V2UnitState) -> str:
+        return unit.comb_module or unit.product_id or unit.preset
+
+    def _genetic_flow_estimate(self, unit: V2UnitState) -> float:
+        return (
+            self.durations.base_load
+            + self.durations.dispensing
+            + self.durations.material_inspection
+            + unit.fin_count * min(self.durations.arm1_fin, self.durations.arm3_fin)
+            + self.durations.merge
+            + self.durations.pre_braze_inspection
+            + self.durations.furnace_transfer
+        )
+
+    def _genetic_candidates(self, queued: list[V2UnitState]) -> tuple[ReleaseCandidate, ...]:
+        return tuple(
+            ReleaseCandidate(
+                order_id=unit.order_id,
+                unit_id=unit.unit_id,
+                family=self._genetic_family(unit),
+                priority=unit.priority,
+                urgent=unit.urgent,
+                inserted_at=unit.stage_started_at,
+                due_at=unit.due_at,
+                estimated_flow_s=self._genetic_flow_estimate(unit),
+            )
+            for unit in queued
+        )
+
+    def _ensure_genetic_release_plan(self) -> ReleasePlan | None:
+        if self.genetic_planner is None:
+            return None
+        queued = self._waiting_units(UnitStage.QUEUED)
+        signature = tuple(
+            (
+                unit.unit_id,
+                unit.order_id,
+                unit.comb_module,
+                unit.priority,
+                unit.urgent,
+                unit.due_at,
+                unit.fin_count,
+            )
+            for unit in queued
+        )
+        if signature != self._genetic_queue_signature:
+            self._genetic_queue_signature = signature
+            self._genetic_release_plan = self.genetic_planner.plan(
+                self._genetic_candidates(queued),
+                now=self.sim_time,
+                current_family=self._last_release_family,
+            )
+            self._event("GENETIC_RELEASE_PLAN", **self._genetic_release_plan.as_dict())
+        return self._genetic_release_plan
+
+    def next_release_unit_id(self) -> str | None:
+        """Return the V2 unit allowed to enter S1 under the selected policy."""
+
+        if self.optimizer_mode != "GENETIC":
+            return None
+        plan = self._ensure_genetic_release_plan()
+        return None if plan is None or not plan.unit_ids else plan.unit_ids[0]
+
     def _advance_operations(self, dt: float) -> None:
         arm1_installing = (
             operation := self.operations.get("ARM1")
@@ -1242,9 +1388,13 @@ class DualLineRuntime:
         if not queued:
             return False
         unit = queued[0]
+        if self.optimizer_mode == "GENETIC":
+            selected_id = self.next_release_unit_id()
+            unit = next((item for item in queued if item.unit_id == selected_id), unit)
         tray = self.flow.assign_order(unit.order_id, unit.unit_id, now=self.sim_time)
         unit.tray_id = tray.tray_id
         self._set_stage(unit, UnitStage.BASE_LOADING)
+        self._last_release_family = self._genetic_family(unit)
         return True
 
     def _dispatch_transfers(self) -> bool:
@@ -2230,6 +2380,11 @@ class DualLineRuntime:
         self.faults.reset()
         self.camera_coordination.reset()
         self._rework_effort.clear()
+        if self.genetic_planner is not None:
+            self.genetic_planner.reset()
+        self._genetic_queue_signature = None
+        self._genetic_release_plan = None
+        self._last_release_family = None
 
     def snapshot(self) -> dict[str, Any]:
         completed_orders = [
@@ -2246,6 +2401,14 @@ class DualLineRuntime:
         return {
             "schema_version": 2,
             "line": "V2_DUAL_INSTALL",
+            "optimization": {
+                "mode": self.optimizer_mode,
+                "planner": None if self.genetic_planner is None else self.genetic_planner.snapshot(),
+                "last_release_plan": (
+                    None if self._genetic_release_plan is None else self._genetic_release_plan.as_dict()
+                ),
+                "last_release_family": self._last_release_family,
+            },
             # The independent V2 line now gates runtime progress on physical
             # carriers, solved robot paths, tool ownership and constrained
             # in-flight workpiece proxies. It remains a rehearsal because
@@ -2260,11 +2423,36 @@ class DualLineRuntime:
             "orders": [order.as_dict(self.units) for order in self.orders.values()],
             "completed_orders": completed_orders,
             "units": [unit.as_dict() for unit in self.units.values()],
+            "route_execution": {
+                "units": [
+                    {
+                        "unit_id": unit.unit_id,
+                        "route_strategy": unit.route_strategy,
+                        "install_branch": None if unit.branch is None else unit.branch.value,
+                        "camera_review_required": self._camera_review_reason(unit) is not None,
+                    }
+                    for unit in self.units.values()
+                ],
+                "active_operations": [
+                    {
+                        "resource": operation.resource,
+                        "unit_id": operation.unit_id,
+                        "kind": operation.kind,
+                        "route_mode": operation.route_mode,
+                        "capability": operation.capability,
+                        "route_phase": operation.route_phase,
+                    }
+                    for operation in self.operations.values()
+                ],
+            },
             "trays": tray_states,
             "operations": {
                 resource: {
                     "unit_id": operation.unit_id,
                     "kind": operation.kind,
+                    "route_mode": operation.route_mode,
+                    "capability": operation.capability,
+                    "route_phase": operation.route_phase,
                     "remaining_s": max(0.0, operation.remaining_s),
                     "duration_s": operation.duration_s,
                     "started_at": operation.started_at,

@@ -54,14 +54,16 @@ class FlexibilityDimension:
 def _product_dimension(profile_name: str) -> FlexibilityDimension:
     """Product flexibility: how many products run, and are they data-only?"""
 
-    from .flexible import build_process_plan
+    from .flexible import FlexibleConfigError, FlexiblePreflightError, build_process_plan
     from .paths import CONFIG_DIR
 
     products: list[dict[str, Any]] = []
+    errors: list[str] = []
     for order_file in sorted((CONFIG_DIR / "orders").glob("order_*.yaml")):
         try:
             plan = build_process_plan(order_file)
-        except Exception:  # pragma: no cover - a broken sample must not break the UI
+        except (FlexibleConfigError, FlexiblePreflightError, KeyError, OSError, TypeError, ValueError) as exc:
+            errors.append(f"{order_file.name}: {exc}")
             continue
         products.append(
             {
@@ -75,29 +77,41 @@ def _product_dimension(profile_name: str) -> FlexibilityDimension:
                 "source": order_file.name,
             }
         )
-    executable_count = sum(item["preset"] in {"A", "B", "C"} for item in products)
+    executable_count = sum(item["preset"] in {"A", "B", "C", "D"} for item in products)
     v2_limited = profile_name == "V2_DUAL_INSTALL" and executable_count < len(products)
+    v2_profile = profile_name == "V2_DUAL_INSTALL"
     return FlexibilityDimension(
         key="product",
         label_zh="产品柔性",
         # Product flexibility is defined here as data-only plan generation;
         # runtime executability is reported separately and never hidden.
-        state=FULL if len(products) >= 3 else PARTIAL,
+        state=FULL if len(products) >= 3 and not errors else PARTIAL,
         headline_zh=(
             f"{len(products)} 种 YAML 产品，V2 实体执行 {executable_count} 种"
             if v2_limited
-            else f"{len(products)} 种产品全部由 YAML 驱动"
+            else (
+                f"{len(products)} 种 YAML 产品均可进入 V2 实体执行；自定义订单走统一物理准入"
+                if v2_profile
+                else f"{len(products)} 种产品全部由 YAML 驱动"
+            )
         ),
         evidence_zh=(
-            "A/B/C 已接入 V2 实体流程；D 型能完成严格配置、几何和路线编译，"
-            "但尚未接入 V2 实体工装，因此不把“可规划”冒充“可生产”。"
+            f"当前有 {executable_count} 种 YAML 产品接入 V2 实体流程；其余产品仍需补齐"
+            "实体能力映射。自定义规格还必须通过能力、路线、六托盘与三层炉约束。"
             if v2_limited
-            else "新增产品 = 新增一个 product/order YAML，无需改动 Python，无需重新示教。"
+            else (
+                "新增产品 = 新增一个 product/order YAML；V2 自定义订单另走同一能力准入和物理 actor。"
+                if v2_profile
+                else "新增产品 = 新增一个 product/order YAML，无需改动 Python，无需重新示教。"
+            )
         ),
         metrics={
             "product_count": len(products),
             "v2_executable_product_count": executable_count,
+            "runtime_custom_order_support": v2_profile,
             "products": products,
+            "invalid_product_count": len(errors),
+            "invalid_products": errors,
         },
     )
 
