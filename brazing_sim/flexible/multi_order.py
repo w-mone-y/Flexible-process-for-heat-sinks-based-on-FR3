@@ -27,6 +27,19 @@ from .planner import (
     build_process_plan,
 )
 
+MAX_ORDER_ID_LENGTH = 128
+
+
+def _validate_order_id(order_id: object) -> str:
+    if not isinstance(order_id, str) or not order_id.strip():
+        raise ValueError("订单ID不能为空")
+    identifier = order_id.strip()
+    if len(identifier) > MAX_ORDER_ID_LENGTH:
+        raise ValueError(f"订单ID长度不能超过{MAX_ORDER_ID_LENGTH}个字符")
+    if any(ord(character) < 32 or ord(character) == 127 for character in identifier):
+        raise ValueError("订单ID不能包含控制字符")
+    return identifier
+
 
 def _replace_order(plan: ProcessPlan, order: OrderConfig) -> ProcessPlan:
     rack = load_rack_config(DEFAULT_CONFIG_ROOT / "rack_config.yaml")
@@ -43,14 +56,25 @@ def build_inline_plan(
     preferred_rack_layer: int | None = None,
     route_strategy: RouteStrategy | str = RouteStrategy.STANDARD,
 ) -> ProcessPlan:
+    identifier = _validate_order_id(order_id)
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 3:
+        raise ValueError("订单数量必须是1到3的整数")
+    if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
+        raise ValueError("订单优先级必须是非负整数")
+    if (
+        isinstance(preferred_rack_layer, bool)
+        or preferred_rack_layer is not None
+        and (not isinstance(preferred_rack_layer, int) or preferred_rack_layer not in {0, 1, 2})
+    ):
+        raise ValueError("首选料架层必须是0、1、2或空值")
     plan = build_preset_plan(preset, quantity=quantity)
     if isinstance(due_time, str):
         due_time = datetime.fromisoformat(due_time)
     order = replace(
         plan.order,
-        order_id=str(order_id),
-        quantity=int(quantity),
-        priority=int(priority),
+        order_id=identifier,
+        quantity=quantity,
+        priority=priority,
         due_time=due_time,
         preferred_rack_layer=preferred_rack_layer,
     )
@@ -71,9 +95,7 @@ def build_custom_plan(
 
     if not isinstance(product, Mapping):
         raise ValueError("自定义产品配置必须是对象")
-    if not isinstance(order_id, str) or not order_id.strip():
-        raise ValueError("自定义订单ID不能为空")
-    identifier = order_id.strip()
+    identifier = _validate_order_id(order_id)
     if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= 3:
         raise ValueError("自定义订单数量必须是1到3的整数（受V2托盘池约束）")
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
@@ -83,10 +105,7 @@ def build_custom_plan(
     if (
         isinstance(preferred_rack_layer, bool)
         or preferred_rack_layer is not None
-        and (
-            not isinstance(preferred_rack_layer, int)
-            or preferred_rack_layer not in {0, 1, 2}
-        )
+        and (not isinstance(preferred_rack_layer, int) or preferred_rack_layer not in {0, 1, 2})
     ):
         raise ValueError("首选料架层必须是0、1、2或空值")
 
@@ -126,12 +145,13 @@ def build_custom_plan(
         value = product[name]
         if not isinstance(value, (list, tuple)) or len(value) != 3:
             raise ValueError(f"custom_product.{name}必须是三个数值")
-        result = tuple(number_value for number_value in (
-            float(item)
-            if not isinstance(item, bool) and isinstance(item, (int, float))
-            else float("nan")
-            for item in value
-        ))
+        result = tuple(
+            number_value
+            for number_value in (
+                float(item) if not isinstance(item, bool) and isinstance(item, (int, float)) else float("nan")
+                for item in value
+            )
+        )
         if any(not isfinite(item) for item in result):
             raise ValueError(f"custom_product.{name}必须全部是有限数值")
         if any(item <= 0.0 for item in result):
@@ -184,9 +204,7 @@ def build_custom_plan(
         comb_module=module.name,
         target_clamping_force_n=number("target_clamping_force_n"),
         clamping_force_tolerance_n=(
-            2.0
-            if product.get("clamping_force_tolerance_n") is None
-            else number("clamping_force_tolerance_n")
+            2.0 if product.get("clamping_force_tolerance_n") is None else number("clamping_force_tolerance_n")
         ),
         force_hold_duration_s=1.5,
         nozzle_spacing_m=nozzle_spacing,
@@ -276,10 +294,18 @@ def load_order_plans(path: str | Path) -> tuple[ProcessPlan, ...]:
                 due_raw = datetime.fromisoformat(due_raw)
             except ValueError as exc:
                 raise FlexibleConfigError(source, f"{field}.due_time", "必须是ISO-8601时间") from exc
-        quantity = int(raw.get("quantity", plan.quantity))
-        priority = int(raw.get("priority", plan.order.priority))
+        quantity = raw.get("quantity", plan.quantity)
+        priority = raw.get("priority", plan.order.priority)
         preferred = raw.get("preferred_rack_layer", plan.order.preferred_rack_layer)
-        if not 1 <= quantity <= 3 or priority < 0 or preferred not in {None, 0, 1, 2}:
+        if (
+            isinstance(quantity, bool)
+            or not isinstance(quantity, int)
+            or isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or priority < 0
+            or isinstance(preferred, bool)
+            or preferred not in {None, 0, 1, 2}
+        ):
             raise FlexibleConfigError(source, field, "quantity/priority/preferred_rack_layer超出允许范围")
         order = replace(
             plan.order,
@@ -288,6 +314,10 @@ def load_order_plans(path: str | Path) -> tuple[ProcessPlan, ...]:
             due_time=due_raw,
             preferred_rack_layer=preferred,
         )
+        try:
+            _validate_order_id(order.order_id)
+        except ValueError as exc:
+            raise FlexibleConfigError(source, f"{field}.order_file", str(exc)) from exc
         if order.order_id in known_ids:
             raise FlexibleConfigError(source, f"{field}.order_file", "order_id重复")
         known_ids.add(order.order_id)
@@ -295,4 +325,4 @@ def load_order_plans(path: str | Path) -> tuple[ProcessPlan, ...]:
     return tuple(plans)
 
 
-__all__ = ["build_custom_plan", "build_inline_plan", "load_order_plans"]
+__all__ = ["MAX_ORDER_ID_LENGTH", "build_custom_plan", "build_inline_plan", "load_order_plans"]

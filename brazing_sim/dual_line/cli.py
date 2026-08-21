@@ -22,6 +22,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ui-client", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8767)
+    parser.add_argument(
+        "--auth-token",
+        default=os.environ.get("BRAZING_V2_HTTP_TOKEN"),
+        help="Bearer token required for HTTP control when binding off loopback",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-ui", action="store_true")
     parser.add_argument("--show-mujoco-ui", action="store_true")

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
+from math import isfinite
+import os
 import queue
 import subprocess
 import sys
@@ -36,12 +38,20 @@ class V2ControlSurface:
 
     def _due_at(self, command: Mapping[str, Any]) -> float | None:
         direct = command.get("due_at")
-        if isinstance(direct, (int, float)):
+        if direct is not None:
+            if (
+                isinstance(direct, bool)
+                or not isinstance(direct, (int, float))
+                or not isfinite(float(direct))
+            ):
+                raise ValueError("V2 due_at必须是有限数值")
             return float(direct)
         value = command.get("due_time")
         if value is None or value == "":
             return None
         if isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isfinite(float(value)):
+                raise ValueError("V2 due_time必须是有限数值或ISO-8601时间")
             return float(value)
         text = str(value).strip().replace("Z", "+00:00")
         try:
@@ -55,67 +65,69 @@ class V2ControlSurface:
         return self.runtime.sim_time + remaining_s
 
     def _submit(self, command: Mapping[str, Any], *, quantity: int | None = None) -> None:
-        # Fields the V1 console sends that V2 cannot honour are reported rather
-        # than silently dropped: a request that appears to succeed but changed
-        # nothing is worse than a clear refusal.
-        ignored: list[str] = []
+        self.ignored_order_fields = []
         if command.get("preferred_rack_layer") is not None:
             # V2 assigns furnace layers by loading position (capacity-1-index),
-            # so a preferred layer cannot be reserved.
-            ignored.append("首选料架层（V2 按装炉顺序分配层位）")
+            # so accepting this field would mutate the queue before reporting
+            # that the requested reservation was ignored.
+            self.ignored_order_fields = ["首选料架层（V2 按装炉顺序分配层位）"]
+            raise ValueError("V2 不支持首选料架层；炉层由实际装炉顺序分配")
         strategy = str(command.get("route_strategy") or "").strip().upper()
-        raw_quantity = command.get("quantity", 1) if quantity is None else quantity
         if strategy and strategy not in {"STANDARD", "HIGH_RELIABILITY", "FIRST_ARTICLE"}:
             raise ValueError(f"V2 不支持路线策略：{strategy}")
+        raw_quantity = command.get("quantity", 1) if quantity is None else quantity
+        if isinstance(raw_quantity, bool) or not isinstance(raw_quantity, int):
+            raise ValueError("V2 订单数量必须是整数")
+        raw_priority = command.get("priority", 10)
+        if isinstance(raw_priority, bool) or not isinstance(raw_priority, int) or raw_priority < 0:
+            raise ValueError("V2 订单优先级必须是非负整数")
+        raw_identifier = command.get("order_id")
+        if raw_identifier is not None and not isinstance(raw_identifier, str):
+            raise ValueError("V2 订单ID必须是字符串")
+        identifier = "" if raw_identifier is None else raw_identifier.strip()
+        urgent = command.get("urgent", False)
+        if not isinstance(urgent, bool):
+            raise ValueError("V2 urgent必须是布尔值")
         custom_product = command.get("custom_product")
         if custom_product is not None:
             if not isinstance(custom_product, Mapping):
                 raise ValueError("V2 自定义产品参数必须是对象")
-            requested_quantity = raw_quantity
-            raw_identifier = command.get("order_id")
-            if raw_identifier is None or raw_identifier == "":
+            if not identifier:
                 identifier = self.runtime.next_order_id
-            elif not isinstance(raw_identifier, str):
-                raise ValueError("V2 自定义订单ID必须是字符串")
-            else:
-                identifier = raw_identifier.strip()
-                if not identifier:
-                    identifier = self.runtime.next_order_id
             plan = build_custom_plan(
                 order_id=identifier,
-                quantity=requested_quantity,
-                priority=command.get("priority", 10),
+                quantity=raw_quantity,
+                priority=raw_priority,
                 due_time=command.get("due_time"),
-                preferred_rack_layer=command.get("preferred_rack_layer"),
+                preferred_rack_layer=None,
                 product=dict(custom_product),
                 route_strategy=strategy or "STANDARD",
             )
             self.runtime.submit_plan(
                 plan,
                 due_at=self._due_at(command),
-                urgent=bool(command.get("urgent", False)),
+                urgent=urgent,
             )
         else:
-            requested_quantity = int(raw_quantity)
             self.runtime.submit_order(
                 str(command.get("preset", "A")),
-                order_id=str(command.get("order_id") or "").strip() or None,
-                quantity=requested_quantity,
-                priority=int(command.get("priority", 10)),
+                order_id=identifier or None,
+                quantity=raw_quantity,
+                priority=raw_priority,
                 due_at=self._due_at(command),
-                urgent=bool(command.get("urgent", False)),
+                urgent=urgent,
                 route_strategy=strategy or "STANDARD",
             )
-        if ignored:
-            self.ignored_order_fields = ignored
-            raise ValueError("订单已接受，但以下设置在 V2 下未生效：" + "；".join(ignored))
 
     def process(self, command: Mapping[str, Any]) -> None:
         kind = str(command.get("type", "")).strip()
         if kind in {"order", "order_insert"}:
             self._submit(command)
         elif kind == "batch":
-            self._submit(command, quantity=int(command.get("layers", 3)))
+            layers = command.get("layers", 3)
+            if isinstance(layers, bool) or not isinstance(layers, int):
+                raise ValueError("V2 批次数量必须是整数")
+            self._submit(command, quantity=layers)
         elif kind == "stop":
             self.runtime.pause()
         elif kind == "continue":
@@ -276,7 +288,15 @@ class V2BrazingApplication:
         self.publish(viewer_running=False)
 
     def start_services(self) -> None:
-        self.server = start_http_server(self.shared, self.args.host, int(self.args.port))
+        auth_token = getattr(self.args, "auth_token", None)
+        if auth_token:
+            os.environ["BRAZING_V2_HTTP_TOKEN"] = str(auth_token)
+        self.server = start_http_server(
+            self.shared,
+            self.args.host,
+            int(self.args.port),
+            auth_token=auth_token,
+        )
         actual_port = int(self.server.server_address[1])
         print(f"[V2 HTTP] http://{self.args.host}:{actual_port}", flush=True)
         if not self.args.no_ui:

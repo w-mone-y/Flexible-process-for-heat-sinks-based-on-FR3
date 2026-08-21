@@ -9,8 +9,11 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict, is_dataclass
 from enum import Enum
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
+import os
 import queue
 import sys
 import threading
@@ -22,6 +25,23 @@ from urllib.parse import urlsplit
 ARM_NAMES = ("arm1", "arm2", "arm3")
 FAULT_TYPES = {"fin_pose", "brazing_gap", "furnace_profile"}
 FAULT_SEVERITIES = {"recoverable", "severe"}
+MAX_HTTP_CONCURRENCY = 32
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = str(host).strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _strict_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field}必须是整数")
+    return value
 
 
 def jsonable(value: Any) -> Any:
@@ -249,10 +269,37 @@ class SharedState:
                 return
 
 
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """Keep abusive or stalled clients from creating unbounded worker threads."""
+
+    daemon_threads = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._request_slots = threading.BoundedSemaphore(MAX_HTTP_CONCURRENCY)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     """HTTP adapter; subclasses receive a class-level ``shared`` instance."""
 
     shared: SharedState
+    auth_token: str | None = None
     max_body_bytes = 1_000_000
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -288,6 +335,16 @@ class RequestHandler(BaseHTTPRequestHandler):
         if not isinstance(decoded, dict):
             raise ValueError("JSON body must be an object")
         return decoded
+
+    def _authorized_post(self) -> bool:
+        expected = self.auth_token
+        if not expected:
+            return True
+        scheme, separator, supplied = self.headers.get("Authorization", "").partition(" ")
+        if separator != " " or scheme.lower() != "bearer" or not hmac.compare_digest(supplied, expected):
+            self._send_json({"ok": False, "error": "Bearer authorization required"}, 401)
+            return False
+        return True
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
@@ -348,6 +405,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._authorized_post():
+            return
         path = urlsplit(self.path).path
         try:
             payload = self._read_json()
@@ -423,30 +482,37 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
 
         from .flexible import build_custom_plan, build_inline_plan
         from .planning import build_task_graph
+        from .dual_line.admission import validate_v2_order_id
 
         preset = str(payload.get("preset", "A")).strip().upper()
+        line_profile = str(payload.get("line_profile", "")).strip().upper()
         raw_order_id = payload.get("order_id")
-        if raw_order_id is None or raw_order_id == "":
+        if raw_order_id is None or (isinstance(raw_order_id, str) and not raw_order_id.strip()):
             order_id = f"UI_{datetime.now().strftime('%H%M%S%f')}"
         elif not isinstance(raw_order_id, str):
             raise ValueError("订单ID必须是字符串")
         else:
             order_id = raw_order_id.strip()
+        validate_v2_order_id(order_id)
         mode = str(payload.get("mode", "preset")).strip().lower()
-        raw_quantity = payload.get("quantity", 1)
-        raw_priority = payload.get("priority", 10)
-        quantity = raw_quantity if mode == "custom" else int(raw_quantity)
-        priority = raw_priority if mode == "custom" else int(raw_priority)
+        quantity = _strict_int(payload.get("quantity", 1), "quantity")
+        priority = _strict_int(payload.get("priority", 10), "priority")
+        if priority < 0:
+            raise ValueError("priority必须是非负整数")
         due_time = payload.get("due_time")
         preferred = payload.get("preferred_rack_layer")
         if isinstance(preferred, str) and preferred in {"", "null"}:
             preferred = None
-        if mode == "custom" and preferred is not None and (
-            isinstance(preferred, bool) or not isinstance(preferred, int)
-        ):
-            raise ValueError("自定义订单首选料架层必须是0、1、2或空值")
-        preferred = None if preferred is None else int(preferred)
+        if preferred is not None:
+            preferred = _strict_int(preferred, "preferred_rack_layer")
+            if preferred not in {0, 1, 2}:
+                raise ValueError("首选料架层必须是0、1、2或空值")
+            if line_profile in {"V2", "V2_DUAL_INSTALL"}:
+                raise ValueError("V2 不支持首选料架层；炉层由实际装炉顺序分配")
         route_strategy = str(payload.get("route_strategy", "STANDARD")).strip().upper()
+        urgent = payload.get("urgent", False)
+        if not isinstance(urgent, bool):
+            raise ValueError("urgent必须是布尔值")
         custom_product = payload.get("custom_product")
         if mode == "custom":
             if not isinstance(custom_product, dict):
@@ -473,12 +539,10 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
             )
         else:
             raise ValueError("mode must be preset or custom")
-        line_profile = str(payload.get("line_profile", "")).strip().upper()
         if line_profile in {"V2", "V2_DUAL_INSTALL"}:
-            from .dual_line.admission import build_v2_task_graph, validate_v2_plan
+            from .dual_line.admission import validate_v2_plan
 
-            validate_v2_plan(plan)
-            preview_graph = build_v2_task_graph(plan)
+            preview_graph = validate_v2_plan(plan)
         else:
             preview_graph = build_task_graph(plan, flexible_cell=True)
         summary = plan.summary()
@@ -494,7 +558,7 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
             "priority": priority,
             "due_time": due_time,
             "preferred_rack_layer": preferred,
-            "urgent": bool(payload.get("urgent", False)),
+            "urgent": urgent,
             "mode": mode,
             "custom_product": custom_product if mode == "custom" else None,
             "route_strategy": route_strategy,
@@ -586,9 +650,18 @@ def validate_http_command(path: str, payload: Mapping[str, Any]) -> dict[str, An
     raise KeyError(path)
 
 
-def start_http_server(shared: SharedState, host: str = "127.0.0.1", port: int = 0) -> ThreadingHTTPServer:
-    handler = type("BrazingRequestHandler", (RequestHandler,), {"shared": shared})
-    server = ThreadingHTTPServer((host, int(port)), handler)
+def start_http_server(
+    shared: SharedState,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    *,
+    auth_token: str | None = None,
+) -> ThreadingHTTPServer:
+    token = None if auth_token is None else str(auth_token).strip()
+    if not _is_loopback_host(host) and not token:
+        raise ValueError("remote HTTP control requires --auth-token or BRAZING_V2_HTTP_TOKEN")
+    handler = type("BrazingRequestHandler", (RequestHandler,), {"shared": shared, "auth_token": token})
+    server = _BoundedThreadingHTTPServer((host, int(port)), handler)
     threading.Thread(target=server.serve_forever, name="brazing-http", daemon=True).start()
     return server
 
@@ -721,7 +794,11 @@ def _http_error_detail(exc: error.HTTPError) -> str:
 
 def post_json(url: str, payload: Mapping[str, Any], timeout: float = 1.0) -> dict[str, Any]:
     body = json.dumps(jsonable(payload)).encode("utf-8")
-    req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("BRAZING_V2_HTTP_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = request.Request(url, data=body, headers=headers, method="POST")
     try:
         with request.urlopen(req, timeout=timeout) as response:  # noqa: S310
             return json.loads(response.read().decode("utf-8"))

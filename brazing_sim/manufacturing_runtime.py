@@ -215,7 +215,7 @@ class ManufacturingRuntime:
         self.scheduler_mode = self._normalize_scheduler_mode(scheduler_mode)
         self.scheduler = self._make_scheduler(self.scheduler_mode)
         self.graph = TaskGraph()
-        self.events = EventBus()
+        self.events = EventBus(history_limit=5_000)
         self.recovery = RecoveryPolicy()
         self.replanner = Replanner()
         self.registry = skill_registry or self._default_registry()
@@ -1020,11 +1020,15 @@ class ManufacturingRuntime:
         choices = task.payload.get("capability_choices")
         if not isinstance(choices, list):
             selected = task.payload.get("selected_alternative")
-            result = dict(selected) if isinstance(selected, dict) else {
-                "mode": "PRIMARY",
-                "capability": task.payload.get("capability"),
-                "cost_hint": 1.0,
-            }
+            result = (
+                dict(selected)
+                if isinstance(selected, dict)
+                else {
+                    "mode": "PRIMARY",
+                    "capability": task.payload.get("capability"),
+                    "cost_hint": 1.0,
+                }
+            )
             result["selected_resource"] = str(resource_id).upper()
             result["selection_source"] = "dispatch"
             return result
@@ -1035,8 +1039,7 @@ class ManufacturingRuntime:
             if not isinstance(choice, dict):
                 continue
             if any(
-                isinstance(candidate, dict)
-                and str(candidate.get("resource_id", "")).upper() == resource
+                isinstance(candidate, dict) and str(candidate.get("resource_id", "")).upper() == resource
                 for candidate in choice.get("candidates", ())
             ):
                 matching.append(choice)
@@ -1050,8 +1053,7 @@ class ManufacturingRuntime:
             candidates = [
                 candidate
                 for candidate in choice.get("candidates", ())
-                if isinstance(candidate, dict)
-                and str(candidate.get("resource_id", "")).upper() == resource
+                if isinstance(candidate, dict) and str(candidate.get("resource_id", "")).upper() == resource
             ]
             duration = min(
                 (float(candidate.get("duration", float("inf"))) for candidate in candidates),
@@ -1067,8 +1069,7 @@ class ManufacturingRuntime:
         selected_candidates = [
             candidate
             for candidate in selected.get("candidates", ())
-            if isinstance(candidate, dict)
-            and str(candidate.get("resource_id", "")).upper() == resource
+            if isinstance(candidate, dict) and str(candidate.get("resource_id", "")).upper() == resource
         ]
         if selected_candidates:
             selected["duration"] = min(
@@ -1430,12 +1431,12 @@ class ManufacturingRuntime:
                         "task_id": task.task_id,
                         "task_type": task.task_type.value,
                         "route_strategy": task.payload.get("route_strategy"),
-                        "capability": None
-                        if capability_choice is None
-                        else capability_choice.get("capability"),
-                        "capability_mode": None
-                        if capability_choice is None
-                        else capability_choice.get("mode"),
+                        "capability": (
+                            None if capability_choice is None else capability_choice.get("capability")
+                        ),
+                        "capability_mode": (
+                            None if capability_choice is None else capability_choice.get("mode")
+                        ),
                     },
                 )
             except Exception as exc:

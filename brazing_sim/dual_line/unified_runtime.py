@@ -21,9 +21,11 @@ _STAGE_RANK = {stage: index for index, stage in enumerate(UnitStage)}
 _OPERATION_PERMITS: dict[TaskType, tuple[str, ...]] = {
     TaskType.PICK_BASE_PLATE: ("BASE_LOADING",),
     TaskType.DISPENSE_BRAZING: ("DISPENSING",),
+    TaskType.REWORK_BRAZING: ("DISPENSING",),
     TaskType.INSPECT_BRAZING: ("MATERIAL_INSPECTION",),
     TaskType.REVIEW_BRAZING_CLOSEUP: ("MATERIAL_INSPECTION",),
     TaskType.PICK_FIN: ("INSTALL_FIN",),
+    TaskType.REINSTALL_FIN: ("INSTALL_FIN",),
     TaskType.INSPECT_FINS: ("PRE_BRAZE_INSPECTION",),
     TaskType.REVIEW_FINS_CLOSEUP: ("PRE_BRAZE_INSPECTION",),
     TaskType.MOVE_ELEVATOR: ("FURNACE_FRONT_OPEN",),
@@ -132,10 +134,14 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
     def authorize(self, task: ManufacturingTask, resource_id: str) -> None:
         keys: set[tuple[str, str]] = set()
         selected = task.payload.get("selected_alternative")
-        choice = dict(selected) if isinstance(selected, dict) else {
-            "mode": "PRIMARY",
-            "capability": task.payload.get("capability"),
-        }
+        choice = (
+            dict(selected)
+            if isinstance(selected, dict)
+            else {
+                "mode": "PRIMARY",
+                "capability": task.payload.get("capability"),
+            }
+        )
         choice["selected_resource"] = str(resource_id).upper()
         for kind in _OPERATION_PERMITS.get(task.task_type, ()):
             key = (task.unit_id, kind)
@@ -180,11 +186,6 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 self._permits.pop(key, None)
         self._tasks.pop(task_id, None)
 
-    def reset(self) -> None:
-        self._permits.clear()
-        self._task_permits.clear()
-        self._tasks.clear()
-
     def _permit_completed(
         self,
         task_id: str,
@@ -196,6 +197,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         task = self._tasks.get(task_id)
         if task is None or task.unit_id != unit_id:
             return False
+        unit = self.runtime.units.get(unit_id)
         event_since = (
             float(since)
             if since is not None
@@ -214,12 +216,28 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 unit_id,
                 inspection_kind,
             )
+        if kind == "BASE_LOADING" and task.task_type is TaskType.PLACE_BASE_PLATE:
+            return bool(
+                unit is not None
+                and _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.WAITING_S2A]
+            ) or self._event(
+                "OPERATION_COMPLETED",
+                unit_id,
+                since=event_since,
+                kind=kind,
+            )
         if kind == "INSTALL_FIN":
+            fin_index = _fin_index(task)
             return self._event(
                 "FIN_INSTALLED",
                 unit_id,
                 since=event_since,
-                fin_index=_fin_index(task),
+                fin_index=fin_index,
+            ) or bool(
+                task.task_type is TaskType.INSTALL_FIN
+                and unit is not None
+                and fin_index > 0
+                and unit.fins_installed >= fin_index
             )
         return self._event(
             "OPERATION_COMPLETED",
@@ -260,6 +278,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         self._permits.clear()
         self._operation_choices.clear()
         self._task_permits.clear()
+        self._tasks.clear()
 
     def tray_ready(self, tray_id: str, owner: TrayOwner) -> bool:
         if self.physical_gate is None:
@@ -404,22 +423,20 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             return done, ("吸盘负压建立", "基板已离开取料位")
         if kind is TaskType.PLACE_BASE_PLATE:
             # PICK/PLACE are two DAG milestones inside one non-preemptible
-            # physical operation. The release event can be emitted in the
-            # same tick that PICK turns terminal, just before PLACE starts.
-            done = self._event(
-                "OPERATION_COMPLETED",
-                task.unit_id,
-                since=0.0,
-                kind="BASE_LOADING",
-            )
+            # physical operation. The release event belongs to PICK and is
+            # therefore allowed to precede PLACE; the post-operation stage is
+            # the fresh physical evidence for this second milestone.
+            done = _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.WAITING_S2A]
             return done, ("基板已释放", "基板在托盘上停稳")
         if kind is TaskType.DISPENSE_BRAZING:
             return event("DISPENSING"), ("全部规划钎料轨迹完成",)
+        if kind is TaskType.REWORK_BRAZING:
+            return event("DISPENSING"), ("缺陷钎料区段已完成局部补涂",)
         if kind is TaskType.INSPECT_BRAZING:
             done = self._event(
                 "OPERATION_COMPLETED",
                 task.unit_id,
-                since=0.0,
+                since=since,
                 kind="MATERIAL_INSPECTION",
             )
             return done, ("S2B图像分析完成",)
@@ -437,18 +454,27 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             )
             return done, ("夹爪间距匹配翅片厚度", "翅片已离开料台")
         if kind is TaskType.INSTALL_FIN:
+            fin_index = _fin_index(task)
             done = self._event(
                 "FIN_INSTALLED",
                 task.unit_id,
-                since=0.0,
+                since=since,
+                fin_index=fin_index,
+            ) or (fin_index > 0 and unit.fins_installed >= fin_index)
+            return done, ("目标翅片已释放", "翅片在梳齿槽中停稳")
+        if kind is TaskType.REINSTALL_FIN:
+            done = self._event(
+                "FIN_INSTALLED",
+                task.unit_id,
+                since=since,
                 fin_index=_fin_index(task),
             )
-            return done, ("目标翅片已释放", "翅片在梳齿槽中停稳")
+            return done, ("缺陷翅片已重新释放", "翅片在原梳齿槽中重新停稳")
         if kind is TaskType.INSPECT_FINS:
             done = self._event(
                 "OPERATION_COMPLETED",
                 task.unit_id,
-                since=0.0,
+                since=since,
                 kind="PRE_BRAZE_INSPECTION",
             )
             return done, ("S4焊前图像分析完成",)
@@ -490,7 +516,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         if kind is TaskType.POST_BRAZE_INSPECTION:
             return event("POST_BRAZE_INSPECTION"), ("焊后固定相机分析完成",)
         if kind in {TaskType.ROUTE_PASS, TaskType.ROUTE_REWORK, TaskType.ROUTE_SCRAP}:
-            done = self._event("UNIT_COMPLETED", task.unit_id, since=0.0)
+            done = self._event("UNIT_COMPLETED", task.unit_id, since=since)
             return done, ("成品进入出口箱", "空托盘所有权已回收")
         if kind is TaskType.CONFIGURE_COMB:
             configured = (
@@ -529,11 +555,6 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
     def task_dispatch_allowed(self, task: ManufacturingTask) -> tuple[bool, str]:
         """Apply physical WIP/batch feasibility before resource reservation."""
 
-        if task.task_type is TaskType.PICK_BASE_PLATE:
-            selected = self.runtime.next_release_unit_id()
-            if selected is not None:
-                allowed = selected == task.unit_id
-                return allowed, ("" if allowed else "等待遗传算法选择的V2订单进入S1")
         if task.task_type is TaskType.DISPENSE_BRAZING and self.runtime.optimizer_mode == "GENETIC":
             # The global task scheduler can see a downstream dispense node as
             # ready before the selected unit has physically handed its tray to
@@ -544,53 +565,19 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             return allowed, ("" if allowed else "等待托盘完成S1至S2A物理交接")
         if task.task_type is TaskType.INSPECT_BRAZING:
             unit = self.runtime.units.get(task.unit_id)
-            physically_at_s2b = bool(
-                unit is not None
-                and (
-                    unit.stage is UnitStage.MATERIAL_INSPECTION
-                    or self._event(
-                        "OPERATION_COMPLETED",
-                        task.unit_id,
-                        since=0.0,
-                        kind="MATERIAL_INSPECTION",
-                    )
-                )
-            )
+            physically_at_s2b = bool(unit is not None and unit.stage is UnitStage.MATERIAL_INSPECTION)
             return physically_at_s2b, (
                 "" if physically_at_s2b else "等待托盘实体到达S2B钎料检测位，不提前占用Arm3"
             )
         if task.task_type is TaskType.PICK_BASE_PLATE:
             unit = self.runtime.units.get(task.unit_id)
-            physically_at_s1 = bool(
-                unit is not None
-                and (
-                    unit.stage is UnitStage.BASE_LOADING
-                    or self._event(
-                        "OPERATION_COMPLETED",
-                        task.unit_id,
-                        since=0.0,
-                        kind="BASE_LOADING",
-                    )
-                )
-            )
+            physically_at_s1 = bool(unit is not None and unit.stage is UnitStage.BASE_LOADING)
             return physically_at_s1, (
                 "" if physically_at_s1 else "等待空托盘和对应订单基板实体到达S1，不提前占用Arm1"
             )
         if task.task_type is TaskType.PICK_FIN:
             unit = self.runtime.units.get(task.unit_id)
-            fin_index = _fin_index(task)
-            physically_at_install = bool(
-                unit is not None
-                and (
-                    unit.stage is UnitStage.FIN_INSTALLATION
-                    or self._event(
-                        "FIN_INSTALLED",
-                        task.unit_id,
-                        since=0.0,
-                        fin_index=fin_index,
-                    )
-                )
-            )
+            physically_at_install = bool(unit is not None and unit.stage is UnitStage.FIN_INSTALLATION)
             return physically_at_install, (
                 "" if physically_at_install else "等待托盘实体到达翅片装配位，不提前占用机械臂"
             )
@@ -602,6 +589,14 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 buffered = self.runtime._waiting_units(UnitStage.FURNACE_BUFFER)
                 allowed = bool(buffered and buffered[0].unit_id == task.unit_id)
             return allowed, ("" if allowed else "上游托盘等待下一物理炉批，不提前占用升降机")
+        if task.task_type is TaskType.REWORK_BRAZING:
+            unit = self.runtime.units.get(task.unit_id)
+            allowed = bool(unit is not None and unit.stage is UnitStage.DISPENSING)
+            return allowed, ("" if allowed else "等待托盘返回S2A局部补涂")
+        if task.task_type is TaskType.REINSTALL_FIN:
+            unit = self.runtime.units.get(task.unit_id)
+            allowed = bool(unit is not None and unit.stage is UnitStage.FIN_INSTALLATION)
+            return allowed, ("" if allowed else "等待托盘返回S3B翅片纠偏位")
         if task.task_type is TaskType.LOAD_RACK_LAYER:
             position = self.runtime._furnace_load_position
             queue = self.runtime._furnace_load_queue
@@ -774,8 +769,8 @@ class UnifiedV2Runtime:
         plan = build_inline_plan(
             preset=str(preset).strip().upper(),
             order_id=identifier,
-            quantity=int(quantity),
-            priority=int(priority),
+            quantity=quantity,
+            priority=priority,
             route_strategy=str(route_strategy).strip().upper() or "STANDARD",
         )
         return self.submit_plan(plan, due_at=due_at, urgent=urgent)

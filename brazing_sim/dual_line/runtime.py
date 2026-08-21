@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from ..flexible import build_inline_plan
 from ..flexible.models import ProcessPlan
 from ..recovery.fault_models import RecoveryStatus
-from .admission import validate_v2_plan
+from .admission import validate_v2_order_id, validate_v2_plan
 from .camera_coordination import CameraCoordinationPolicy, CameraReviewReason
 from .dispatch import (
     DualInstallDispatcher,
@@ -228,6 +228,7 @@ class _Durations:
 
 # Stage progression index, used to tell forward motion from a recovery rewind.
 _STAGE_ORDER: dict[UnitStage, int] = {stage: index for index, stage in enumerate(UnitStage)}
+EVENT_HISTORY_LIMIT = 2_000
 
 
 class DualLineRuntime:
@@ -347,8 +348,8 @@ class DualLineRuntime:
         plan = build_inline_plan(
             preset=preset,
             order_id=identifier,
-            quantity=int(quantity),
-            priority=int(priority),
+            quantity=quantity,
+            priority=priority,
             route_strategy=str(route_strategy).strip().upper() or "STANDARD",
         )
         return self.submit_plan(plan, due_at=due_at, urgent=urgent)
@@ -374,6 +375,7 @@ class DualLineRuntime:
         ):
             validate_v2_plan(plan)
         else:
+            validate_v2_order_id(plan.order.order_id)
             if not 1 <= int(plan.quantity) <= 3:
                 raise ValueError("one V2 order may contain one to three units")
             if plan.order.priority < 0:
@@ -445,6 +447,8 @@ class DualLineRuntime:
 
     def _event(self, event_type: str, **payload: Any) -> None:
         self.events.append({"time": round(self.sim_time, 6), "type": event_type, **payload})
+        if len(self.events) > EVENT_HISTORY_LIMIT:
+            del self.events[: len(self.events) - EVENT_HISTORY_LIMIT]
 
     @staticmethod
     def _camera_review_reason(unit: V2UnitState) -> CameraReviewReason | None:

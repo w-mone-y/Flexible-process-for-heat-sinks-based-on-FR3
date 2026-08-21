@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from ..flexible import FlexiblePreflightError, ProcessPlan, validate_process_plan
+from ..flexible.multi_order import MAX_ORDER_ID_LENGTH
 from ..manufacturing_config import load_resource_config
 from ..paths import CONFIG_DIR
 from ..planning import (
+    TaskGraph,
     ProcessPlanTaskGraphBuilder,
     V2_DUAL_INSTALL_PROFILE,
     default_capability_catalog,
@@ -30,13 +32,23 @@ def build_v2_task_graph(plan: ProcessPlan):
     ).build(plan)
 
 
-def validate_v2_plan(plan: ProcessPlan) -> None:
+def validate_v2_order_id(order_id: object) -> str:
+    if not isinstance(order_id, str) or not order_id.strip():
+        raise ValueError("V2订单ID不能为空")
+    identifier = order_id.strip()
+    if len(identifier) > MAX_ORDER_ID_LENGTH:
+        raise ValueError(f"V2订单ID长度不能超过{MAX_ORDER_ID_LENGTH}个字符")
+    if any(ord(character) < 32 or ord(character) == 127 for character in identifier):
+        raise ValueError("V2订单ID不能包含控制字符")
+    return identifier
+
+
+def validate_v2_plan(plan: ProcessPlan) -> TaskGraph:
     """Reject plans that cannot be represented by the six-tray V2 cell."""
 
     if not isinstance(plan, ProcessPlan):
         raise ValueError("V2订单必须携带ProcessPlan")
-    if not isinstance(plan.order.order_id, str) or not plan.order.order_id.strip():
-        raise ValueError("V2订单ID不能为空")
+    validate_v2_order_id(plan.order.order_id)
     if isinstance(plan.quantity, bool) or not isinstance(plan.quantity, int) or not 1 <= plan.quantity <= 3:
         raise ValueError("V2订单数量必须是1到3的整数（物理托盘池/炉层上限）")
     if (
@@ -70,9 +82,10 @@ def validate_v2_plan(plan: ProcessPlan) -> None:
             raise ValueError(f"V2能力未接通：{task.task_id}：{warning}")
         choices = payload.get("capability_choices")
         if isinstance(choices, list):
-            if not any(
-                isinstance(choice, Mapping) and bool(choice.get("candidates")) for choice in choices
-            ) and not task.eligible_resources:
+            if (
+                not any(isinstance(choice, Mapping) and bool(choice.get("candidates")) for choice in choices)
+                and not task.eligible_resources
+            ):
                 capability = str(payload.get("capability") or task.task_type.value)
                 raise ValueError(f"V2工艺路线 {task.task_id} 的能力 {capability} 没有可执行分支")
         elif (
@@ -80,9 +93,8 @@ def validate_v2_plan(plan: ProcessPlan) -> None:
             and not payload.get("capability_candidates")
             and not task.eligible_resources
         ):
-            raise ValueError(
-                f"V2工艺路线 {task.task_id} 的能力 {payload['capability']} 没有可执行资源"
-            )
+            raise ValueError(f"V2工艺路线 {task.task_id} 的能力 {payload['capability']} 没有可执行资源")
+    return graph
 
 
-__all__ = ["build_v2_task_graph", "validate_v2_plan"]
+__all__ = ["MAX_ORDER_ID_LENGTH", "build_v2_task_graph", "validate_v2_order_id", "validate_v2_plan"]
