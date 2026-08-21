@@ -78,12 +78,10 @@ def _capture_fault_frame(
     model = application.scene.model
     model.vis.global_.offwidth = 1280
     model.vis.global_.offheight = 720
+    model.vis.quality.offsamples = 4
     renderer = mujoco.Renderer(model, height=720, width=1280)
     try:
-        while (
-            not application.runtime.complete
-            and application.runtime.sim_time < float(args.max_sim_time)
-        ):
+        while not application.runtime.complete and application.runtime.sim_time < float(args.max_sim_time):
             application.advance_frame()
             runtime = application.runtime
             defects = tuple(runtime.faults.physical_faults.values())
@@ -92,8 +90,7 @@ def _capture_fault_frame(
                     (
                         defect
                         for defect in defects
-                        if defect.visual_type == "BRAZING_MISSING"
-                        and defect.status == "DETECTED"
+                        if defect.visual_type == "BRAZING_MISSING" and defect.status == "DETECTED"
                     ),
                     None,
                 )
@@ -111,6 +108,14 @@ def _capture_fault_frame(
                     )
                     return
             else:
+                detected = next(
+                    (
+                        defect
+                        for defect in defects
+                        if defect.visual_type == "FIN_POSE" and defect.status == "DETECTED"
+                    ),
+                    None,
+                )
                 recovery = next(
                     (
                         operation
@@ -119,10 +124,10 @@ def _capture_fault_frame(
                     ),
                     None,
                 )
-                if recovery is not None:
-                    progress = application.scene.robot_motion_snapshot()[
-                        recovery.resource.lower()
-                    ].get("progress", 0.0)
+                if detected is not None and recovery is not None:
+                    progress = application.scene.robot_motion_snapshot()[recovery.resource.lower()].get(
+                        "progress", 0.0
+                    )
                     if 0.28 <= float(progress) <= 0.78:
                         unit = runtime.units[recovery.unit_id]
                         assert unit.tray_id is not None
@@ -139,6 +144,22 @@ def _capture_fault_frame(
                             ),
                         )
                         return
+                if detected is not None:
+                    unit = runtime.units[detected.unit_id]
+                    assert unit.tray_id is not None
+                    tray_position = application.scene.tray_position(unit.tray_id)
+                    _save(
+                        renderer,
+                        application,
+                        filename,
+                        _camera(
+                            lookat=tuple(float(value) for value in tray_position),
+                            distance=1.28,
+                            azimuth=138,
+                            elevation=-40,
+                        ),
+                    )
+                    return
         raise RuntimeError(f"V2 fault run completed without capture state: {filename}")
     finally:
         renderer.close()
@@ -154,7 +175,7 @@ def _capture_fault_flexibility_frames() -> None:
     _capture_fault_frame(
         fault_type="FIN_POSE",
         target="fin_03",
-        filename="v2_fault_fin_pose_rework.png",
+        filename="v2_fault_fin_pose_detected.png",
     )
 
 
@@ -175,6 +196,7 @@ def main() -> int:
     model = application.scene.model
     model.vis.global_.offwidth = 1280
     model.vis.global_.offheight = 720
+    model.vis.quality.offsamples = 4
     renderer = mujoco.Renderer(model, height=720, width=1280)
     captured: set[str] = set()
     try:
@@ -212,6 +234,80 @@ def main() -> int:
 
             arm1 = operations.get("ARM1")
             arm3 = operations.get("ARM3")
+            arm1_label = str(robot_motion["arm1"].get("target_zh", ""))
+            if (
+                "v2_tool_change_current.png" not in captured
+                and "换刀" in arm1_label
+                and "竖直慢降" in arm1_label
+            ):
+                _save(
+                    renderer,
+                    application,
+                    "v2_tool_change_current.png",
+                    _camera(
+                        lookat=(-0.50, 1.10, 0.27),
+                        distance=0.92,
+                        azimuth=225,
+                        elevation=-18,
+                    ),
+                )
+                captured.add("v2_tool_change_current.png")
+
+            if (
+                "v2_base_loading_current.png" not in captured
+                and arm1 is not None
+                and arm1.kind == "BASE_LOADING"
+                and robot_motion["arm1"].get("workpiece_held")
+                and "携板" in arm1_label
+            ):
+                _save(
+                    renderer,
+                    application,
+                    "v2_base_loading_current.png",
+                    _camera(
+                        lookat=(-0.40, 0.67, 0.27),
+                        distance=1.42,
+                        azimuth=155,
+                        elevation=-30,
+                    ),
+                )
+                captured.add("v2_base_loading_current.png")
+
+            if (
+                "v2_material_inspection_current.png" not in captured
+                and arm3 is not None
+                and arm3.kind == "MATERIAL_INSPECTION"
+            ):
+                _save(
+                    renderer,
+                    application,
+                    "v2_material_inspection_current.png",
+                    _camera(
+                        lookat=(0.50, 0.00, 0.29),
+                        distance=1.45,
+                        azimuth=142,
+                        elevation=-34,
+                    ),
+                )
+                captured.add("v2_material_inspection_current.png")
+
+            if (
+                "v2_pre_braze_inspection_current.png" not in captured
+                and arm3 is not None
+                and arm3.kind == "PRE_BRAZE_INSPECTION"
+            ):
+                _save(
+                    renderer,
+                    application,
+                    "v2_pre_braze_inspection_current.png",
+                    _camera(
+                        lookat=(1.72, 0.00, 0.32),
+                        distance=1.60,
+                        azimuth=145,
+                        elevation=-30,
+                    ),
+                )
+                captured.add("v2_pre_braze_inspection_current.png")
             parallel_install = (
                 arm1 is not None
                 and arm1.kind == "INSTALL_FIN"
@@ -262,6 +358,40 @@ def main() -> int:
                 )
                 captured.add("v2_furnace_batch_current.png")
 
+            if (
+                "v2_furnace_unloading_current.png" not in captured
+                and runtime.furnace.state.phase is FurnacePhase.UNLOADING
+                and runtime.furnace.state.rear_door_open
+            ):
+                _save(
+                    renderer,
+                    application,
+                    "v2_furnace_unloading_current.png",
+                    _camera(
+                        lookat=(3.85, 0.00, 0.36),
+                        distance=2.05,
+                        azimuth=300,
+                        elevation=-24,
+                    ),
+                )
+                captured.add("v2_furnace_unloading_current.png")
+
+            if "v2_post_braze_inspection_current.png" not in captured and any(
+                operation.kind == "POST_BRAZE_INSPECTION" for operation in operations.values()
+            ):
+                _save(
+                    renderer,
+                    application,
+                    "v2_post_braze_inspection_current.png",
+                    _camera(
+                        lookat=(4.15, 0.00, 0.32),
+                        distance=1.42,
+                        azimuth=105,
+                        elevation=-40,
+                    ),
+                )
+                captured.add("v2_post_braze_inspection_current.png")
+
             output_units = [
                 unit
                 for unit in runtime.units.values()
@@ -288,18 +418,24 @@ def main() -> int:
                     "v2_post_braze_output_current.png",
                     _camera(
                         lookat=(4.52, 0.00, 0.34),
-                        distance=2.20,
-                        azimuth=300,
-                        elevation=-22,
+                        distance=1.82,
+                        azimuth=75,
+                        elevation=-40,
                     ),
                 )
                 captured.add("v2_post_braze_output_current.png")
 
         expected = {
             "v2_current_overview.png",
+            "v2_tool_change_current.png",
+            "v2_base_loading_current.png",
             "v2_dispensing_current.png",
+            "v2_material_inspection_current.png",
             "v2_parallel_install_current.png",
+            "v2_pre_braze_inspection_current.png",
             "v2_furnace_batch_current.png",
+            "v2_furnace_unloading_current.png",
+            "v2_post_braze_inspection_current.png",
             "v2_post_braze_output_current.png",
         }
         missing = sorted(expected - captured)

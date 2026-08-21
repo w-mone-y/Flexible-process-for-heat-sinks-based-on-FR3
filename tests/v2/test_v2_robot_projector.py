@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from brazing_sim.dual_line import DualLineRuntime, DualLineSceneAdapter
+from brazing_sim.dual_line import DualLineRuntime, DualLineSceneAdapter, UnifiedV2Runtime, UnitStage
 from brazing_sim.flexible import build_custom_plan, build_inline_plan
 from brazing_sim.motion import HOME_QPOS
 
@@ -879,13 +879,95 @@ def test_v2_arm1_toolchange_dock_and_retreat_are_measured_vertical_lines() -> No
             for marker, values in samples.items():
                 if marker in label:
                     values.append(np.asarray(state["actual_tcp_position_m"], dtype=float))
-            if all(len(values) >= 5 for values in samples.values()):
+            if "带夹爪高位离开工具架" in label and all(len(values) >= 5 for values in samples.values()):
                 break
         for marker, values in samples.items():
             assert len(values) >= 5, marker
             positions = np.stack(values)
             assert float(np.ptp(positions[:, 0])) <= 0.001, marker
             assert float(np.ptp(positions[:, 1])) <= 0.001, marker
+            z_steps = np.diff(positions[:, 2])
+            if marker in {"归还吸盘到架", "取用夹爪并锁定"}:
+                assert float(positions[0, 2] - positions[-1, 2]) >= 0.09, marker
+                assert float(np.max(z_steps)) <= 0.001, marker
+            else:
+                assert float(positions[-1, 2] - positions[0, 2]) >= 0.09, marker
+                assert float(np.min(z_steps)) >= -0.001, marker
+    finally:
+        adapter.close()
+
+
+@pytest.mark.parametrize("fast", (False, True))
+def test_v2_arm1_toolchange_clears_the_rack_and_only_moves_sideways_above_it(
+    fast: bool,
+) -> None:
+    """The flange may dock vertically, but must never penetrate rack structure."""
+
+    mujoco = pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=fast)
+    adapter = DualLineSceneAdapter(V2_XML)
+    rack_geoms = {
+        int(adapter.model.geom(name).id)
+        for name in (
+            "v2_arm1_tool_rack_base",
+            "v2_arm1_tool_rack_column",
+            "v2_arm1_tool_rack_beam",
+            "v2_arm1_tool_rack_left_finger",
+            "v2_arm1_tool_rack_right_finger",
+        )
+    }
+    upper_geoms = tuple(
+        adapter.model.geom(name)
+        for name in (
+            "v2_arm1_tool_rack_beam",
+            "v2_arm1_tool_rack_left_finger",
+            "v2_arm1_tool_rack_right_finger",
+        )
+    )
+    rack_body = adapter.data.body("v2_arm1_tool_rack")
+    beam_top_m = float(rack_body.xpos[2] + max(geom.pos[2] + geom.size[2] for geom in upper_geoms))
+    safe_plane_z_m = float(adapter.data.site("v2_arm1_tool_rack_safe_plane").xpos[2])
+    observed_labels: list[str] = []
+    unsafe_contacts: list[tuple[str, str, str]] = []
+    high_crossing_z_m: list[float] = []
+    try:
+        runtime.submit_order("A", order_id="RACK_CLEAR_TOOL_A")
+        for _ in range(16_000):
+            runtime.tick(0.005)
+            adapter.sync(runtime)
+            adapter.step_physics(0.005)
+            state = adapter.robot_motion_snapshot()["arm1"]
+            label = str(state["target_zh"])
+            if "换刀" not in label:
+                continue
+            observed_labels.append(label)
+            if "高位横移" in label or "高位离开" in label:
+                high_crossing_z_m.append(float(state["actual_tcp_position_m"][2]))
+            for contact_index in range(adapter.data.ncon):
+                contact = adapter.data.contact[contact_index]
+                if contact.geom1 not in rack_geoms and contact.geom2 not in rack_geoms:
+                    continue
+                other = contact.geom2 if contact.geom1 in rack_geoms else contact.geom1
+                other_name = mujoco.mj_id2name(adapter.model, mujoco.mjtObj.mjOBJ_GEOM, other) or ""
+                if not other_name.startswith("arm1_fr3_"):
+                    continue
+                rack = contact.geom1 if contact.geom1 in rack_geoms else contact.geom2
+                rack_name = mujoco.mj_id2name(adapter.model, mujoco.mjtObj.mjOBJ_GEOM, rack) or ""
+                unsafe_contacts.append((label, rack_name, other_name))
+            if "带夹爪高位离开工具架" in label:
+                break
+
+        required_phases = (
+            "正上方",
+            "竖直慢降",
+            "竖直慢升",
+            "高位离开",
+        )
+        assert all(any(phase in label for label in observed_labels) for phase in required_phases)
+        assert high_crossing_z_m
+        assert min(high_crossing_z_m) >= beam_top_m + 0.050
+        assert abs(max(high_crossing_z_m) - safe_plane_z_m) <= 0.010
+        assert not unsafe_contacts
     finally:
         adapter.close()
 
@@ -1226,6 +1308,102 @@ def test_v2_runtime_operations_drive_real_fr3_joint_actuators() -> None:
         assert all(error <= np.deg2rad(3.0) for error in fixed_tool_orientation_errors.values())
     finally:
         adapter.close()
+
+
+def test_arm2_physically_prepositions_while_the_loaded_tray_moves_from_s1_to_s2a() -> None:
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    observed = None
+    try:
+        runtime.submit_order("A", order_id="ARM2_PREPOSITION")
+        for _ in range(3_000):
+            runtime.tick(0.05)
+            adapter.sync(runtime)
+            adapter.step_physics(0.05)
+            transfers = adapter.transport_snapshot()
+            moving_to_s2a = any(
+                item["source"] == "S1" and item["target"] == "S2A" for item in transfers.values()
+            )
+            arm2 = adapter.robot_motion_snapshot()["arm2"]
+            if moving_to_s2a and arm2.get("prepositioning"):
+                observed = arm2
+                assert "ARM2" not in runtime.operations
+                assert arm2["preposition_for"] == "DISPENSING"
+                assert "安全接近" in str(arm2["target_zh"])
+                assert not arm2["workpiece_held"]
+                break
+    finally:
+        adapter.close()
+
+    assert observed is not None
+
+
+def test_arm1_and_arm3_preposition_during_incoming_tray_motion_without_process_contact() -> None:
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    observed = {"ARM1": False, "ARM3": False}
+    try:
+        adapter.sync(runtime)
+        runtime.submit_order("A", order_id="MULTI_ARM_PREPOSITION")
+        for _ in range(4_000):
+            runtime.tick(0.05)
+            adapter.sync(runtime)
+            adapter.step_physics(0.05)
+            transfers = adapter.transport_snapshot().values()
+            routes = {(item["source"], item["target"]) for item in transfers}
+            robot_motion = adapter.robot_motion_snapshot()
+            if ("EMPTY_BUFFER", "S1") in routes and robot_motion["arm1"].get("prepositioning"):
+                observed["ARM1"] = True
+                assert "ARM1" not in runtime.operations
+                assert robot_motion["arm1"]["preposition_for"] == "BASE_LOADING"
+                assert not robot_motion["arm1"]["workpiece_held"]
+            if ("S2A", "S2B") in routes and robot_motion["arm3"].get("prepositioning"):
+                observed["ARM3"] = True
+                assert "ARM3" not in runtime.operations
+                assert robot_motion["arm3"]["preposition_for"] == "MATERIAL_INSPECTION"
+                assert not robot_motion["arm3"]["workpiece_held"]
+            if all(observed.values()):
+                break
+    finally:
+        adapter.close()
+
+    assert observed == {"ARM1": True, "ARM3": True}
+
+
+def test_arm1_physically_starts_the_gripper_exchange_when_the_base_wave_ends() -> None:
+    pytest.importorskip("mujoco")
+    runtime = UnifiedV2Runtime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    base_wave_was_complete = False
+    observed = None
+    try:
+        for index, preset in enumerate("ABCAB", start=1):
+            runtime.submit_order(preset, order_id=f"TAIL_TOOL_{index}")
+
+        for _ in range(5_000):
+            runtime.tick(0.05)
+            adapter.sync(runtime.physical_runtime)
+            adapter.step_physics(0.05)
+            units = tuple(runtime.physical_runtime.units.values())
+            base_wave_complete = bool(units) and all(
+                unit.stage not in {UnitStage.QUEUED, UnitStage.BASE_LOADING} for unit in units
+            )
+            if base_wave_complete and not base_wave_was_complete:
+                arm1 = adapter.robot_motion_snapshot()["arm1"]
+                observed = arm1
+                assert arm1["prepositioning"] is True
+                assert arm1["preposition_for"] == "INSTALL_FIN"
+                assert "换刀" in str(arm1["target_zh"])
+                assert arm1["workpiece_held"] is False
+                assert "ARM1" not in runtime.physical_runtime.operations
+                break
+            base_wave_was_complete = base_wave_complete
+    finally:
+        adapter.close()
+
+    assert observed is not None
 
 
 def test_six_order_physical_run_has_no_overlap_stall_or_false_grasp_completion() -> None:

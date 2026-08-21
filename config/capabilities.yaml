@@ -179,6 +179,14 @@ capabilities:
     zones: [ZONE_S3B_ARM3]
     preemptive: false
 
+  FIN_CLOSEUP_REVIEW:
+    task_type: REVIEW_FINS_CLOSEUP
+    requires_tool_class: CAMERA
+    description_zh: 高可靠路线翅片近景复核
+    duration_model: "6.0"
+    zones: [ZONE_S3B_ARM3]
+    preemptive: false
+
   # ---------------------------------------------------------------- 压紧锁定
   PRESS_APPLICATION:
     task_type: APPLY_PRESS

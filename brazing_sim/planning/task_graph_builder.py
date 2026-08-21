@@ -944,10 +944,10 @@ class ProcessPlanTaskGraphBuilder:
             # S1 -> S2A.  A high-reliability route performs its extra base
             # view at S1 before the pallet is released to the first slide.
             transfer_12_predecessor = items["PLACE_BASE"].task_id
-            high_reliability = (
-                not self.camera_coordination
-                and self._uses_high_reliability_route(plan, index)
-            )
+            # V1/flexible-cell routes keep their historical S1 alignment
+            # verification. V2 sets ``camera_coordination`` and replaces this
+            # check with the Arm3 S3B close-up nodes above.
+            high_reliability = not self.camera_coordination and self._uses_high_reliability_route(plan, index)
             if high_reliability:
                 verify_base = self._make(
                     task_id=f"{prefix}VERIFY_BASE_ALIGNMENT",
@@ -1131,9 +1131,8 @@ class ProcessPlanTaskGraphBuilder:
             )
             graph.add_task(inspect)
             route_predecessor = inspect.task_id
-            high_reliability = (
-                not self.camera_coordination
-                and self._uses_high_reliability_route(plan, assignment.unit_index)
+            high_reliability = not self.camera_coordination and self._uses_high_reliability_route(
+                plan, assignment.unit_index
             )
             if high_reliability:
                 second_view = self._make(

@@ -113,6 +113,55 @@ def test_dynamic_scheduler_respects_fault_tool_zone_and_priority() -> None:
     assert not scheduler.select_assignments((low,), resources, {"occupied_zones": {"ZONE_A"}}, 0.0)
 
 
+def test_dynamic_scheduler_uses_arm3_detection_priority_at_fin_boundaries() -> None:
+    inspect = ManufacturingTask(
+        task_id="inspect_unlocks_arm1",
+        task_type=TaskType.INSPECT_BRAZING,
+        order_id="INSPECT_ORDER",
+        unit_id="INSPECT_UNIT",
+        eligible_resources=["ARM3"],
+        estimated_duration=10.0,
+        priority=1,
+        status=TaskStatus.READY,
+    )
+    next_fin = ManufacturingTask(
+        task_id="continue_arm3_fin",
+        task_type=TaskType.INSTALL_FIN,
+        order_id="FIN_ORDER",
+        unit_id="FIN_UNIT",
+        eligible_resources=["ARM3"],
+        estimated_duration=1.0,
+        priority=100,
+        status=TaskStatus.READY,
+    )
+    resources = {
+        "ARM3": ResourceState(
+            "ARM3",
+            "ROBOT",
+            capabilities={TaskType.INSPECT_BRAZING.value, TaskType.INSTALL_FIN.value},
+            available_tools=set(),
+        )
+    }
+    scheduler = DynamicPriorityScheduler(max_assignments_per_tick=1)
+
+    assignments = scheduler.select_assignments(
+        (next_fin, inspect),
+        resources,
+        {
+            "occupied_zones": set(),
+            "resource_task_type_priorities": {
+                "ARM3": (
+                    (TaskType.INSPECT_BRAZING.value, TaskType.INSPECT_FINS.value),
+                    (TaskType.PICK_FIN.value, TaskType.INSTALL_FIN.value),
+                )
+            },
+        },
+        0.0,
+    )
+
+    assert [assignment.task_id for assignment in assignments] == [inspect.task_id]
+
+
 def test_fixed_scheduler_is_deterministic() -> None:
     values = [task("b"), task("a")]
     for index, item in enumerate(values):

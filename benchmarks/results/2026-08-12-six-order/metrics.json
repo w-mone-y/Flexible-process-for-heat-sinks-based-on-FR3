@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "measured_at": "2026-08-12",
+  "machine": "macOS-26.5.2-arm64-arm-64bit",
+  "code_revision": "4ff5ad8",
+  "working_tree_dirty": true,
+  "profile": "full",
+  "measurement_basis": {
+    "simulation_seconds": "实际仿真事件完成时间",
+    "wall_seconds": "subprocess 端到端 perf_counter 中位数",
+    "throughput": "完成件数 / 仿真 makespan"
+  },
+  "results": [
+    {
+      "case": "six_abcabc",
+      "version": "v2",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 649.3,
+      "wall_seconds": 131.93009362499288,
+      "units": 6,
+      "throughput_per_sim_hour": 33.26659479439397,
+      "parallel_install_seconds": 181.45,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line_v2.py",
+        "--headless",
+        "--orders",
+        "A,B,C,A,B,C",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "six_abcabc",
+      "version": "v1",
+      "supported": true,
+      "completed": true,
+      "exit_code": 0,
+      "simulation_seconds": 1224.6599999848645,
+      "wall_seconds": 149.83428000001004,
+      "units": 6,
+      "throughput_per_sim_hour": 17.637548380993053,
+      "parallel_install_seconds": null,
+      "error": "",
+      "command": [
+        "python",
+        "brazing_line.py",
+        "--headless",
+        "--orders-file",
+        "/var/folders/r0/xw74vdf55_z8sg9wvydmg_240000gn/T/fr3-benchmark-c45tvwmi/v1-abc.yaml",
+        "--max-sim-time",
+        "2000"
+      ]
+    },
+    {
+      "case": "six_abcabc",
+      "version": "v1-early",
+      "supported": false,
+      "completed": false,
+      "exit_code": null,
+      "simulation_seconds": null,
+      "wall_seconds": null,
+      "units": 6,
+      "throughput_per_sim_hour": null,
+      "parallel_install_seconds": null,
+      "error": "该历史版本不支持此订单模式",
+      "command": []
+    }
+  ]
+}

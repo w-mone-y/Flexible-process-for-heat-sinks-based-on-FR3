@@ -80,6 +80,39 @@ def test_v2_scene_exports_three_robots_and_arm3_hybrid_tool(model) -> None:
     model.equality("v2_arm3_hybrid_tool_weld")
 
 
+def test_v2_arm1_tool_rack_uses_thin_contact_fingers_beneath_both_tools(model) -> None:
+    """The V1-style cantilever visibly supports both collars without blocking the flange."""
+
+    column = model.geom("v2_arm1_tool_rack_column")
+    beam = model.geom("v2_arm1_tool_rack_beam")
+    left_finger = model.geom("v2_arm1_tool_rack_left_finger")
+    right_finger = model.geom("v2_arm1_tool_rack_right_finger")
+    gripper = model.site("v2_arm1_parallel_gripper_rack_site")
+    suction = model.site("v2_arm1_suction_tool_rack_site")
+    safe_plane = model.site("v2_arm1_tool_rack_safe_plane")
+
+    with pytest.raises(KeyError):
+        model.geom("v2_arm1_tool_rack_right_column")
+    assert float(column.pos[1]) > max(float(gripper.pos[1]), float(suction.pos[1]))
+    assert float(beam.size[2] * 2.0) <= 0.020
+    for finger in (left_finger, right_finger):
+        assert float(finger.size[2] * 2.0) <= 0.016
+        assert float(finger.pos[1] - finger.size[1]) <= float(gripper.pos[1])
+        assert float(finger.pos[1] + finger.size[1]) >= float(suction.pos[1])
+    assert float(left_finger.pos[0] + left_finger.size[0]) <= -0.025
+    assert float(right_finger.pos[0] - right_finger.size[0]) >= 0.025
+    support_top = max(
+        float(beam.pos[2] + beam.size[2]),
+        float(left_finger.pos[2] + left_finger.size[2]),
+        float(right_finger.pos[2] + right_finger.size[2]),
+    )
+    assert 0.0 <= float(gripper.pos[2]) - support_top <= 0.008
+    assert 0.0 <= float(suction.pos[2]) - support_top <= 0.008
+    assert float(safe_plane.pos[2]) >= support_top + 0.060
+    for dock in (gripper, suction):
+        assert float(dock.pos[2]) < float(safe_plane.pos[2])
+
+
 def test_v2_scene_has_six_physical_trays_and_explicit_ownership_welds(model) -> None:
     for index in range(1, 7):
         tray = f"v2_tray_{index:02d}"

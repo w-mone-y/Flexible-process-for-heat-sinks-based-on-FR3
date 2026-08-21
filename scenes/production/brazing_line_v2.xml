@@ -146,11 +146,27 @@
          start on a rack outside the A-branch sweep and are never teleported. -->
     <body name="v2_arm1_tool_rack" pos="-0.50 1.10 0">
       <geom class="structure" name="v2_arm1_tool_rack_base"
-            size="0.075 0.14 0.025" pos="0 0 0.025"/>
+            size="0.080 0.190 0.025" pos="0 0.050 0.025"/>
       <geom class="structure" name="v2_arm1_tool_rack_column"
-            size="0.030 0.025 0.145" pos="0 0.095 0.170"/>
+            size="0.030 0.025 0.140" pos="0 0.185 0.165"/>
+      <!-- A thin forked cantilever reaches beneath both tool collars.  The
+           two fingers provide visible support while the open centre channel
+           leaves the FR3 flange a collision-free vertical docking path. -->
       <geom class="structure" name="v2_arm1_tool_rack_beam"
-            size="0.045 0.12 0.020" pos="0 0 0.315"/>
+            size="0.050 0.020 0.006" pos="0 0.185 0.286"/>
+      <geom class="structure" name="v2_arm1_tool_rack_left_finger"
+            size="0.006 0.120 0.006" pos="-0.035 0.065 0.286"/>
+      <geom class="structure" name="v2_arm1_tool_rack_right_finger"
+            size="0.006 0.120 0.006" pos="0.035 0.065 0.286"/>
+      <geom class="visual" name="v2_arm1_rack_upper_safety_trim" type="box"
+            size="0.052 0.022 0.002" pos="0 0.185 0.294"
+            material="v2_safety_mat"/>
+      <geom class="visual" name="v2_arm1_rack_left_finger_trim" type="box"
+            size="0.0065 0.120 0.0015" pos="-0.035 0.065 0.2935"
+            material="v2_safety_mat"/>
+      <geom class="visual" name="v2_arm1_rack_right_finger_trim" type="box"
+            size="0.0065 0.120 0.0015" pos="0.035 0.065 0.2935"
+            material="v2_safety_mat"/>
       <geom class="visual" name="v2_arm1_rack_front_trim" type="box"
             size="0.078 0.010 0.006" pos="0 -0.132 0.052"
             material="v2_safety_mat"/>
@@ -170,6 +186,11 @@
             pos="0 -0.040 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
       <site name="v2_arm1_suction_tool_rack_site"
             pos="0 0.040 0.295" size="0.005" rgba="0.2 0.8 1 0.8"/>
+      <!-- The tool-change planner reads this certified plane.  It stays at
+           least 60 mm above the upper arm, so all lateral motion occurs over
+           the real rack rather than relying on a duplicated Python height. -->
+      <site name="v2_arm1_tool_rack_safe_plane"
+            pos="0 0 0.405" size="0.004" rgba="1 0.8 0 0"/>
     </body>
 
     <body name="v2_arm1_parallel_gripper" pos="-0.50 1.06 0.295"

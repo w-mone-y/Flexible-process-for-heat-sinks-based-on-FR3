@@ -1,0 +1,10 @@
+case,version,supported,completed,exit_code,simulation_seconds,wall_seconds,units,throughput_per_sim_hour,parallel_install_seconds,error,command
+single_a,v2,True,True,0,206.8,19.232533540998702,1,17.408123791102515,0.0,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A', '--max-sim-time', '2000']"
+single_a,v1,True,True,0,256.9740000004989,45.90448462500353,1,14.009199374228563,,,"['python', 'brazing_line.py', '--headless', '--order', 'A', '--max-sim-time', '2000']"
+single_a,v1-early,True,False,2,333.6300000008649,93.7325203329965,1,,,unexpected contact furnace/furnace_roof <-> arm2_fr3_link3/arm2_fr3_link3_collision (-1.07 mm),"['python', 'brazing_line.py', '--headless', '--order', 'A', '--max-sim-time', '2000']"
+three_a,v2,True,True,0,368.5,53.214401749995886,3,29.308005427408414,64.1,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A,A,A', '--max-sim-time', '2000']"
+three_a,v1,True,True,0,835.1299999940755,147.0403784999944,3,12.932118352923037,,,"['python', 'brazing_line.py', '--headless', '--batch', 'A', '--max-sim-time', '2000']"
+three_a,v1-early,False,False,,,,3,,,该历史版本不支持此订单模式,[]
+mixed_abc,v2,True,True,0,359.65,54.9951967090019,3,30.02919505074378,71.95,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A,B,C', '--max-sim-time', '2000']"
+mixed_abc,v1,True,True,0,562.4400000005238,79.90207604100578,3,19.202048218458753,,,"['python', 'brazing_line.py', '--headless', '--orders-file', 'v1-abc.yaml', '--max-sim-time', '2000']"
+mixed_abc,v1-early,False,False,,,,3,,,该历史版本不支持此订单模式,[]

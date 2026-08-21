@@ -183,7 +183,7 @@ def test_flexibility_demo_commands_mutate_the_real_v2_runtime() -> None:
     assert any(item.visual_type == "BRAZING_MISSING" for item in disturbed.faults.pending.values())
 
 
-def test_v2_rejects_unsupported_order_fields_before_accepting_order() -> None:
+def test_v2_rejects_unsupported_route_strategy_before_accepting_order() -> None:
     runtime = DualLineRuntime(fast=True)
     surface = V2ControlSurface(runtime)
     with pytest.raises(ValueError, match="不支持"):
@@ -192,7 +192,7 @@ def test_v2_rejects_unsupported_order_fields_before_accepting_order() -> None:
                 "type": "order_insert",
                 "preset": "A",
                 "quantity": 1,
-                "route_strategy": "HIGH_RELIABILITY",
+                "route_strategy": "TURBO",
             }
         )
     assert runtime.orders == {}

@@ -243,6 +243,9 @@ def test_v2_application_publishes_real_carrier_transport_to_the_shared_ui() -> N
         assert state["transfers"]["V2_TRAY_01"]["target"] == "S1"
         assert state["async_line"]["physical_tray_owners"]["V2_TRAY_01"] == "EMPTY_BUFFER"
         assert state["tray_routes"]["V2_TRAY_01"]["physical_owner"] == "EMPTY_BUFFER"
+        assert state["prepositioning"]["ARM1"]["operation_kind"] == "BASE_LOADING"
+        assert state["arms"]["arm1"]["status"] == "prepositioning"
+        assert state["arms"]["arm1"]["preposition_for"] == "BASE_LOADING"
         assert state["ui_capabilities"]["orders"]
     finally:
         application.close()

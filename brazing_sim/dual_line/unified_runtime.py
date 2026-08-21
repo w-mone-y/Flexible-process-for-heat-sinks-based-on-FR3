@@ -10,6 +10,7 @@ from ..flexible import ProcessPlan, build_inline_plan
 from ..manufacturing_runtime import ManufacturingRuntime
 from ..planning import ManufacturingTask, TaskType, V2_DUAL_INSTALL_PROFILE
 from ..scheduling import ResourceStatus
+from .dispatch import InstallBranch
 from .furnace import FurnacePhase
 from .runtime import DualLineRuntime, RuntimeExecutionGate, UnitStage
 from .tray_flow import TrayOwner
@@ -88,6 +89,7 @@ class _V2TaskSkill:
             elapsed = max(0.0, float(now) - self.started_at)
             estimate = max(0.1, float(self.task.estimated_duration))
             return SkillExecutionResult.running_result({"progress": 0.95 * elapsed / (elapsed + estimate)})
+        self.bridge.revoke_completed_permits(self.task, since=self.started_at)
         evidence = self.bridge.completion_evidence(float(now), checks)
         return SkillExecutionResult.success(
             {"physical_checks": list(checks)},
@@ -106,9 +108,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
     def __init__(self, runtime: DualLineRuntime) -> None:
         self.runtime = runtime
         self.physical_gate: RuntimeExecutionGate | None = None
+        self.manufacturing_runtime: ManufacturingRuntime | None = None
         self._permits: dict[tuple[str, str], dict[str, str]] = {}
         self._operation_choices: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
         self._task_permits: dict[str, set[tuple[str, str]]] = {}
+        self._tasks: dict[str, ManufacturingTask] = {}
 
     def bind_physical_gate(self, gate: RuntimeExecutionGate | None) -> None:
         if gate is self:
@@ -139,6 +143,27 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             self._operation_choices.setdefault(key, {})[task.task_id] = choice
             keys.add(key)
         self._task_permits[task.task_id] = keys
+        self._tasks[task.task_id] = task
+
+    def _revoke_kind(self, task_id: str, kind: str) -> None:
+        task_keys = self._task_permits.get(task_id)
+        if not task_keys:
+            return
+        key = next(
+            (candidate for candidate in task_keys if candidate[1] == kind),
+            None,
+        )
+        if key is None:
+            return
+        holders = self._permits.get(key)
+        if holders is not None:
+            holders.pop(task_id, None)
+            if not holders:
+                self._permits.pop(key, None)
+        task_keys.discard(key)
+        if not task_keys:
+            self._task_permits.pop(task_id, None)
+            self._tasks.pop(task_id, None)
 
     def revoke(self, task_id: str) -> None:
         for key in self._task_permits.pop(task_id, set()):
@@ -153,6 +178,67 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                     self._operation_choices.pop(key, None)
             if not holders:
                 self._permits.pop(key, None)
+        self._tasks.pop(task_id, None)
+
+    def reset(self) -> None:
+        self._permits.clear()
+        self._task_permits.clear()
+        self._tasks.clear()
+
+    def _permit_completed(
+        self,
+        task_id: str,
+        unit_id: str,
+        kind: str,
+        *,
+        since: float | None = None,
+    ) -> bool:
+        task = self._tasks.get(task_id)
+        if task is None or task.unit_id != unit_id:
+            return False
+        event_since = (
+            float(since)
+            if since is not None
+            else (0.0 if task.started_at is None else float(task.started_at))
+        )
+        if task.task_type in {
+            TaskType.REVIEW_BRAZING_CLOSEUP,
+            TaskType.REVIEW_FINS_CLOSEUP,
+        }:
+            inspection_kind = (
+                "MATERIAL_INSPECTION"
+                if task.task_type is TaskType.REVIEW_BRAZING_CLOSEUP
+                else "PRE_BRAZE_INSPECTION"
+            )
+            return self.runtime.camera_coordination.route_review_completed(
+                unit_id,
+                inspection_kind,
+            )
+        if kind == "INSTALL_FIN":
+            return self._event(
+                "FIN_INSTALLED",
+                unit_id,
+                since=event_since,
+                fin_index=_fin_index(task),
+            )
+        return self._event(
+            "OPERATION_COMPLETED",
+            unit_id,
+            since=event_since,
+            kind=kind,
+        )
+
+    def revoke_completed_permits(self, task: ManufacturingTask, *, since: float) -> None:
+        """Release only physical permits whose measured operation is complete."""
+
+        task_id = task.task_id
+        for kind in tuple(
+            permit_kind
+            for permit_unit, permit_kind in self._task_permits.get(task_id, set())
+            if permit_unit == task.unit_id
+        ):
+            if self._permit_completed(task_id, task.unit_id, kind, since=since):
+                self._revoke_kind(task_id, kind)
 
     def operation_route_metadata(self, resource: str, unit_id: str, kind: str) -> dict[str, Any]:
         """Return the route choice for the latest permit held by a resource."""
@@ -192,6 +278,10 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
 
     def operation_start_allowed(self, resource: str, unit_id: str, kind: str) -> bool:
         holders = self._permits.get((unit_id, kind), {})
+        for task_id in tuple(holders):
+            if self._permit_completed(task_id, unit_id, kind):
+                self._revoke_kind(task_id, kind)
+        holders = self._permits.get((unit_id, kind), {})
         # MERGING is a first-class ownership-controlled transport, not Arm3's
         # inspection task. Tying it to the camera resource creates a circular
         # wait when another pallet already occupies the single merge corridor.
@@ -202,12 +292,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             "OUTPUT_GATE_CLOSE",
             "VIRTUAL_RETURN",
         } or bool(holders)
-        if not permitted and kind in {"MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"}:
-            permitted = any(
-                key_kind in {"MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"} and values
-                for (_unit, key_kind), values in self._permits.items()
-            )
-        if not permitted and kind in {"FURNACE_LOAD_TRAY", "FURNACE_UNLOAD_TRAY"}:
+        if not permitted and kind == "FURNACE_LOAD_TRAY":
+            # Loading is advanced by one physical batch queue.  The globally
+            # selected LOAD_RACK_LAYER task authorizes that shared queue to
+            # move its current head; the exact per-unit order is still checked
+            # by ``task_dispatch_allowed`` before the permit is issued.
             permitted = any(
                 key_kind == kind and values for (_unit, key_kind), values in self._permits.items()
             )
@@ -243,6 +332,23 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             else getattr(self.physical_gate, "operation_start_allowed", None)
         )
         return True if callback is None else bool(callback(resource, unit_id, kind))
+
+    def unit_admission_allowed(self, unit_id: str) -> bool:
+        """Allow physical S1 admission only for a unit released by the DAG.
+
+        The physical V2 runtime still owns motion and tray transfer, but it
+        must not independently choose a higher-priority queued unit than the
+        manufacturing scheduler selected.  Without this gate a burst such as
+        A/B/C/D could admit D physically while the DAG was running C, leaving
+        both authorities waiting on different trays.
+        """
+
+        if self.manufacturing_runtime is None:
+            # During construction the bridge is used by the physical runtime
+            # before the manufacturing facade is attached; keep legacy
+            # standalone DualLineRuntime behaviour unchanged.
+            return True
+        return any(unit_id in entry.admitted_unit_ids for entry in self.manufacturing_runtime.orders.values())
 
     def preferred_install_resource(self, unit_id: str) -> str | None:
         """Return the resource selected by the global DAG scheduler's OR branch."""
@@ -352,11 +458,16 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             )
             return done, ("S3B翅片近景复核完成",)
         if kind is TaskType.MOVE_ELEVATOR:
-            done = bool(self.runtime.furnace.state.front_door_open) or self._event(
-                "FURNACE_FRONT_DOOR_OPENED",
-                task.unit_id,
-                since=0.0,
-            )
+            # The front door is a batch-wide operation: only the leader emits
+            # the door-open event, while later members can join the same
+            # physical loading queue.  Once an exact active-batch member has
+            # physically reached the loading/brazing stages, its elevator
+            # milestone is necessarily complete.  Membership prevents an
+            # upstream next-batch unit from borrowing the current batch's
+            # open-door state.
+            in_active_batch = task.unit_id in self.runtime._active_batch_units
+            reached_loading = _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.FURNACE_LOADING]
+            done = in_active_batch and (bool(self.runtime.furnace.state.front_door_open) or reached_loading)
             return done, (
                 "炉前门完全打开",
                 "装载机构对位",
@@ -382,9 +493,15 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             done = self._event("UNIT_COMPLETED", task.unit_id, since=0.0)
             return done, ("成品进入出口箱", "空托盘所有权已回收")
         if kind is TaskType.CONFIGURE_COMB:
-            return _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.FIN_INSTALLATION], (
-                "订单对应梳齿配置已切换",
+            configured = (
+                unit.stage
+                in {
+                    UnitStage.WAITING_BRAZING_REVIEW,
+                    UnitStage.BRAZING_REVIEW,
+                }
+                or _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.FIN_INSTALLATION]
             )
+            return configured, ("订单对应梳齿配置已切换",)
         if kind in {TaskType.APPLY_PRESS, TaskType.LOCK_FIXTURE}:
             return _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.WAITING_BUFFER], ("实体工装状态已确认",)
         if kind in {TaskType.TRANSFER_TRAY_OUT, TaskType.BATCH_READY}:
@@ -425,6 +542,66 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             unit = self.runtime.units.get(task.unit_id)
             allowed = bool(unit is not None and unit.stage is UnitStage.DISPENSING)
             return allowed, ("" if allowed else "等待托盘完成S1至S2A物理交接")
+        if task.task_type is TaskType.INSPECT_BRAZING:
+            unit = self.runtime.units.get(task.unit_id)
+            physically_at_s2b = bool(
+                unit is not None
+                and (
+                    unit.stage is UnitStage.MATERIAL_INSPECTION
+                    or self._event(
+                        "OPERATION_COMPLETED",
+                        task.unit_id,
+                        since=0.0,
+                        kind="MATERIAL_INSPECTION",
+                    )
+                )
+            )
+            return physically_at_s2b, (
+                "" if physically_at_s2b else "等待托盘实体到达S2B钎料检测位，不提前占用Arm3"
+            )
+        if task.task_type is TaskType.PICK_BASE_PLATE:
+            unit = self.runtime.units.get(task.unit_id)
+            physically_at_s1 = bool(
+                unit is not None
+                and (
+                    unit.stage is UnitStage.BASE_LOADING
+                    or self._event(
+                        "OPERATION_COMPLETED",
+                        task.unit_id,
+                        since=0.0,
+                        kind="BASE_LOADING",
+                    )
+                )
+            )
+            return physically_at_s1, (
+                "" if physically_at_s1 else "等待空托盘和对应订单基板实体到达S1，不提前占用Arm1"
+            )
+        if task.task_type is TaskType.PICK_FIN:
+            unit = self.runtime.units.get(task.unit_id)
+            fin_index = _fin_index(task)
+            physically_at_install = bool(
+                unit is not None
+                and (
+                    unit.stage is UnitStage.FIN_INSTALLATION
+                    or self._event(
+                        "FIN_INSTALLED",
+                        task.unit_id,
+                        since=0.0,
+                        fin_index=fin_index,
+                    )
+                )
+            )
+            return physically_at_install, (
+                "" if physically_at_install else "等待托盘实体到达翅片装配位，不提前占用机械臂"
+            )
+        if task.task_type is TaskType.MOVE_ELEVATOR:
+            active_batch = tuple(self.runtime._active_batch_units)
+            if active_batch:
+                allowed = task.unit_id in active_batch
+            else:
+                buffered = self.runtime._waiting_units(UnitStage.FURNACE_BUFFER)
+                allowed = bool(buffered and buffered[0].unit_id == task.unit_id)
+            return allowed, ("" if allowed else "上游托盘等待下一物理炉批，不提前占用升降机")
         if task.task_type is TaskType.LOAD_RACK_LAYER:
             position = self.runtime._furnace_load_position
             queue = self.runtime._furnace_load_queue
@@ -436,11 +613,28 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             if occupied:
                 next_tray = max(occupied, key=lambda layer: layer.index).tray_id
                 next_unit = next(
-                    (unit.unit_id for unit in self.runtime.units.values() if unit.tray_id == next_tray),
+                    (
+                        unit_id
+                        for unit_id in self.runtime._active_batch_units
+                        if self.runtime.units[unit_id].tray_id == next_tray
+                    ),
                     None,
                 )
                 allowed = next_unit == task.unit_id
-                return allowed, ("" if allowed else "等待更高物理炉层先完成卸载")
+                if not allowed:
+                    return False, "等待更高物理炉层先完成卸载"
+                # A closed rear door is not a blocker: the physical actor
+                # needs this logical permit to open it first.  Once the door
+                # is open, the same task continues to the unload transfer.
+                if "FURNACE_TRANSFER" in self.runtime.operations:
+                    return False, "等待上一托盘完成炉后移载"
+                if "POST_CAMERA" in self.runtime.operations:
+                    return False, "等待焊后检测位释放"
+                if not self.runtime._owner_free(TrayOwner.POST_SCAN):
+                    return False, "等待焊后检测托盘离开"
+                if not self.runtime._target_available(TrayOwner.POST_SCAN):
+                    return False, "等待焊后检测工位可接收托盘"
+                return True, ""
         if task.task_type is TaskType.INSPECT_FINS:
             unit = self.runtime.units.get(task.unit_id)
             allowed = bool(
@@ -483,11 +677,30 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             UnitStage.VIRTUAL_RETURN,
             UnitStage.COMPLETE,
         }
+        active_batch = tuple(self.runtime._active_batch_units)
+        if not active_batch or task.unit_id not in active_batch:
+            return False, "等待所属物理炉批完成装载"
         waiting = [
-            unit.unit_id for unit in self.runtime.units.values() if unit.stage not in batch_ready_stages
+            unit_id for unit_id in active_batch if self.runtime.units[unit_id].stage not in batch_ready_stages
         ]
         if waiting:
             return False, "等待同一滚动炉批的上游托盘到达炉前缓存"
+        if (
+            self.runtime.furnace.state.phase is FurnacePhase.LOADING
+            and not self.runtime._loading_batch_ready_to_close()
+        ):
+            return False, "等待当前物理炉批达到满炉、超时或交期封口条件"
+        if (
+            self.runtime.furnace.state.phase is FurnacePhase.LOADING
+            and len(active_batch) < self.runtime.furnace.capacity
+        ):
+            recipe = self.runtime.units[active_batch[0]].batch_recipe
+            compatible_buffered = any(
+                unit.unit_id not in active_batch and recipe.compatible_with(unit.batch_recipe)
+                for unit in self.runtime._waiting_units(UnitStage.FURNACE_BUFFER)
+            )
+            if compatible_buffered:
+                return False, "等待兼容托盘加入当前物理炉批并完成装载"
         return True, ""
 
 
@@ -519,6 +732,7 @@ class UnifiedV2Runtime:
             dispatch_guard=self.bridge.task_dispatch_allowed,
             external_batch_controller=True,
         )
+        self.bridge.manufacturing_runtime = self.manufacturing_runtime
         # Arm3's V2 head is a fixed camera + narrow-gripper composite, so fin
         # work does not pay the removable-tool change cost used by V1.
         # ``parallel_gripper`` is the task-level GRIPPER class token retained
@@ -619,6 +833,12 @@ class UnifiedV2Runtime:
         }
         for task_id in task_ids:
             task = self.manufacturing_runtime.graph.get(task_id)
+            if task.task_type is TaskType.PREPARE_FIN_TOOL:
+                # Retain the historical DAG node for UI/V1 topology parity,
+                # but defer the actual V2 tool exchange to the first Arm1 fin
+                # operation after the physical install branch is known.
+                task.payload["arm1_tool_policy_neutral"] = True
+                task.required_tool = None
             replacement = zones.get(task.task_type)
             if replacement is not None:
                 task.required_zones = list(replacement)
@@ -657,11 +877,38 @@ class UnifiedV2Runtime:
                         successor for successor in parent.successors if successor != task.task_id
                     ]
 
+    def _sync_physical_install_branches(self) -> None:
+        """Keep global fin-resource choices aligned with the owned V2 branch."""
+
+        resource_for_branch = {
+            InstallBranch.ARM1_A: "ARM1",
+            InstallBranch.ARM3_B: "ARM3",
+        }
+        selected = {
+            unit.unit_id: resource_for_branch[unit.branch]
+            for unit in self.physical_runtime.units.values()
+            if unit.branch in resource_for_branch
+        }
+        if not selected:
+            return
+        for task in self.manufacturing_runtime.graph:
+            resource = selected.get(task.unit_id)
+            if resource is None or task.task_type not in {
+                TaskType.PICK_FIN,
+                TaskType.INSTALL_FIN,
+                TaskType.REINSTALL_FIN,
+            }:
+                continue
+            task.eligible_resources = [resource]
+            task.payload["physical_install_resource"] = resource
+
     def tick(self, dt: float) -> dict[str, Any]:
         self._sync_physical_resources()
+        self._sync_physical_install_branches()
         now = float(self.physical_runtime.sim_time)
         self.manufacturing_runtime.tick(now)
         self.physical_runtime.tick(dt)
+        self._sync_physical_install_branches()
         now = float(self.physical_runtime.sim_time)
         self.manufacturing_runtime.advance_active_skills(now)
         self.manufacturing_runtime.tick(now, poll_executor=False)
@@ -683,6 +930,7 @@ class UnifiedV2Runtime:
         self.bridge.reset()
         self.physical_runtime.reset()
         self.manufacturing_runtime.reset(self.sim_time)
+        self.bridge.reset()
         self.physical_runtime.set_execution_gate(self.bridge)
 
     @staticmethod

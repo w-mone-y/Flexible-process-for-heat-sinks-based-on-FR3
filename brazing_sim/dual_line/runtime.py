@@ -281,6 +281,9 @@ class DualLineRuntime:
         self.install_branch_counts = {branch: 0 for branch in InstallBranch}
         self.scheduled_parallel_install_seconds = 0.0
         self.upstream_work_during_brazing_s = 0.0
+        self.robot_transport_overlap_s = 0.0
+        self.s1_s2a_dual_occupancy_s = 0.0
+        self.preposition_seconds = {resource: 0.0 for resource in ("ARM1", "ARM2", "ARM3")}
         self.maximum_wip = 0
         # Disturbance flexibility: fault injection, recovery planning and
         # resource isolation.  Holds no MuJoCo reference, so the logical runtime
@@ -693,6 +696,183 @@ class DualLineRuntime:
         if self._execution_gate is None:
             return True
         return bool(self._execution_gate.owner_available(owner))
+
+    def _arm1_tail_fin_candidate(self) -> V2UnitState | None:
+        """Return future Arm1 fin work once the accepted base wave is complete.
+
+        This is a tool-preparation forecast, not an install-branch reservation.
+        An unassigned upstream unit may therefore justify mounting the gripper,
+        but the normal dispatcher remains solely responsible for choosing Arm1
+        or Arm3 after inspection.  A newly inserted base order immediately
+        closes this forecast and lets the higher-priority S1 suction intent win.
+        """
+
+        if any(unit.stage in {UnitStage.QUEUED, UnitStage.BASE_LOADING} for unit in self.units.values()):
+            return None
+        upstream = self._waiting_units(
+            UnitStage.WAITING_S2A,
+            UnitStage.DISPENSING,
+            UnitStage.WAITING_S2B,
+            UnitStage.MATERIAL_INSPECTION,
+            UnitStage.WAITING_BRAZING_REVIEW,
+            UnitStage.BRAZING_REVIEW,
+            UnitStage.WAITING_INSTALL,
+            UnitStage.FIN_INSTALLATION,
+        )
+        candidates = [
+            unit
+            for unit in upstream
+            if unit.branch is not InstallBranch.ARM3_B
+            and (unit.fins_installed < unit.fin_count or unit.rework_fin_index is not None)
+        ]
+        return next(
+            (unit for unit in candidates if unit.branch is InstallBranch.ARM1_A),
+            next(iter(candidates), None),
+        )
+
+    def prepositioning_snapshot(self) -> dict[str, dict[str, str]]:
+        """Return safe robot approach intents while the target tray is moving.
+
+        An intent is deliberately weaker than an operation: it never changes
+        task status, reserves tray ownership, or authorizes process contact.
+        The MuJoCo actor may only use it to reach an authored aerial approach
+        pose.  ``_tray_ready`` remains the single gate for starting the actual
+        operation after the carrier has arrived and settled.
+        """
+
+        if self.paused or self._execution_gate is None or not self.faults.cell_available():
+            return {}
+        rules = (
+            (
+                "ARM1",
+                UnitStage.BASE_LOADING,
+                "BASE_LOADING",
+                "S1_BASE_LOADING",
+                "空托盘运输至S1时提前完成吸盘准备并到达基板安全接近位",
+                None,
+            ),
+            (
+                "ARM2",
+                UnitStage.DISPENSING,
+                "DISPENSING",
+                "S2A_DISPENSING",
+                "托盘运输至S2A时提前到达安全接近位",
+                None,
+            ),
+            (
+                "ARM3",
+                UnitStage.MATERIAL_INSPECTION,
+                "MATERIAL_INSPECTION",
+                "S2B_MATERIAL_INSPECTION",
+                "托盘运输至S2B时提前到达相机安全位",
+                None,
+            ),
+            (
+                "ARM3",
+                UnitStage.BRAZING_REVIEW,
+                "MATERIAL_INSPECTION",
+                "S3B_ARM3_INSTALL",
+                "托盘返往S3B近景复核时提前到达相机安全位",
+                InstallBranch.ARM3_B,
+            ),
+            (
+                "ARM3",
+                UnitStage.PRE_BRAZE_INSPECTION,
+                "PRE_BRAZE_INSPECTION",
+                "S4_PRE_BRAZE_INSPECTION",
+                "托盘合流至S4时提前到达焊前检测安全位",
+                None,
+            ),
+            (
+                "ARM3",
+                UnitStage.FINS_REVIEW,
+                "PRE_BRAZE_INSPECTION",
+                "S3B_ARM3_INSTALL",
+                "托盘返往S3B翅片复核时提前到达相机安全位",
+                InstallBranch.ARM3_B,
+            ),
+            (
+                "ARM1",
+                UnitStage.FIN_INSTALLATION,
+                "INSTALL_FIN",
+                "S3A_ARM1_INSTALL",
+                "托盘运输至S3A时提前完成夹爪准备并到达翅片原料安全位",
+                InstallBranch.ARM1_A,
+            ),
+            (
+                "ARM3",
+                UnitStage.FIN_INSTALLATION,
+                "INSTALL_FIN",
+                "S3B_ARM3_INSTALL",
+                "托盘运输至S3B时提前到达翅片原料安全位",
+                InstallBranch.ARM3_B,
+            ),
+        )
+        intents: dict[str, dict[str, str]] = {}
+        for resource, stage, operation_kind, station_id, reason_zh, branch in rules:
+            if resource in self.operations or not self._resource_online(resource):
+                continue
+            if resource in intents:
+                continue
+            physically_ready_work = any(
+                unit.tray_id is not None
+                and self._tray_ready(unit)
+                and (
+                    (resource == "ARM1" and unit.stage is UnitStage.BASE_LOADING)
+                    or (resource == "ARM2" and unit.stage is UnitStage.DISPENSING)
+                    or (
+                        resource == "ARM3"
+                        and unit.stage
+                        in {
+                            UnitStage.MATERIAL_INSPECTION,
+                            UnitStage.PRE_BRAZE_INSPECTION,
+                            UnitStage.BRAZING_REVIEW,
+                            UnitStage.FINS_REVIEW,
+                        }
+                    )
+                    or (
+                        resource == "ARM1"
+                        and unit.stage is UnitStage.FIN_INSTALLATION
+                        and unit.branch is InstallBranch.ARM1_A
+                    )
+                    or (
+                        resource == "ARM3"
+                        and unit.stage is UnitStage.FIN_INSTALLATION
+                        and unit.branch is InstallBranch.ARM3_B
+                    )
+                )
+                for unit in self.units.values()
+            )
+            if physically_ready_work:
+                continue
+            candidate = next(
+                (
+                    unit
+                    for unit in self._waiting_units(stage)
+                    if unit.tray_id is not None
+                    and (branch is None or unit.branch is branch)
+                    and not self._tray_ready(unit)
+                ),
+                None,
+            )
+            if candidate is None:
+                continue
+            intents[resource] = {
+                "unit_id": candidate.unit_id,
+                "operation_kind": operation_kind,
+                "station_id": station_id,
+                "reason_zh": reason_zh,
+            }
+        if "ARM1" not in intents and "ARM1" not in self.operations and self._resource_online("ARM1"):
+            tail_candidate = self._arm1_tail_fin_candidate()
+            if tail_candidate is not None:
+                intents["ARM1"] = {
+                    "unit_id": tail_candidate.unit_id,
+                    "operation_kind": "INSTALL_FIN",
+                    "station_id": "S3A_ARM1_INSTALL",
+                    "reason_zh": ("最后一块基板已安装，提前切换夹爪；不提前锁定安装支路或接触托盘"),
+                }
+        return intents
 
     def _operation_can_complete(self, operation: _Operation) -> bool:
         if self._execution_gate is None:
@@ -1191,13 +1371,16 @@ class DualLineRuntime:
             self._complete_operation(operation)
 
     def _admit_next_unit(self) -> bool:
-        if (
-            "ARM1" in self.operations
-            or not self._owner_free(TrayOwner.S1)
-            or not self._target_available(TrayOwner.S1)
-        ):
+        if not self._owner_free(TrayOwner.S1) or not self._target_available(TrayOwner.S1):
             return False
         queued = self._waiting_units(UnitStage.QUEUED)
+        admission_callback = (
+            None
+            if self._execution_gate is None
+            else getattr(self._execution_gate, "unit_admission_allowed", None)
+        )
+        if admission_callback is not None:
+            queued = [unit for unit in queued if admission_callback(unit.unit_id)]
         if not queued:
             return False
         unit = queued[0]
@@ -1394,54 +1577,35 @@ class DualLineRuntime:
         # Detection always gets Arm3 before another fin is picked. An active
         # INSTALL_FIN operation remains non-preemptible until this tick ends.
         if "ARM3" not in self.operations and self._resource_online("ARM3"):
-            waiting_s3 = [
-                unit
-                for unit in self._waiting_units(UnitStage.BRAZING_REVIEW, UnitStage.FINS_REVIEW)
-                if self._tray_ready(unit)
-            ]
-            if waiting_s3:
-                review_unit = waiting_s3[0]
-                review_kind = (
+            inspection_candidates: list[tuple[V2UnitState, str, float]] = []
+            for unit in self._waiting_units(UnitStage.BRAZING_REVIEW, UnitStage.FINS_REVIEW):
+                if not self._tray_ready(unit):
+                    continue
+                kind = (
                     "MATERIAL_INSPECTION"
-                    if review_unit.stage is UnitStage.BRAZING_REVIEW
+                    if unit.stage is UnitStage.BRAZING_REVIEW
                     else "PRE_BRAZE_INSPECTION"
                 )
-                changed |= self._start(
-                    "ARM3",
-                    review_unit,
-                    review_kind,
-                    (
-                        self.durations.material_inspection
-                        if review_kind == "MATERIAL_INSPECTION"
-                        else self.durations.pre_braze_inspection
-                    ),
+                duration = (
+                    self.durations.material_inspection
+                    if kind == "MATERIAL_INSPECTION"
+                    else self.durations.pre_braze_inspection
                 )
-            else:
-                waiting_s4 = [
-                    unit
-                    for unit in self._waiting_units(UnitStage.PRE_BRAZE_INSPECTION)
-                    if self._tray_ready(unit)
-                ]
-            if not waiting_s3 and waiting_s4:
-                changed |= self._start(
-                    "ARM3",
-                    waiting_s4[0],
-                    "PRE_BRAZE_INSPECTION",
-                    self.durations.pre_braze_inspection,
-                )
-            else:
-                waiting_s2b = [
-                    unit
-                    for unit in self._waiting_units(UnitStage.MATERIAL_INSPECTION)
-                    if self._tray_ready(unit)
-                ]
-                if waiting_s2b:
-                    changed |= self._start(
-                        "ARM3",
-                        waiting_s2b[0],
-                        "MATERIAL_INSPECTION",
-                        self.durations.material_inspection,
-                    )
+                inspection_candidates.append((unit, kind, duration))
+            inspection_candidates.extend(
+                (unit, "PRE_BRAZE_INSPECTION", self.durations.pre_braze_inspection)
+                for unit in self._waiting_units(UnitStage.PRE_BRAZE_INSPECTION)
+                if self._tray_ready(unit)
+            )
+            inspection_candidates.extend(
+                (unit, "MATERIAL_INSPECTION", self.durations.material_inspection)
+                for unit in self._waiting_units(UnitStage.MATERIAL_INSPECTION)
+                if self._tray_ready(unit)
+            )
+            for unit, kind, duration in inspection_candidates:
+                if self._start("ARM3", unit, kind, duration):
+                    changed = True
+                    break
         if "MERGE" not in self.operations and self._resource_online("MERGE"):
             waiting = [unit for unit in self._waiting_units(UnitStage.MERGING) if self._tray_ready(unit)]
             if waiting:
@@ -1456,9 +1620,16 @@ class DualLineRuntime:
                 and (unit.fins_installed < unit.fin_count or unit.rework_fin_index is not None)
                 and self._tray_ready(unit)
             ]
-            if install:
-                changed |= self._start("ARM1", install[0], "INSTALL_FIN", self.durations.arm1_fin)
-            else:
+            install_started = bool(
+                install and self._start("ARM1", install[0], "INSTALL_FIN", self.durations.arm1_fin)
+            )
+            changed |= install_started
+            if not install_started:
+                # A physically ready fin tray is only a candidate.  The
+                # unified scheduler may intentionally withhold its permit to
+                # keep the vacuum tool resident and stage the next base.  Do
+                # not let that denied candidate suppress S1 admission and
+                # leave Arm1 idle in a circular wait.
                 base_loading = [
                     unit for unit in self._waiting_units(UnitStage.BASE_LOADING) if self._tray_ready(unit)
                 ]
@@ -1469,8 +1640,6 @@ class DualLineRuntime:
                         "BASE_LOADING",
                         self.durations.base_load,
                     )
-                elif self._admit_next_unit():
-                    changed = True
         if "ARM3" not in self.operations and self._resource_online("ARM3"):
             install = [
                 unit
@@ -1807,6 +1976,12 @@ class DualLineRuntime:
             changed = False
             changed |= self._dispatch_furnace_unload()
             changed |= self._dispatch_furnace_loading()
+            # Empty-tray admission is logistics work, not an Arm1 operation.
+            # Stage the next released unit at S1 as soon as the station and
+            # route are clear, even while Arm1 is finishing a non-preemptible
+            # fin installation elsewhere.  Arm1 still cannot touch the tray
+            # until the physical S1 readiness gate passes.
+            changed |= self._admit_next_unit()
             changed |= self._dispatch_transfers()
             changed |= self._dispatch_resources()
             changed |= self._try_start_furnace()
@@ -1830,6 +2005,20 @@ class DualLineRuntime:
         self._advance_operations(dt)
         self.furnace.update(self.sim_time)
         self._dispatch()
+        prepositioning = self.prepositioning_snapshot()
+        if prepositioning:
+            self.robot_transport_overlap_s += dt
+            for resource in prepositioning:
+                self.preposition_seconds[resource] += dt
+        physically_occupied = {
+            tray.owner
+            for tray in self.flow.trays
+            if tray.owner in {TrayOwner.S1, TrayOwner.S2A}
+            and self._execution_gate is not None
+            and self._execution_gate.tray_ready(tray.tray_id, tray.owner)
+        }
+        if {TrayOwner.S1, TrayOwner.S2A} <= physically_occupied:
+            self.s1_s2a_dual_occupancy_s += dt
         active_wip = sum(tray.owner is not TrayOwner.EMPTY_BUFFER for tray in self.flow.trays)
         self.maximum_wip = max(self.maximum_wip, active_wip)
         return self.snapshot()
@@ -2180,6 +2369,9 @@ class DualLineRuntime:
         self.install_branch_counts = {branch: 0 for branch in InstallBranch}
         self.scheduled_parallel_install_seconds = 0.0
         self.upstream_work_during_brazing_s = 0.0
+        self.robot_transport_overlap_s = 0.0
+        self.s1_s2a_dual_occupancy_s = 0.0
+        self.preposition_seconds = {resource: 0.0 for resource in ("ARM1", "ARM2", "ARM3")}
         self.maximum_wip = 0
         self.faults.reset()
         self.camera_coordination.reset()
@@ -2275,6 +2467,7 @@ class DualLineRuntime:
                 }
                 for resource, operation in sorted(self.operations.items())
             },
+            "prepositioning": self.prepositioning_snapshot(),
             "install_branch_counts": {
                 branch.value: count for branch, count in self.install_branch_counts.items() if count > 0
             },
@@ -2292,6 +2485,11 @@ class DualLineRuntime:
             "arm3_camera_plan": self.camera_coordination_snapshot(),
             "metrics": {
                 "upstream_work_during_brazing_s": round(self.upstream_work_during_brazing_s, 6),
+                "robot_transport_overlap_s": round(self.robot_transport_overlap_s, 6),
+                "s1_s2a_dual_occupancy_s": round(self.s1_s2a_dual_occupancy_s, 6),
+                "preposition_seconds": {
+                    resource: round(seconds, 6) for resource, seconds in self.preposition_seconds.items()
+                },
                 "maximum_wip": self.maximum_wip,
                 "fault_count": len(self.faults.faults),
                 "recovered_fault_count": sum(1 for record in self.faults.faults.values() if record.recovered),

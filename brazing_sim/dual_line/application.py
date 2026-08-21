@@ -65,6 +65,8 @@ class V2ControlSurface:
             ignored.append("首选料架层（V2 按装炉顺序分配层位）")
         strategy = str(command.get("route_strategy") or "").strip().upper()
         raw_quantity = command.get("quantity", 1) if quantity is None else quantity
+        if strategy and strategy not in {"STANDARD", "HIGH_RELIABILITY", "FIRST_ARTICLE"}:
+            raise ValueError(f"V2 不支持路线策略：{strategy}")
         custom_product = command.get("custom_product")
         if custom_product is not None:
             if not isinstance(custom_product, Mapping):
@@ -345,8 +347,12 @@ class V2BrazingApplication:
             arm = state.get("arms", {}).get(arm_name)
             if not isinstance(arm, dict):
                 continue
+            prepositioning = bool(physical.get("prepositioning", False))
             arm.update(
                 {
+                    "status": "prepositioning" if prepositioning else arm.get("status", "idle"),
+                    "prepositioning": prepositioning,
+                    "preposition_for": physical.get("preposition_for", ""),
                     "physical_mode": physical.get("mode"),
                     "planner": physical.get("planner"),
                     "target_zh": physical.get("target_zh"),

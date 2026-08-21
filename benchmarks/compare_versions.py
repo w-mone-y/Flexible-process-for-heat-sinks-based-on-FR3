@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import date
 import json
+import platform
 import statistics
 import subprocess
 import tempfile
@@ -52,7 +54,7 @@ def _simulation_seconds(snapshot: dict[str, Any], case: str, version: str) -> fl
         value = snapshot.get("sim_time")
     elif case == "three_a":
         value = snapshot.get("batch", {}).get("elapsed_seconds")
-    elif case == "mixed_abc":
+    elif case in {"mixed_abc", "six_abcabc"}:
         completed = [
             order.get("completed_at")
             for order in snapshot.get("orders", [])
@@ -72,9 +74,11 @@ def _is_complete(snapshot: dict[str, Any], case: str, version: str, units: int) 
     if case == "three_a":
         batch = snapshot.get("batch", {})
         return batch.get("stage") == "COMPLETE" and batch.get("completed_units") == units
-    if case == "mixed_abc":
+    if case in {"mixed_abc", "six_abcabc"}:
         orders = snapshot.get("orders", [])
-        return len(orders) == units and all(order.get("status") == "COMPLETED" for order in orders)
+        # V1 reports one aggregate row per submitted order file, while the
+        # benchmark ``units`` count includes each row's quantity.
+        return bool(orders) and all(order.get("status") == "COMPLETED" for order in orders)
     return snapshot.get("stage") in {"PASS", "COMPLETE"}
 
 
@@ -87,7 +91,12 @@ def _command(
     fast = ["--fast"] if profile == "fast" else []
     limit = ["--max-sim-time", "2000"]
     if spec.version == "v2":
-        orders = {"single_a": "A", "three_a": "A,A,A", "mixed_abc": "A,B,C"}[case]
+        orders = {
+            "single_a": "A",
+            "three_a": "A,A,A",
+            "mixed_abc": "A,B,C",
+            "six_abcabc": "A,B,C,A,B,C",
+        }[case]
         return [
             "python",
             spec.entrypoint,
@@ -96,7 +105,12 @@ def _command(
             orders,
             *fast,
             *limit,
-        ], (1 if case == "single_a" else 3)
+        ], {
+            "single_a": 1,
+            "three_a": 3,
+            "mixed_abc": 3,
+            "six_abcabc": 6,
+        }[case]
     if spec.version == "v1-early" and case != "single_a":
         return None
     if case == "single_a":
@@ -128,28 +142,24 @@ def _command(
         str(queue_path),
         *fast,
         *limit,
-    ], 3
+    ], (6 if case == "six_abcabc" else 3)
 
 
-def _write_v1_mixed_queue(root: Path, target: Path) -> None:
+def _write_v1_mixed_queue(root: Path, target: Path, *, quantity: int = 1) -> None:
+    order_files = [
+        root / "config/orders/order_001.yaml",
+        root / "config/orders/order_002.yaml",
+        root / "config/orders/order_003.yaml",
+    ]
     payload = {
         "schema_version": 1,
         "orders": [
             {
-                "order_file": str(root / "config/orders/order_001.yaml"),
-                "quantity": 1,
+                "order_file": str(order_file),
+                "quantity": quantity,
                 "priority": 5,
-            },
-            {
-                "order_file": str(root / "config/orders/order_002.yaml"),
-                "quantity": 1,
-                "priority": 5,
-            },
-            {
-                "order_file": str(root / "config/orders/order_003.yaml"),
-                "quantity": 1,
-                "priority": 5,
-            },
+            }
+            for order_file in order_files
         ],
     }
     target.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -163,8 +173,8 @@ def _run_case(
     temp_dir: Path,
 ) -> Measurement:
     queue_path = temp_dir / f"{spec.version}-abc.yaml"
-    if spec.version == "v1" and case == "mixed_abc":
-        _write_v1_mixed_queue(spec.root, queue_path)
+    if spec.version == "v1" and case in {"mixed_abc", "six_abcabc"}:
+        _write_v1_mixed_queue(spec.root, queue_path, quantity=2 if case == "six_abcabc" else 1)
     planned = _command(spec, case, profile, queue_path)
     if planned is None:
         return Measurement(
@@ -175,7 +185,7 @@ def _run_case(
             exit_code=None,
             simulation_seconds=None,
             wall_seconds=None,
-            units=3,
+            units=6 if case == "six_abcabc" else 3,
             throughput_per_sim_hour=None,
             parallel_install_seconds=None,
             error="该历史版本不支持此订单模式",
@@ -229,8 +239,29 @@ def _run_case(
 
 def _write_outputs(output_dir: Path, profile: str, rows: list[Measurement]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    root = Path.cwd()
+    revision = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout.strip()
+    dirty = bool(
+        subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+    )
     payload = {
         "schema_version": 1,
+        "measured_at": date.today().isoformat(),
+        "machine": platform.platform(),
+        "code_revision": revision,
+        "working_tree_dirty": dirty,
         "profile": profile,
         "measurement_basis": {
             "simulation_seconds": "实际仿真事件完成时间",
@@ -244,7 +275,11 @@ def _write_outputs(output_dir: Path, profile: str, rows: list[Measurement]) -> N
         encoding="utf-8",
     )
     with (output_dir / "metrics.csv").open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(asdict(rows[0]).keys()))
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=list(asdict(rows[0]).keys()),
+            lineterminator="\n",
+        )
         writer.writeheader()
         for row in rows:
             writer.writerow(asdict(row))
@@ -257,7 +292,12 @@ def _write_outputs(output_dir: Path, profile: str, rows: list[Measurement]) -> N
         "| 场景 | 版本 | 完成 | 仿真 makespan | 墙钟 | 吞吐 |",
         "|---|---|:---:|---:|---:|---:|",
     ]
-    labels = {"single_a": "单件 A", "three_a": "三件 A", "mixed_abc": "A/B/C 各一件"}
+    labels = {
+        "single_a": "单件 A",
+        "three_a": "三件 A",
+        "mixed_abc": "A/B/C 各一件",
+        "six_abcabc": "A/B/C 各两件",
+    }
     for row in rows:
         simulation = "—" if row.simulation_seconds is None else f"{row.simulation_seconds:.2f} s"
         wall = "—" if row.wall_seconds is None else f"{row.wall_seconds:.2f} s"
@@ -288,15 +328,15 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--cases",
-        default="single_a,three_a,mixed_abc",
-        help="comma-separated subset of single_a,three_a,mixed_abc",
+        default="single_a,three_a,mixed_abc,six_abcabc",
+        help="comma-separated subset of single_a,three_a,mixed_abc,six_abcabc",
     )
     args = parser.parse_args()
     if args.runs < 1:
         parser.error("--runs must be at least 1")
 
     cases = [item.strip() for item in args.cases.split(",") if item.strip()]
-    unknown = sorted(set(cases) - {"single_a", "three_a", "mixed_abc"})
+    unknown = sorted(set(cases) - {"single_a", "three_a", "mixed_abc", "six_abcabc"})
     if unknown:
         parser.error(f"unknown cases: {', '.join(unknown)}")
 
