@@ -47,6 +47,7 @@ from .flexible import (
 )
 from .preflight import PreflightCheckError, PreflightReport, preflight_check
 from .events import EventBus, EventType, SystemEvent
+from .twin import DecisionEvent, DigitalTwinSnapshot
 from .manufacturing_runtime import ManufacturingRuntime
 from .planning import ManufacturingTask
 from .planning import TaskStatus as ManufacturingTaskStatus
@@ -70,6 +71,8 @@ __all__ = [
     "FlexiblePreflightError",
     "EventBus",
     "EventType",
+    "DecisionEvent",
+    "DigitalTwinSnapshot",
     "FinTarget",
     "OrderConfig",
     "ManufacturingRuntime",

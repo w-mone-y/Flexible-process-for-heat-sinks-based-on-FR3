@@ -4,8 +4,9 @@ scheduler:
   allow_parallel_tasks: true
   max_assignments_per_tick: 3
   arm1_tool_policy:
-    # 吸盘最多连续处理两张基板，然后重新评估已就绪的翅片托盘。
+    # V1保留稳定的两件微批策略；V2在统一入口内单独扩展为六件波次。
     max_base_microbatch: 2
+    drain_admitted_base_wave: false
     # 只为换刀时间窗内即将释放的基板/翅片任务保留当前工具。
     lookahead_seconds: 12.0
     # READY 夹爪任务超过此时间后强制获得下一安全换刀机会。

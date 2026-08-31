@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from math import isfinite
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable, Iterable
 
 from .events import EventBus, EventType
@@ -37,12 +38,18 @@ from .planning.task_models import ManufacturingTask, TaskStatus, TaskType
 from .planning.workcell_motion import WorkcellMotionPlanningService
 from .recovery import FaultRecord, FaultType, RecoveryPolicy, Replanner
 from .scheduling import (
+    Arm1OpportunityContext,
     Arm1ToolResidencyPolicy,
+    Assignment,
     DynamicPriorityScheduler,
     FixedSequenceScheduler,
     ResourceManager,
+    AuthorityDecision,
+    TwinShieldAuthority,
+    TwinShieldShadowScheduler,
     ZoneLockManager,
 )
+from .scheduling.bottleneck_tracker import BottleneckTracker
 from .workcells import (
     AsyncTransferState,
     TransferId,
@@ -54,6 +61,8 @@ from .workcells import (
 )
 
 from .paths import CONFIG_DIR
+from .twin import DecisionEvent, DigitalTwinSnapshot
+from .twin_duration import ShadowDurationEstimator
 
 
 class OrderRunStatus(str, Enum):
@@ -72,6 +81,7 @@ class OrderQueueEntry:
     status: OrderRunStatus = OrderRunStatus.QUEUED
     urgent: bool = False
     inserted_at: float = 0.0
+    due_at_sim_time: float | None = None
     released_at: float | None = None
     completed_at: float | None = None
     tray_assignments: dict[str, str] = field(default_factory=dict)
@@ -94,6 +104,7 @@ class OrderQueueEntry:
             "status": self.status.value,
             "urgent": self.urgent,
             "inserted_at": self.inserted_at,
+            "due_at_sim_time": self.due_at_sim_time,
             "released_at": self.released_at,
             "completed_at": self.completed_at,
             "tray_assignments": dict(self.tray_assignments),
@@ -196,6 +207,7 @@ class ManufacturingRuntime:
         context: Any = None,
         max_wip_units: int = 3,
         flexible_cell: bool = False,
+        enable_arm1_tool_policy: bool | None = None,
         camera_coordination: bool = False,
         enable_motion_planning: bool | None = None,
         execution_profile: LineExecutionProfile | None = None,
@@ -203,6 +215,7 @@ class ManufacturingRuntime:
         teaching_baseline: TeachingBaseline | None = None,
         dispatch_guard: Callable[[ManufacturingTask], tuple[bool, str]] | None = None,
         external_batch_controller: bool = False,
+        twinshield_mode: str = "OFF",
     ) -> None:
         self.config = scheduler_config or load_scheduler_config(CONFIG_DIR / "scheduler.yaml")
         resources, zones = load_resource_config(resource_config_path or CONFIG_DIR / "resources.yaml")
@@ -216,6 +229,9 @@ class ManufacturingRuntime:
         self.scheduler = self._make_scheduler(self.scheduler_mode)
         self.graph = TaskGraph()
         self.events = EventBus()
+        self.duration_estimator = ShadowDurationEstimator()
+        self.events.subscribe(EventType.TASK_STARTED, self._observe_duration_started)
+        self.events.subscribe(EventType.TASK_SUCCEEDED, self._observe_duration_succeeded)
         self.recovery = RecoveryPolicy()
         self.replanner = Replanner()
         self.registry = skill_registry or self._default_registry()
@@ -225,6 +241,9 @@ class ManufacturingRuntime:
         self.scenario: FaultScenario | None = None
         self.max_wip_units = int(max_wip_units)
         self.flexible_cell = bool(flexible_cell)
+        self.arm1_tool_policy_enabled = (
+            self.flexible_cell if enable_arm1_tool_policy is None else bool(enable_arm1_tool_policy)
+        )
         self.camera_coordination = bool(camera_coordination)
         self.motion_planning_enabled = (
             self.flexible_cell if enable_motion_planning is None else bool(enable_motion_planning)
@@ -242,6 +261,7 @@ class ManufacturingRuntime:
         self.teaching_baseline = teaching_baseline or PLACEHOLDER_TEACHING_BASELINE
         self.dispatch_guard = dispatch_guard
         self.external_batch_controller = bool(external_batch_controller)
+        self.twinshield_mode = self._normalize_twinshield_mode(twinshield_mode)
         self._unit_configurations: dict[str, FixtureConfiguration] = {}
         self.changeover_log: list[dict[str, Any]] = []
         self.motion_planning = WorkcellMotionPlanningService(seed=0) if self.motion_planning_enabled else None
@@ -274,6 +294,41 @@ class ManufacturingRuntime:
         self.furnace_batches: dict[str, RuntimeFurnaceBatch] = {}
         self._furnace_task_batches: dict[str, str] = {}
         self._furnace_batch_sequence = 0
+        self.bottlenecks = BottleneckTracker()
+        self.last_reference_plan: Any | None = None
+        self.shadow_scheduler = TwinShieldShadowScheduler()
+        self.twinshield_authority = TwinShieldAuthority(
+            maximum_parallel_tasks=self.config.max_assignments_per_tick
+        )
+        self.last_shadow_schedule: Any | None = None
+        self._last_shadow_snapshot: DigitalTwinSnapshot | None = None
+        self.last_authority_decision: AuthorityDecision | None = None
+        self._twinshield_signature: tuple[Any, ...] | None = None
+        self._twinshield_fallback_count = 0
+        self._twinshield_authority_count = 0
+        self._twinshield_last_source = "CURRENT_SCHEDULER"
+        self._twinshield_last_fallback_reason = ""
+        self._twinshield_decision_latency_ms: list[float] = []
+
+    def _observe_duration_started(self, event: Any) -> None:
+        task_id = event.payload.get("task_id")
+        if task_id:
+            self.duration_estimator.observe_started(str(task_id), float(event.sim_time))
+
+    def _observe_duration_succeeded(self, event: Any) -> None:
+        task_id = event.payload.get("task_id")
+        if not task_id or str(task_id) not in self.graph.tasks:
+            return
+        task = self.graph.get(str(task_id))
+        if task.assigned_resource is None:
+            return
+        if self.duration_estimator.observe_completed(
+            str(task_id),
+            task_type=task.task_type.value,
+            resource_id=task.assigned_resource,
+            finished_at=float(event.sim_time),
+        ):
+            return
 
     @staticmethod
     def _normalize_scheduler_mode(value: str) -> str:
@@ -282,6 +337,20 @@ class ManufacturingRuntime:
         mode = aliases.get(mode, mode)
         if mode not in {"FIXED_SEQUENCE", "DYNAMIC_PRIORITY"}:
             raise ValueError("scheduler mode must be fixed or dynamic")
+        return mode
+
+    @staticmethod
+    def _normalize_twinshield_mode(value: str) -> str:
+        mode = str(value or "OFF").strip().upper()
+        aliases = {
+            "DISABLED": "OFF",
+            "CURRENT": "OFF",
+            "SHADOW_ONLY": "SHADOW",
+            "AUTHORITATIVE": "AUTHORITY",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in {"OFF", "SHADOW", "AUTHORITY", "FALLBACK"}:
+            raise ValueError("twinshield mode must be OFF, SHADOW, AUTHORITY or FALLBACK")
         return mode
 
     def _make_scheduler(self, mode: str):
@@ -319,7 +388,14 @@ class ManufacturingRuntime:
         self.registry = registry
         self.executor.registry = registry
 
-    def submit_plan(self, plan: ProcessPlan, *, urgent: bool = False, now: float = 0.0) -> OrderQueueEntry:
+    def submit_plan(
+        self,
+        plan: ProcessPlan,
+        *,
+        urgent: bool = False,
+        now: float = 0.0,
+        due_at: float | None = None,
+    ) -> OrderQueueEntry:
         order_id = plan.order.order_id
         if order_id in self.orders:
             raise ValueError(f"duplicate order id: {order_id}")
@@ -351,10 +427,21 @@ class ManufacturingRuntime:
                 task.status = TaskStatus.PENDING
                 task.ready_at = None
             task.payload.setdefault("queue_held", True)
+            # A numerical priority ranks ordinary ready work, but only an
+            # explicitly urgent order may pierce Arm1's already-admitted S1
+            # base wave.  Keeping this bit on every task lets the tool policy
+            # distinguish real rush work from the UI's stable order ranking.
+            task.payload["urgent_order"] = bool(urgent)
             self.graph.add_task(task)
             task_ids.append(task.task_id)
         self.graph.validate_acyclic()
-        entry = OrderQueueEntry(plan, tuple(task_ids), urgent=bool(urgent), inserted_at=float(now))
+        entry = OrderQueueEntry(
+            plan,
+            tuple(task_ids),
+            urgent=bool(urgent),
+            inserted_at=float(now),
+            due_at_sim_time=None if due_at is None else float(due_at),
+        )
         self.orders[order_id] = entry
         self.events.publish(
             EventType.ORDER_RELEASED,
@@ -1190,6 +1277,54 @@ class ManufacturingRuntime:
                     timestamp,
                 )
 
+    def requeue_running_physical_task(self, task_id: str, *, now: float, reason: str) -> bool:
+        """Yield a physically interrupted task without declaring it complete.
+
+        Quality inspection failures are recovered by the V2 physical actor.
+        The matching DAG inspection must release its robot while the pallet
+        returns for rework, then become READY for the eventual reinspection.
+        This is not a task failure and must not create a second recovery plan.
+        """
+
+        task = self.graph.get(str(task_id))
+        if task.status is not TaskStatus.RUNNING:
+            return False
+        resource_id = task.assigned_resource or ""
+        self.executor.cancel_task(task.task_id)
+        self._abort_cell_state(task)
+        if self.motion_planning is not None:
+            self.motion_planning.release_task(task, retain_path=False)
+        if resource_id:
+            self.resources.release(resource_id, task.task_id, float(now))
+        self.zones.release(task.task_id)
+        if task.station_id:
+            try:
+                workstation = self.workstations[WorkstationId(task.station_id)]
+                if workstation.occupied_by == task.task_id:
+                    workstation.occupied_by = None
+                    workstation.safe_for_transfer = True
+            except (KeyError, ValueError):
+                pass
+        task.status = TaskStatus.READY
+        task.assigned_resource = None
+        task.started_at = None
+        task.finished_at = None
+        task.failure_reason = ""
+        task.ready_at = float(now)
+        task.payload["planning_blockers"] = [str(reason)]
+        self._seen_ready.discard(task.task_id)
+        self.events.publish(
+            EventType.TASK_READY,
+            sim_time=float(now),
+            source="physical_quality_rework",
+            payload={
+                "task_id": task.task_id,
+                "task_type": task.task_type.value,
+                "reason": str(reason),
+            },
+        )
+        return True
+
     def tick(self, now: float, *, poll_executor: bool = True) -> None:
         timestamp = float(now)
         if self.stopped or self.paused:
@@ -1222,13 +1357,13 @@ class ManufacturingRuntime:
         blocked_resource_reasons: dict[str, str] = {}
         if self.flexible_cell:
             ready = [task for task in ready if self._cell_task_available(task)]
-        if self.flexible_cell and self.scheduler_mode == "DYNAMIC_PRIORITY":
+        if self.arm1_tool_policy_enabled and self.scheduler_mode == "DYNAMIC_PRIORITY":
+            arm1_opportunity = self._arm1_opportunity_context(ready, timestamp)
             tool_selection = self.arm1_tool_policy.select(
                 ready,
                 now=timestamp,
                 resource_tool=self.resources.get("ARM1").current_tool,
-                next_base_ready_in=self._next_arm1_base_ready_in(ready, timestamp),
-                next_fin_ready_in=self._next_arm1_fin_ready_in(ready, timestamp),
+                opportunity=arm1_opportunity,
             )
             blocked_resource_tasks = tool_selection.blocked_pairs
             blocked_resource_reasons = tool_selection.reasons
@@ -1255,7 +1390,7 @@ class ManufacturingRuntime:
         # scheduler.  ``SchedulingWeights.product_changeover_cost`` already
         # existed but nothing ever populated it, so setup was effectively free.
         self._annotate_changeover_cost(ready)
-        assignments = self.scheduler.select_assignments(
+        current_assignments = self.scheduler.select_assignments(
             ready,
             self.resources.states,
             {
@@ -1284,6 +1419,34 @@ class ManufacturingRuntime:
             },
             timestamp,
         )
+        assignments = current_assignments
+        twin_decision = self._twinshield_decision(ready, timestamp)
+        if twin_decision is not None and twin_decision.accepted:
+            committed, failure_reason = self._commit_assignments_atomically(
+                twin_decision.assignments,
+                timestamp,
+                source="TWINSHIELD_RH",
+            )
+            if committed:
+                self._record_twinshield_commit(twin_decision, timestamp)
+                assignments = []
+            else:
+                self._twinshield_fallback_count += 1
+                self._twinshield_last_source = "CURRENT_SCHEDULER"
+                self._twinshield_last_fallback_reason = failure_reason
+                self.events.publish(
+                    EventType.SAFETY_CHECKED,
+                    sim_time=timestamp,
+                    source="TwinShield-RH",
+                    payload={
+                        "accepted": False,
+                        "stage": "ATOMIC_COMMIT",
+                        "fallback_reason": failure_reason,
+                        "snapshot_fingerprint": twin_decision.snapshot_fingerprint,
+                    },
+                )
+        elif self.twinshield_mode in {"AUTHORITY", "FALLBACK"}:
+            self._twinshield_last_source = "CURRENT_SCHEDULER"
         for assignment in assignments:
             task = self.graph.get(assignment.task_id)
             if self.motion_planning is not None and assignment.resource_id in {
@@ -1349,6 +1512,15 @@ class ManufacturingRuntime:
                 task.status = TaskStatus.READY
                 task.assigned_resource = None
                 self.last_error = str(exc)
+        self.bottlenecks.observe(
+            self.graph,
+            now=timestamp,
+            scheduler_blocked_candidates=getattr(
+                self.scheduler,
+                "last_blocked_candidates",
+                (),
+            ),
+        )
 
     def _cell_task_available(self, task: ManufacturingTask) -> bool:
         """Keep a READY task queued until its physical pallet/station is valid."""
@@ -1436,6 +1608,11 @@ class ManufacturingRuntime:
         )
         if not unfinished:
             return float("inf")
+        physical_forecast = getattr(self.executor.context, "next_s1_base_ready_in", None)
+        if physical_forecast is not None:
+            estimate = float(physical_forecast())
+            if isfinite(estimate) and estimate >= 0.0:
+                return estimate
         ready_releases = [
             task.estimated_duration
             for task in feasible_ready
@@ -1528,6 +1705,93 @@ class ManufacturingRuntime:
             if isfinite(estimate):
                 estimates.append(estimate)
         return min(estimates, default=float("inf"))
+
+    def _arm1_opportunity_context(
+        self,
+        feasible_ready: Iterable[ManufacturingTask],
+        now: float,
+    ) -> Arm1OpportunityContext:
+        """Estimate the two safe Arm1 tool choices from the authoritative DAG."""
+
+        ready = list(feasible_ready)
+        base_tasks = [
+            task
+            for task in ready
+            if task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
+            and "ARM1" in task.eligible_resources
+        ]
+        fin_tasks = [
+            task
+            for task in ready
+            if task.task_type in {TaskType.PICK_FIN, TaskType.INSTALL_FIN, TaskType.REINSTALL_FIN}
+            and "ARM1" in task.eligible_resources
+        ]
+        prepare_tasks = [
+            task
+            for task in self.graph
+            if task.task_type is TaskType.PREPARE_FIN_TOOL
+            and "ARM1" in task.eligible_resources
+            and not task.status.terminal
+        ]
+        next_base_ready_in = self._next_arm1_base_ready_in(ready, now)
+        next_fin_ready_in = self._next_arm1_fin_ready_in(ready, now)
+        base_work_seconds = min(
+            (task.estimated_duration for task in base_tasks),
+            default=LEGACY_DURATIONS[TaskType.PICK_BASE_PLATE],
+        )
+        fin_work_seconds = min(
+            (task.estimated_duration for task in fin_tasks),
+            default=LEGACY_DURATIONS[TaskType.PICK_FIN],
+        )
+        tool_change_seconds = min(
+            (task.estimated_duration for task in prepare_tasks),
+            default=LEGACY_DURATIONS[TaskType.PREPARE_FIN_TOOL],
+        )
+        fin_wait = max(
+            (max(0.0, float(now) - task.ready_at) for task in fin_tasks if task.ready_at is not None),
+            default=0.0,
+        )
+        inspection_pressure = sum(
+            task.estimated_duration
+            for task in ready
+            if task.task_type
+            in {
+                TaskType.INSPECT_BRAZING,
+                TaskType.REVIEW_BRAZING_CLOSEUP,
+                TaskType.INSPECT_FINS,
+                TaskType.REVIEW_FINS_CLOSEUP,
+            }
+            and "ARM3" in task.eligible_resources
+        )
+        admitted_base_units_remaining = len(
+            {
+                task.unit_id
+                for task in self.graph
+                if task.task_type in {TaskType.PICK_BASE_PLATE, TaskType.PLACE_BASE_PLATE}
+                and not task.payload.get("queue_held")
+                and not task.status.terminal
+            }
+        )
+        parallel_fin_branches = len(
+            {
+                resource_id
+                for task in self.graph
+                if task.task_type in {TaskType.PICK_FIN, TaskType.INSTALL_FIN} and not task.status.terminal
+                for resource_id in task.eligible_resources
+                if resource_id in {"ARM1", "ARM3"}
+            }
+        )
+        return Arm1OpportunityContext(
+            next_base_ready_in=next_base_ready_in,
+            next_fin_ready_in=next_fin_ready_in,
+            base_work_seconds=base_work_seconds,
+            fin_work_seconds=fin_work_seconds,
+            tool_change_seconds=tool_change_seconds,
+            downstream_blocking_seconds=min(fin_wait, self.config.arm1_tool_policy.starvation_seconds),
+            arm3_inspection_pressure=inspection_pressure,
+            admitted_base_units_remaining=admitted_base_units_remaining,
+            parallel_fin_branches=max(1, parallel_fin_branches),
+        )
 
     def _update_order_status(self, now: float) -> None:
         for entry in self.orders.values():
@@ -1649,6 +1913,17 @@ class ManufacturingRuntime:
             self.resources.get("ARM2").current_tool = "brazing_dispenser"
         self.zones.reset()
         self.events.reset()
+        self.duration_estimator.reset()
+        self.last_reference_plan = None
+        self.last_shadow_schedule = None
+        self._last_shadow_snapshot = None
+        self.last_authority_decision = None
+        self._twinshield_signature = None
+        self._twinshield_fallback_count = 0
+        self._twinshield_authority_count = 0
+        self._twinshield_last_source = "CURRENT_SCHEDULER"
+        self._twinshield_last_fallback_reason = ""
+        self._twinshield_decision_latency_ms.clear()
         self.assignment_history.clear()
         self.unit_dispositions.clear()
         self.paused = False
@@ -1672,6 +1947,7 @@ class ManufacturingRuntime:
         self.furnace_batches.clear()
         self._furnace_task_batches.clear()
         self._furnace_batch_sequence = 0
+        self.bottlenecks.reset(now)
         if self.motion_planning is not None:
             self.motion_planning.reset()
         # A reset returns the cell to a cold line: nothing is mounted, so the
@@ -1936,6 +2212,470 @@ class ManufacturingRuntime:
             for entry in self.orders.values()
         )
 
+    def capture_digital_twin(
+        self,
+        now: float | None = None,
+        *,
+        emit_event: bool = False,
+    ) -> DigitalTwinSnapshot:
+        """Capture an immutable shadow view without changing runtime state."""
+
+        state = self.snapshot(now)
+        # The reference plan is derived from the twin, not part of physical
+        # truth. Excluding it keeps the state fingerprint stable after solving.
+        state.pop("reference_plan", None)
+        state.pop("shadow_schedule", None)
+        state["twin_duration_estimates"] = self.duration_estimator.snapshot()
+        snapshot = DigitalTwinSnapshot.from_mapping(
+            state,
+            source_name="ManufacturingRuntime",
+            captured_at=float(state.get("sim_time", 0.0)),
+            plan_version=len(self.events.history),
+        )
+        if emit_event:
+            self.events.publish(
+                DecisionEvent(
+                    event_type=EventType.STATE_SNAPSHOT_CAPTURED,
+                    sim_time=snapshot.sim_time,
+                    source="ManufacturingRuntime",
+                    plan_version=snapshot.plan_version,
+                    trigger="EXPLICIT_CAPTURE",
+                    payload={"fingerprint": snapshot.fingerprint},
+                ).as_system_event()
+            )
+        return snapshot
+
+    def compute_reference_plan(
+        self,
+        now: float | None = None,
+        *,
+        time_limit_s: float = 2.0,
+        random_seed: int = 0,
+        emit_event: bool = True,
+    ) -> Any:
+        """Compute a shadow CP-SAT reference without dispatching its tasks."""
+
+        from .optimization import CpSatReferencePlanner
+
+        snapshot = self.capture_digital_twin(now)
+        plan = CpSatReferencePlanner(
+            time_limit_s=time_limit_s,
+            random_seed=random_seed,
+        ).solve(snapshot)
+        self.last_reference_plan = plan
+        if emit_event:
+            self.events.publish(
+                DecisionEvent(
+                    event_type=EventType.PLAN_PROPOSED,
+                    sim_time=snapshot.sim_time,
+                    source="CP-SAT_REFERENCE",
+                    plan_version=snapshot.plan_version,
+                    trigger="EXPLICIT_REFERENCE_SOLVE",
+                    task_ids=tuple(operation.task_id for operation in plan.operations),
+                    payload={
+                        "status": plan.status.value,
+                        "makespan_s": plan.makespan_s,
+                        "weighted_tardiness_s": plan.weighted_tardiness_s,
+                        "best_bound": plan.best_bound,
+                        "optimality_gap": plan.optimality_gap,
+                        "solve_time_s": plan.solve_time_s,
+                        "snapshot_fingerprint": snapshot.fingerprint,
+                        "validation": (
+                            None if plan.validation is None else plan.validation.as_dict()
+                        ),
+                    },
+                ).as_system_event()
+            )
+        return plan
+
+    def compute_shadow_schedule(
+        self,
+        now: float | None = None,
+        *,
+        time_limit_s: float | None = None,
+        random_seed: int = 0,
+        include_reference: bool = False,
+        emit_event: bool = True,
+        allowed_task_ids: set[str] | None = None,
+        commit_window_only: bool = False,
+    ) -> Any:
+        """Propose a non-authoritative TwinShield schedule from one snapshot."""
+
+        from .optimization import CpSatReferencePlanner
+
+        snapshot = self.capture_digital_twin(now)
+        self._last_shadow_snapshot = snapshot
+        reference = None
+        if include_reference:
+            reference = CpSatReferencePlanner(
+                time_limit_s=2.0 if time_limit_s is None else float(time_limit_s),
+                random_seed=random_seed,
+            ).solve(snapshot)
+        if emit_event:
+            self.events.publish(
+                EventType.REPLAN_STARTED,
+                sim_time=snapshot.sim_time,
+                source="TwinShield-RH",
+                payload={"snapshot_fingerprint": snapshot.fingerprint},
+            )
+        proposal = self.shadow_scheduler.plan(
+            snapshot,
+            reference_plan=reference,
+            allowed_task_ids=allowed_task_ids,
+            commit_window_only=commit_window_only,
+        )
+        self.last_shadow_schedule = proposal
+        if emit_event:
+            self.events.publish(
+                EventType.REPLAN_COMPLETED,
+                sim_time=snapshot.sim_time,
+                source="TwinShield-RH",
+                payload={
+                    "status": proposal.status.value,
+                    "selected_count": proposal.selected_count,
+                    "candidate_count": proposal.candidate_count,
+                    "objective_value": proposal.objective_value,
+                    "reference_objective_value": proposal.reference_objective_value,
+                    "optimality_gap": proposal.optimality_gap,
+                    "snapshot_fingerprint": snapshot.fingerprint,
+                    "validation": (
+                        None if proposal.validation is None else proposal.validation.as_dict()
+                    ),
+                },
+            )
+        return proposal
+
+    def _twinshield_boundary_signature(
+        self,
+        ready: Iterable[ManufacturingTask],
+    ) -> tuple[Any, ...]:
+        """Stable event signature; simulation time alone never triggers replanning."""
+
+        task_rows = tuple(
+            sorted(
+                (
+                    task.task_id,
+                    task.status.value,
+                    tuple(task.eligible_resources),
+                    tuple(task.required_zones),
+                    task.station_id,
+                    str(task.payload.get("arm1_tool_blocker", "")),
+                    str(task.payload.get("dispatch_blocker", "")),
+                    tuple(str(item) for item in task.payload.get("planning_blockers", ())),
+                )
+                for task in ready
+            )
+        )
+        resource_rows = tuple(
+            sorted(
+                (
+                    resource_id,
+                    state.status.value,
+                    state.current_task_id,
+                    state.current_tool,
+                    state.fault_code,
+                )
+                for resource_id, state in self.resources.states.items()
+            )
+        )
+        zone_rows = tuple(
+            sorted(
+                (zone, None if lease is None else (lease["task_id"], lease["resource_id"]))
+                for zone, lease in self.zones.snapshot().items()
+            )
+        )
+        workstation_rows = tuple(
+            sorted(
+                (
+                    station.value,
+                    state.tray_id,
+                    state.occupied_by,
+                    state.safe_for_transfer,
+                )
+                for station, state in self.workstations.items()
+            )
+        )
+        return task_rows, resource_rows, zone_rows, workstation_rows
+
+    def _record_twinshield_latency(self, started_at: float) -> None:
+        elapsed_ms = max(0.0, (perf_counter() - started_at) * 1000.0)
+        self._twinshield_decision_latency_ms.append(elapsed_ms)
+        if len(self._twinshield_decision_latency_ms) > 512:
+            del self._twinshield_decision_latency_ms[:-512]
+
+    def _twinshield_latency_snapshot(self) -> dict[str, float | int]:
+        samples = sorted(self._twinshield_decision_latency_ms)
+        if not samples:
+            return {"sample_count": 0, "p50": 0.0, "p95": 0.0, "maximum": 0.0}
+
+        def percentile(fraction: float) -> float:
+            index = max(0, min(len(samples) - 1, int(fraction * len(samples) + 0.999999) - 1))
+            return round(samples[index], 6)
+
+        return {
+            "sample_count": len(samples),
+            "p50": percentile(0.50),
+            "p95": percentile(0.95),
+            "maximum": round(samples[-1], 6),
+        }
+
+    def _twinshield_decision(
+        self,
+        ready: list[ManufacturingTask],
+        timestamp: float,
+    ) -> AuthorityDecision | None:
+        """Validate one proposal against the live commit boundary."""
+
+        # FALLBACK is the explicit operator rollback mode: the legacy dynamic
+        # scheduler remains authoritative without evaluating TwinShield.
+        if self.twinshield_mode != "AUTHORITY":
+            return None
+        signature = self._twinshield_boundary_signature(ready)
+        if signature == self._twinshield_signature:
+            return None
+        self._twinshield_signature = signature
+        if not ready:
+            self._twinshield_last_source = "CURRENT_SCHEDULER"
+            return None
+        authority_ready = [
+            task
+            for task in ready
+            if not task.payload.get("arm1_tool_blocker")
+            and not task.payload.get("dispatch_blocker")
+            and not task.payload.get("planning_blockers")
+        ]
+        if not authority_ready:
+            self._twinshield_fallback_count += 1
+            self._twinshield_last_source = "CURRENT_SCHEDULER"
+            self._twinshield_last_fallback_reason = "当前安全门控没有可交给TwinShield的任务"
+            return None
+        decision_started = perf_counter()
+        planned_signature = signature
+        self._last_shadow_snapshot = None
+        try:
+            proposal = self.compute_shadow_schedule(
+                timestamp,
+                include_reference=False,
+                emit_event=True,
+                allowed_task_ids={task.task_id for task in authority_ready},
+                commit_window_only=True,
+            )
+        except Exception as exc:
+            self._record_twinshield_latency(decision_started)
+            self._twinshield_fallback_count += 1
+            self._twinshield_last_source = "CURRENT_SCHEDULER"
+            self._twinshield_last_fallback_reason = f"TwinShield求解失败：{exc}"
+            self.events.publish(
+                EventType.REPLAN_COMPLETED,
+                sim_time=timestamp,
+                source="TwinShield-RH",
+                payload={
+                    "status": "FALLBACK",
+                    "fallback_reason": self._twinshield_last_fallback_reason,
+                },
+            )
+            return None
+        if self._twinshield_boundary_signature(ready) != planned_signature:
+            self._record_twinshield_latency(decision_started)
+            self._twinshield_fallback_count += 1
+            self._twinshield_last_source = "CURRENT_SCHEDULER"
+            self._twinshield_last_fallback_reason = "求解期间READY、资源、区域或工位状态发生变化"
+            return None
+        current_snapshot = self._last_shadow_snapshot
+        if current_snapshot is None or current_snapshot.fingerprint != proposal.snapshot_fingerprint:
+            # Compatibility path for injected/custom planners that do not use
+            # ``compute_shadow_schedule`` and therefore cannot expose the
+            # exact immutable input snapshot.
+            current_snapshot = self.capture_digital_twin(timestamp)
+        decision = self.twinshield_authority.decide(
+            proposal,
+            snapshot=current_snapshot,
+            ready_tasks=authority_ready,
+            resources=self.resources.states,
+            zone_leases=self.zones.snapshot(),
+        )
+        self._record_twinshield_latency(decision_started)
+        self.last_authority_decision = decision
+        self.events.publish(
+            EventType.SAFETY_CHECKED,
+            sim_time=timestamp,
+            source="TwinShield-RH",
+            payload=decision.as_dict(),
+        )
+        if not decision.accepted:
+            self._twinshield_fallback_count += 1
+            self._twinshield_last_source = "CURRENT_SCHEDULER"
+            self._twinshield_last_fallback_reason = decision.fallback_reason
+            return None
+        return decision
+
+    def _record_twinshield_commit(
+        self,
+        decision: AuthorityDecision,
+        timestamp: float,
+    ) -> None:
+        self._twinshield_authority_count += 1
+        self._twinshield_last_source = "TWINSHIELD_RH"
+        self._twinshield_last_fallback_reason = ""
+        self.events.publish(
+            EventType.PLAN_COMMITTED,
+            sim_time=timestamp,
+            source="TwinShield-RH",
+            payload={
+                "task_ids": [assignment.task_id for assignment in decision.assignments],
+                "resource_ids": [assignment.resource_id for assignment in decision.assignments],
+                "snapshot_fingerprint": decision.snapshot_fingerprint,
+                "objective_value": decision.objective_value,
+                "optimality_gap": decision.optimality_gap,
+            },
+        )
+
+    def _commit_assignments_atomically(
+        self,
+        assignments: Iterable[Assignment],
+        timestamp: float,
+        *,
+        source: str,
+    ) -> tuple[bool, str]:
+        """Reserve and start a complete decision window or roll all of it back."""
+
+        selected = tuple(assignments)
+        if not selected:
+            return False, "EMPTY_COMMIT_WINDOW"
+        tasks: list[ManufacturingTask] = []
+        prepared: list[ManufacturingTask] = []
+        reserved: list[tuple[Assignment, ManufacturingTask]] = []
+        begun: list[ManufacturingTask] = []
+        started: list[ManufacturingTask] = []
+
+        try:
+            seen_tasks: set[str] = set()
+            seen_resources: set[str] = set()
+            seen_zones: set[str] = set()
+            for assignment in selected:
+                task = self.graph.get(assignment.task_id)
+                resource_id = assignment.resource_id.upper()
+                zones = {str(zone).upper() for zone in task.required_zones}
+                if task.status is not TaskStatus.READY:
+                    raise RuntimeError(f"{task.task_id}不再READY")
+                if task.task_id in seen_tasks:
+                    raise RuntimeError(f"重复任务：{task.task_id}")
+                if resource_id in seen_resources:
+                    raise RuntimeError(f"重复资源：{resource_id}")
+                if zones.intersection(seen_zones):
+                    raise RuntimeError(f"共享区域冲突：{task.task_id}")
+                if resource_id not in task.eligible_resources:
+                    raise RuntimeError(f"资源{resource_id}不能执行{task.task_id}")
+                resource = self.resources.get(resource_id)
+                if not resource.available or not resource.supports(
+                    task.task_type.value,
+                    task.required_tool,
+                ):
+                    raise RuntimeError(f"资源{resource_id}在提交前失效")
+                if not self.zones.can_acquire(
+                    task.task_id,
+                    resource_id,
+                    task.required_zones,
+                    timestamp,
+                ):
+                    raise RuntimeError(f"任务{task.task_id}的共享区域在提交前失效")
+                if self.motion_planning is not None and resource_id in {"ARM1", "ARM2", "ARM3"}:
+                    motion = self.motion_planning.prepare(
+                        task,
+                        resource_id,
+                        timestamp,
+                        context=self.executor.context,
+                    )
+                    prepared.append(task)
+                    if motion.path is None:
+                        task.payload["planning_blockers"] = [motion.blocker or "运动规划失败"]
+                        raise RuntimeError(motion.blocker or f"{task.task_id}运动规划失败")
+                    if motion.start_time > timestamp + 1.0e-9:
+                        reason = f"时空预约等待至 {motion.start_time:.3f}s"
+                        task.payload["planning_blockers"] = [reason]
+                        raise RuntimeError(reason)
+                    task.payload.pop("planning_blockers", None)
+                seen_tasks.add(task.task_id)
+                seen_resources.add(resource_id)
+                seen_zones.update(zones)
+                tasks.append(task)
+
+            # Phase 1: acquire every logical lease before any actor starts.
+            for assignment, task in zip(selected, tasks):
+                if not self.zones.acquire(
+                    task.task_id,
+                    assignment.resource_id,
+                    task.required_zones,
+                    timestamp,
+                ):
+                    raise RuntimeError(f"无法原子预留{task.task_id}的共享区域")
+                if not self.resources.reserve(
+                    assignment.resource_id,
+                    task.task_id,
+                    timestamp,
+                    task.required_zones,
+                ):
+                    self.zones.release(task.task_id)
+                    raise RuntimeError(f"无法原子预留资源{assignment.resource_id}")
+                task.reserve(assignment.resource_id)
+                reserved.append((assignment, task))
+
+            # Phase 2: start actors. Events and policy state are published only
+            # after all starts succeed, so observers never see a half-window.
+            for assignment, task in reserved:
+                self._begin_cell_state(task, timestamp)
+                begun.append(task)
+                self.executor.start_task(task, assignment.resource_id, now=timestamp)
+                started.append(task)
+
+            for assignment, task in reserved:
+                task.mark_running(timestamp)
+                self.arm1_tool_policy.observe_started(task, assignment.resource_id)
+                if task.task_type is TaskType.RUN_FURNACE:
+                    self._start_furnace_batch(task, timestamp)
+                if task.station_id:
+                    try:
+                        workstation = self.workstations[WorkstationId(task.station_id)]
+                        workstation.occupied_by = task.task_id
+                        workstation.safe_for_transfer = False
+                    except (KeyError, ValueError):
+                        pass
+                self.resources.mark_busy(assignment.resource_id, task.task_id, timestamp)
+                self.assignment_history.append(
+                    {"sim_time": timestamp, "decision_source": source, **assignment.as_dict()}
+                )
+            for assignment, task in reserved:
+                self.events.publish(
+                    EventType.TASK_RESERVED,
+                    sim_time=timestamp,
+                    source=assignment.resource_id,
+                    payload=assignment.as_dict(),
+                )
+                self.events.publish(
+                    EventType.TASK_STARTED,
+                    sim_time=timestamp,
+                    source=assignment.resource_id,
+                    payload={"task_id": task.task_id, "task_type": task.task_type.value},
+                )
+            return True, ""
+        except Exception as exc:
+            for task in reversed(started):
+                self.executor.cancel_task(task.task_id)
+            for task in reversed(begun):
+                self._abort_cell_state(task)
+            for assignment, task in reversed(reserved):
+                self.resources.release(assignment.resource_id, task.task_id, timestamp)
+                self.zones.release(task.task_id)
+                task.status = TaskStatus.READY
+                task.assigned_resource = None
+                task.started_at = None
+                task.finished_at = None
+                task.failure_reason = ""
+            for task in prepared:
+                if self.motion_planning is not None:
+                    self.motion_planning.release_task(task, retain_path=False)
+            return False, str(exc)
+
     def snapshot(self, now: float | None = None) -> dict[str, Any]:
         timestamp = self.last_tick if now is None else float(now)
         timestamp = 0.0 if timestamp is None else timestamp
@@ -1976,6 +2716,7 @@ class ManufacturingRuntime:
         active_arms = [resource for resource in active_resources if resource in self._arm_busy_seconds]
         return {
             "schema_version": 2,
+            "sim_time": timestamp,
             "scheduler": {
                 **self.scheduler.snapshot(),
                 "ready_count": len(ready),
@@ -1985,6 +2726,26 @@ class ManufacturingRuntime:
             "tasks": tasks,
             "resources_v2": self.resources.snapshot(),
             "arm1_tool_policy": self.arm1_tool_policy.snapshot(),
+            "bottlenecks": self.bottlenecks.snapshot(),
+            "reference_plan": (
+                None if self.last_reference_plan is None else self.last_reference_plan.as_dict()
+            ),
+            "shadow_schedule": (
+                None if self.last_shadow_schedule is None else self.last_shadow_schedule.as_dict()
+            ),
+            "twinshield": {
+                "mode": self.twinshield_mode,
+                "last_source": self._twinshield_last_source,
+                "authority_count": self._twinshield_authority_count,
+                "fallback_count": self._twinshield_fallback_count,
+                "last_fallback_reason": self._twinshield_last_fallback_reason,
+                "decision_latency_ms": self._twinshield_latency_snapshot(),
+                "last_decision": (
+                    None
+                    if self.last_authority_decision is None
+                    else self.last_authority_decision.as_dict()
+                ),
+            },
             "zone_locks": self.zones.snapshot(),
             "orders": orders,
             "faults_v2": [fault.as_dict() for fault in self.faults.values()],

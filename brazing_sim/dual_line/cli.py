@@ -31,6 +31,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="comma-separated A/B/C/D presets; omitted viewer sessions start idle",
     )
     parser.add_argument("--fast", action="store_true", help="shorten upstream demo operations")
+    parser.add_argument(
+        "--twinshield-mode",
+        type=str.upper,
+        choices=("AUTHORITY", "FALLBACK", "SHADOW", "OFF"),
+        default="AUTHORITY",
+        help="V2 dispatch authority; FALLBACK restores the current dynamic scheduler",
+    )
     parser.add_argument("--max-sim-time", type=float, default=300.0)
     parser.add_argument("--dt", type=float, default=0.05)
     parser.add_argument("--xml", default=str(DEFAULT_V2_XML))

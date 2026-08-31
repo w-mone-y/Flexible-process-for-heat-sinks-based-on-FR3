@@ -1,0 +1,46 @@
+{
+  "benchmark": "TWINSHIELD_RH_V2_AUTHORITY_COMPARISON",
+  "comparison": null,
+  "inputs": {
+    "dt": 0.05,
+    "max_sim_time": 2000.0,
+    "modes": [
+      "AUTHORITY"
+    ],
+    "orders": [
+      "A",
+      "B",
+      "C",
+      "A",
+      "B",
+      "C"
+    ],
+    "unit_count": 6
+  },
+  "runs": {
+    "AUTHORITY": {
+      "arm1_idle_s": 142.2,
+      "arm1_utilization": 0.47401517,
+      "assignment_count": 100,
+      "authority_count": 164,
+      "completed": true,
+      "decision_latency_ms": {
+        "maximum": 45.818166,
+        "p50": 32.823625,
+        "p95": 42.994875,
+        "sample_count": 213
+      },
+      "fallback_count": 91,
+      "last_error": "",
+      "last_fallback_reason": "",
+      "maximum_parallel_tasks": 5,
+      "mode": "AUTHORITY",
+      "multi_arm_overlap_s": 135.7,
+      "simulation_seconds": 270.35,
+      "throughput_per_sim_hour": 79.896431,
+      "unit_count": 6,
+      "wall_seconds": 57.327793
+    }
+  },
+  "schema_version": 1
+}

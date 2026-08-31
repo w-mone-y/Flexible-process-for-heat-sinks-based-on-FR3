@@ -17,12 +17,17 @@
 
 ## 当前有效说明
 
+- [特等奖导向升级实施规划](competition/2026-08-21-特等奖导向升级实施规划.md)
 - [项目目录说明](architecture/项目目录说明.md)
 - [视觉模型与资产说明](architecture/视觉模型与资产说明.md)
 - [V2 双安装支路规格](specs/v2-dual-install-line.md)
 - [数据驱动工艺与能力延迟绑定](specs/capability-driven-flexibility.md)
 - [换型建模、序列相关设置时间与 KPI](specs/changeover-modelling.md)
 - [V2 扰动柔性与控制台接通](specs/v2-disturbance-flexibility.md)
+- [数字孪生与影子估计决策](adr/0007-digital-twin-shadow-boundary.md)
+- [CP-SAT 最优参照规划规格](specs/cp-sat-reference-planning.md)
+- [TwinShield-RH V2 权威派工规格](specs/twinshield-v2-authority.md)
+- [TwinShield V2 权威边界 ADR](adr/0008-twinshield-v2-authority-boundary.md)
 - [V1/V2 实测效率报告](../benchmarks/results/2026-07-29-v1-v2/comparison.md)
 - [Arm2 在整体流程中的任务](process/Arm2%20在整体流程中的任务.md)
 

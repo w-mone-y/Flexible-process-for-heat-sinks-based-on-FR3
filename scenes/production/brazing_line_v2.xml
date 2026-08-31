@@ -211,20 +211,20 @@
         <joint name="v2_arm1_left_finger_joint" type="slide"
                axis="0 -1 0" range="0 0.0202" damping="6"/>
         <geom name="v2_arm1_gripper_left" type="box"
-              size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
+              size="0.0032 0.001 0.040" rgba="0.72 0.75 0.79 1"
               contype="4" conaffinity="2"/>
         <geom class="visual" name="v2_arm1_gripper_left_pad" type="box"
-              size="0.0035 0.0012 0.034" pos="0 -0.0038 0"
+              size="0.0035 0.0006 0.034" pos="0 -0.0004 0"
               material="v2_belt_mat"/>
       </body>
       <body name="v2_arm1_gripper_right_body" pos="0 -0.026 0.058">
         <joint name="v2_arm1_right_finger_joint" type="slide"
                axis="0 1 0" range="0 0.0202" damping="6"/>
         <geom name="v2_arm1_gripper_right" type="box"
-              size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
+              size="0.0032 0.001 0.040" rgba="0.72 0.75 0.79 1"
               contype="4" conaffinity="2"/>
         <geom class="visual" name="v2_arm1_gripper_right_pad" type="box"
-              size="0.0035 0.0012 0.034" pos="0 0.0038 0"
+              size="0.0035 0.0006 0.034" pos="0 0.0004 0"
               material="v2_belt_mat"/>
       </body>
       <site name="v2_arm1_parallel_gripper_mount_site"
@@ -281,6 +281,11 @@
             size="0.215 0.008 0.025" pos="0 0.132 0.220" material="v2_frame_mat"/>
       <geom class="visual" name="v2_base_supply_front_marker" type="box"
             size="0.080 0.006 0.010" pos="0 -0.137 0.211" material="v2_s1_mat"/>
+      <!-- A visual-only replenishment blank remains on the feeder whenever
+           the movable pickup proxy is carrying the current order's plate. -->
+      <geom class="visual" name="v2_base_supply_stock_plate" type="box"
+            size="0.180 0.110 0.004" pos="0 0 0.214"
+            rgba="0.72 0.75 0.79 1"/>
       <site name="v2_base_supply_pickup_site" pos="0 0 0.222"
             size="0.006" rgba="0.2 0.9 0.95 0.8"/>
     </body>
@@ -425,20 +430,20 @@
           <joint name="v2_arm3_left_finger_joint" type="slide"
                  axis="0 -1 0" range="0 0.0202" damping="6"/>
           <geom name="v2_arm3_gripper_left" type="box"
-                size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
+                size="0.0032 0.001 0.040" rgba="0.72 0.75 0.79 1"
                 contype="4" conaffinity="2"/>
           <geom class="visual" name="v2_arm3_gripper_left_pad" type="box"
-                size="0.0035 0.0012 0.034" pos="0 -0.0038 0"
+                size="0.0035 0.0006 0.034" pos="0 -0.0004 0"
                 material="v2_belt_mat"/>
         </body>
         <body name="v2_arm3_right_finger" pos="0 -0.026 0.058">
           <joint name="v2_arm3_right_finger_joint" type="slide"
                  axis="0 1 0" range="0 0.0202" damping="6"/>
           <geom name="v2_arm3_gripper_right" type="box"
-                size="0.0032 0.002 0.040" rgba="0.72 0.75 0.79 1"
+                size="0.0032 0.001 0.040" rgba="0.72 0.75 0.79 1"
                 contype="4" conaffinity="2"/>
           <geom class="visual" name="v2_arm3_gripper_right_pad" type="box"
-                size="0.0035 0.0012 0.034" pos="0 0.0038 0"
+                size="0.0035 0.0006 0.034" pos="0 0.0004 0"
                 material="v2_belt_mat"/>
         </body>
         <site name="v2_arm3_gripper_tcp" pos="0 0 0.090" size="0.005"
@@ -894,37 +899,37 @@
     <body name="v2_tray_01" pos="-1.05 0.35 0.225" gravcomp="1">
       <freejoint name="v2_tray_01_free"/>
       <geom class="tray" name="v2_tray_01_geom" material="v2_tray_mat"/>
-      <site name="v2_tray_01_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_tray_01_dock_site" size="0.008" rgba="0.2 0.8 1 0"/>
       <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_01_"/>
     </body>
     <body name="v2_tray_02" pos="-1.50 0.35 0.225" gravcomp="1">
       <freejoint name="v2_tray_02_free"/>
       <geom class="tray" name="v2_tray_02_geom" material="v2_tray_mat"/>
-      <site name="v2_tray_02_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_tray_02_dock_site" size="0.008" rgba="0.2 0.8 1 0"/>
       <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_02_"/>
     </body>
     <body name="v2_tray_03" pos="-1.95 0.35 0.225" gravcomp="1">
       <freejoint name="v2_tray_03_free"/>
       <geom class="tray" name="v2_tray_03_geom" material="v2_tray_mat"/>
-      <site name="v2_tray_03_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_tray_03_dock_site" size="0.008" rgba="0.2 0.8 1 0"/>
       <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_03_"/>
     </body>
     <body name="v2_tray_04" pos="-2.40 0.35 0.225" gravcomp="1">
       <freejoint name="v2_tray_04_free"/>
       <geom class="tray" name="v2_tray_04_geom" material="v2_tray_mat"/>
-      <site name="v2_tray_04_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_tray_04_dock_site" size="0.008" rgba="0.2 0.8 1 0"/>
       <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_04_"/>
     </body>
     <body name="v2_tray_05" pos="-2.85 0.35 0.225" gravcomp="1">
       <freejoint name="v2_tray_05_free"/>
       <geom class="tray" name="v2_tray_05_geom" material="v2_tray_mat"/>
-      <site name="v2_tray_05_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_tray_05_dock_site" size="0.008" rgba="0.2 0.8 1 0"/>
       <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_05_"/>
     </body>
     <body name="v2_tray_06" pos="-3.30 0.35 0.225" gravcomp="1">
       <freejoint name="v2_tray_06_free"/>
       <geom class="tray" name="v2_tray_06_geom" material="v2_tray_mat"/>
-      <site name="v2_tray_06_dock_site" size="0.008" rgba="0.2 0.8 1 0.8"/>
+      <site name="v2_tray_06_dock_site" size="0.008" rgba="0.2 0.8 1 0"/>
       <attach model="v2_product_tray_asset" body="payload" prefix="v2_tray_06_"/>
     </body>
   </worldbody>

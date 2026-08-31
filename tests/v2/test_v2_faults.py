@@ -87,8 +87,10 @@ def test_fault_catalog_is_exactly_thirteen_explicit_dispositions() -> None:
     assert all(row["detection_stage"] for row in rows)
     assert all(row["recovery_route_zh"] for row in rows)
     assert all(row["final_disposition_zh"] for row in rows)
-    assert sum(row["recovery_class"] == "AUTONOMOUS_RECOVERY" for row in rows) == 7
-    assert sum(row["recovery_class"] == "MANUAL_DISPOSITION" for row in rows) == 6
+    assert sum(row["recovery_class"] == "AUTONOMOUS_RECOVERY" for row in rows) == 8
+    assert sum(row["recovery_class"] == "MANUAL_DISPOSITION" for row in rows) == 5
+    assert MANUAL_FAULT_CATALOG["FIN_PICK_FAILED"].recovery_class == "AUTONOMOUS_RECOVERY"
+    assert not MANUAL_FAULT_CATALOG["FIN_PICK_FAILED"].simulated_manual_review
 
 
 def test_recovery_snapshot_exposes_policy_and_final_disposition() -> None:
@@ -117,8 +119,8 @@ def test_recovery_snapshot_exposes_policy_and_final_disposition() -> None:
     assert manual_plan.manual_review_complete_at == pytest.approx(10.0)
     assert manual.snapshot()["fault_policy_summary"] == {
         "catalog_count": 13,
-        "autonomous_count": 7,
-        "manual_count": 6,
+        "autonomous_count": 8,
+        "manual_count": 5,
         "active_autonomous": 0,
         "active_manual": 1,
         "unresolved_count": 1,
@@ -218,11 +220,10 @@ def test_safety_fault_manual_review_finishes_after_ten_seconds(
         assert isolated_resource not in runtime.faults.isolated_resources
 
 
-@pytest.mark.parametrize("fault", ("FIN_PICK_FAILED", "FIN_GEOMETRY_FAILED"))
-def test_fifth_and_sixth_faults_enter_manual_review_after_camera_detection(fault: str) -> None:
+def test_sixth_fault_enters_manual_review_after_camera_detection() -> None:
     runtime = DualLineRuntime(fast=True)
-    runtime.submit_order("A", order_id=f"MANUAL_{fault}")
-    runtime.inject_fault(fault, target="fin_02")
+    runtime.submit_order("A", order_id="MANUAL_FIN_GEOMETRY_FAILED")
+    runtime.inject_fault("FIN_GEOMETRY_FAILED", target="fin_02")
     for _ in range(2_000):
         runtime.tick(0.02)
         if runtime.faults.plans:
@@ -230,6 +231,88 @@ def test_fifth_and_sixth_faults_enter_manual_review_after_camera_detection(fault
     plan = next(iter(runtime.faults.plans.values()))
     assert plan.status is RecoveryStatus.MANUAL_REVIEW
     assert plan.manual_review_complete_at == pytest.approx(plan.created_at + 10.0)
+
+
+def test_multi_order_fin_pick_failure_returns_to_arm3_for_one_fin_reinstall_and_reinspection() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="FIN_PICK_REWORK_A")
+    runtime.submit_order("B", order_id="FIN_PICK_REWORK_B")
+    runtime.inject_fault("FIN_PICK_FAILED", target="fin_02")
+
+    for _ in range(20_000):
+        runtime.tick(0.02)
+        if runtime.complete:
+            break
+
+    assert runtime.complete
+    plan = next(iter(runtime.faults.plans.values()))
+    assert plan.strategy == "FIN_REINSTALL"
+    assert plan.status is RecoveryStatus.SUCCEEDED
+    assert plan.manual_review_started_at is None
+    assert not runtime.snapshot()["manual_review_notices"]
+
+    faulty_unit_id = "FIN_PICK_REWORK_A_UNIT_01"
+    recovery_return = next(
+        event
+        for event in runtime.events
+        if event["type"] == "RECOVERY_RETURN_STARTED" and event.get("unit_id") == faulty_unit_id
+    )
+    assert recovery_return["source"] == "S4"
+    assert recovery_return["target"] == "INSTALL_B"
+    rollback = next(
+        event
+        for event in runtime.events
+        if event["type"] == "RECOVERY_ROLLBACK" and event.get("unit_id") == faulty_unit_id
+    )
+    assert rollback["fin_index"] == 2
+    assert rollback["fins_installed"] == runtime.units[faulty_unit_id].fin_count - 1
+    rework = next(
+        event
+        for event in runtime.events
+        if event["type"] == "REWORK_EFFORT_APPLIED" and event.get("unit_id") == faulty_unit_id
+    )
+    assert rework["strategy"] == "FIN_REINSTALL"
+    assert rework["target_index"] == 2
+
+    inspections = [
+        event
+        for event in runtime.events
+        if event["type"] == "OPERATION_STARTED"
+        and event.get("unit_id") == faulty_unit_id
+        and event.get("kind") == "PRE_BRAZE_INSPECTION"
+    ]
+    assert len(inspections) == 2
+    assert inspections[0]["time"] < recovery_return["time"] < inspections[1]["time"]
+    assert runtime.units[faulty_unit_id].fins_installed == runtime.units[faulty_unit_id].fin_count
+
+
+def test_fin_pick_failure_stays_autonomous_if_reinspection_detects_it_again() -> None:
+    """Repeated grasp misses keep the same physical S3B rework loop."""
+
+    controller = V2FaultController()
+    first = controller.inject(
+        FaultType.FIN_PICK_FAILED,
+        source="ARM3",
+        target="fin_02",
+        unit_id="U1",
+        now=0.0,
+        visual_type="FIN_PICK_FAILED",
+    )
+    second = controller.inject(
+        FaultType.FIN_PICK_FAILED,
+        source="ARM3",
+        target="fin_02",
+        unit_id="U1",
+        now=1.0,
+        visual_type="FIN_PICK_FAILED",
+    )
+
+    assert controller.plans[first.recovery_id].strategy == "FIN_REINSTALL"
+    assert controller.plans[second.recovery_id].strategy == "FIN_REINSTALL"
+    assert all(
+        plan.status is not RecoveryStatus.MANUAL_REVIEW
+        for plan in controller.plans.values()
+    )
 
 
 def test_fin_pose_alias_keeps_its_existing_automatic_reseat() -> None:

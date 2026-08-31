@@ -13,7 +13,6 @@ import numpy as np
 from ..motion import HOME_QPOS
 from ..profiles import quintic_time_scaling
 from .process_geometry import V2ProcessGeometry
-from .dispatch import InstallBranch
 from .robot_projector import V2RobotMotionProjector
 from .fault_visuals import (
     BRAZING_DEVIATION_REAPPLY_START,
@@ -21,7 +20,6 @@ from .fault_visuals import (
     V2FaultVisualizer,
 )
 from .tray_flow import TrayOwner
-from .runtime import UnitStage
 
 if TYPE_CHECKING:
     from .runtime import DualLineRuntime
@@ -652,6 +650,11 @@ class DualLineSceneAdapter:
                 np.asarray([1.40, 0.50, float(start[2])]),
                 final_target.copy(),
             )
+        if source_owner is TrayOwner.INSTALL_B and target_owner is TrayOwner.S2B:
+            # Recovery arbitration evacuates a completed S3B pallet along the
+            # exact branch rail it used to enter.  The straight reverse route
+            # keeps the pallet horizontal and out of the S4 return corridor.
+            return (final_target.copy(),)
         if source_owner in branch_stations and target_owner in branch_waits:
             if source_owner is TrayOwner.INSTALL_B:
                 return (
@@ -786,6 +789,45 @@ class DualLineSceneAdapter:
                 target_owner,
             )
 
+    def _reconcile_transport_target(
+        self,
+        tray_id: str,
+        target_owner: TrayOwner,
+    ) -> None:
+        """Discard stale carrier intent when a unit is sent back for rework.
+
+        Runtime ownership is authoritative, but a scene sync can observe a
+        rollback one frame after an outbound handoff was queued.  Keeping that
+        old destination in ``_pending_owners`` would make the physical carrier
+        finish the forward route and only then start the return route.  When a
+        route is corrected, the current mocap pose is retained and the next
+        sync starts a new path from that pose, so this is a replan rather than
+        a teleport.
+        """
+
+        pending = self._pending_owners[tray_id]
+        motion = self._motions.get(tray_id)
+        if motion is not None and motion.target_owner is target_owner:
+            # The physical route already points at the new logical owner.  Any
+            # duplicate queued copy would create a zero-length second motion.
+            pending.clear()
+            return
+        if motion is not None and motion.target_owner is not target_owner:
+            # Preserve the current position and cancel only the obsolete route.
+            # The next owner is appended below and _begin_motion will use the
+            # measured mocap position as its start.
+            self._motions.pop(tray_id, None)
+            pending.clear()
+        elif motion is None and pending and pending[-1] is not target_owner:
+            # No physical movement has started yet; all queued intents are
+            # obsolete once the logical owner has been rewound.
+            pending.clear()
+        if not pending and (motion is None or motion.target_owner is not target_owner):
+            pending.append(target_owner)
+        elif pending and pending[-1] is not target_owner:
+            pending.clear()
+            pending.append(target_owner)
+
     def _sync_furnace_mechanisms(self, runtime: "DualLineRuntime") -> None:
         door_hold = next(
             (
@@ -879,20 +921,23 @@ class DualLineSceneAdapter:
         for actuator_id in self._route_actuators.values():
             self.data.ctrl[actuator_id] = 0.0
         routes = {
-            (TrayOwner.S1, TrayOwner.S2A): ("v2_s1_s2a_actuator", 0.492443),
-            (TrayOwner.S2A, TrayOwner.S2B): ("v2_s2a_s2b_actuator", 0.855862),
-            (TrayOwner.S2B, TrayOwner.INSTALL_A): ("v2_branch_a_actuator", 0.502494),
-            (TrayOwner.S2B, TrayOwner.INSTALL_B): ("v2_branch_b_actuator", 0.474342),
-            (TrayOwner.S4, TrayOwner.BUFFER_1): ("v2_buffer_index_actuator", 0.450),
-            (TrayOwner.S4, TrayOwner.BUFFER_2): ("v2_buffer_index_actuator", 0.900),
-            (TrayOwner.S4, TrayOwner.BUFFER_3): ("v2_buffer_index_actuator", 1.350),
+            (TrayOwner.S1, TrayOwner.S2A): ("v2_s1_s2a_actuator", 0.492443, False),
+            (TrayOwner.S2A, TrayOwner.S2B): ("v2_s2a_s2b_actuator", 0.855862, False),
+            (TrayOwner.S2B, TrayOwner.INSTALL_A): ("v2_branch_a_actuator", 0.502494, False),
+            (TrayOwner.S2B, TrayOwner.INSTALL_B): ("v2_branch_b_actuator", 0.474342, False),
+            (TrayOwner.INSTALL_B, TrayOwner.S2B): ("v2_branch_b_actuator", 0.474342, True),
+            (TrayOwner.S4, TrayOwner.BUFFER_1): ("v2_buffer_index_actuator", 0.450, False),
+            (TrayOwner.S4, TrayOwner.BUFFER_2): ("v2_buffer_index_actuator", 0.900, False),
+            (TrayOwner.S4, TrayOwner.BUFFER_3): ("v2_buffer_index_actuator", 1.350, False),
             (TrayOwner.FURNACE, TrayOwner.POST_SCAN): (
                 "v2_output_transfer_actuator",
                 0.420,
+                False,
             ),
             (TrayOwner.POST_SCAN, TrayOwner.OUTPUT): (
                 "v2_output_transfer_actuator",
                 1.140,
+                False,
             ),
         }
         now = float(self.data.time)
@@ -900,10 +945,13 @@ class DualLineSceneAdapter:
             route = routes.get((motion.source_owner, motion.target_owner))
             if route is None:
                 continue
-            actuator_name, maximum = route
+            actuator_name, maximum, reverse = route
             elapsed = self._motion_elapsed(motion, now)
             fraction = min(1.0, elapsed / motion.duration_s)
-            self.data.ctrl[self._route_actuators[actuator_name]] = maximum * quintic_time_scaling(fraction)
+            progress = quintic_time_scaling(fraction)
+            self.data.ctrl[self._route_actuators[actuator_name]] = maximum * (
+                1.0 - progress if reverse else progress
+            )
 
     def sync(self, runtime: "DualLineRuntime") -> None:
         logical_now = float(runtime.sim_time)
@@ -912,7 +960,12 @@ class DualLineSceneAdapter:
             self._inspection_records.clear()
             self.fault_visuals.reset()
         self._bound_runtime = runtime
-        runtime.set_execution_gate(self)
+        existing_gate = getattr(runtime, "_execution_gate", None)
+        bind_physical_gate = getattr(existing_gate, "bind_physical_gate", None)
+        if callable(bind_physical_gate):
+            bind_physical_gate(self)
+        else:
+            runtime.set_execution_gate(self)
         self._last_runtime_time = logical_now
         if not isfinite(logical_now):
             raise ValueError("runtime simulation time must be finite")
@@ -948,8 +1001,7 @@ class DualLineSceneAdapter:
             )
             self._sync_payload_visibility(runtime, tray_id, visible=visible)
             if owner is not self._last_owner[tray_id]:
-                if not self._pending_owners[tray_id] or self._pending_owners[tray_id][-1] is not owner:
-                    self._pending_owners[tray_id].append(owner)
+                self._reconcile_transport_target(tray_id, owner)
             self._last_owner[tray_id] = owner
             unit_operation = next(
                 (
@@ -1214,6 +1266,28 @@ class DualLineSceneAdapter:
             and not self._pending_owners.get(tray_id)
         )
 
+    def estimated_tray_ready_in(self, tray_id: str, owner: TrayOwner) -> float:
+        """Return remaining authored carrier time to an already requested owner."""
+
+        tray_id = str(tray_id)
+        target_owner = TrayOwner(owner)
+        if self.tray_ready(tray_id, target_owner):
+            return 0.0
+        motion = self._motions.get(tray_id)
+        if motion is None or motion.target_owner is not target_owner:
+            return 0.0
+        if motion.paused_at is not None:
+            return float("inf")
+        remaining = max(
+            0.0,
+            motion.duration_s - self._motion_elapsed(motion, float(self.data.time)),
+        )
+        start = motion.target
+        for target in motion.remaining_targets:
+            remaining += self._motion_duration(start, target)
+            start = target
+        return remaining
+
     def owner_available(self, owner: TrayOwner) -> bool:
         """Reserve a station until its previous physical pallet has departed."""
 
@@ -1322,28 +1396,10 @@ class DualLineSceneAdapter:
                 return False
             if any(value is TrayOwner.S4 for value in self._physical_owner.values()):
                 return False
-            # Both straight branch rails pass the S2B pallet envelope before
-            # reaching the shared S4 entry.  Let an already admitted S2B
-            # pallet finish inspection and leave for its reserved free branch
-            # before advancing the outbound carrier.
-            s2b_blockers = [
-                tray_id for tray_id, value in self._physical_owner.items() if value is TrayOwner.S2B
-            ]
-            runtime = self._bound_runtime
-            camera_review_waiting = bool(runtime) and all(
-                (
-                    unit := next(
-                        (item for item in runtime.units.values() if item.tray_id == tray_id),
-                        None,
-                    )
-                )
-                is not None
-                and unit.stage is UnitStage.WAITING_BRAZING_REVIEW
-                and unit.branch is InstallBranch.ARM3_B
-                for tray_id in s2b_blockers
-            )
-            if s2b_blockers and not camera_review_waiting:
-                return False
+            # A pallet already at MERGE_A/B_WAIT has cleared the S2B swept
+            # envelope. Its short wait-to-merge leg lies entirely beside S4,
+            # so an S2B pallet must not hold it there; doing so can trap that
+            # S2B pallet behind the very installation dock being evacuated.
             if any(motion.target_owner is TrayOwner.S2B for motion in self._motions.values()):
                 return False
         if any(motion.target_owner is target for motion in self._motions.values()):

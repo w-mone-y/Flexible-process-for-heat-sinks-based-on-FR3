@@ -85,7 +85,7 @@ FAULT_OPERATION_KINDS: dict[FaultType, frozenset[str]] = {
 _STRATEGIES: dict[FaultType, tuple[str, str | None, int]] = {
     FaultType.BRAZING_MISSING: ("LOCAL_BRAZING_REWORK", "MATERIAL_INSPECTION", 2),
     FaultType.BRAZING_PATH_DEVIATION: ("LOCAL_BRAZING_REWORK", "MATERIAL_INSPECTION", 2),
-    FaultType.FIN_PICK_FAILED: ("MANUAL_REVIEW", None, 0),
+    FaultType.FIN_PICK_FAILED: ("FIN_REINSTALL", "PRE_BRAZE_INSPECTION", 2),
     FaultType.FIN_GEOMETRY_FAILED: ("FIN_REINSTALL", "PRE_BRAZE_INSPECTION", 2),
     # Logistics/interlock faults hold the unit rather than rewinding a stage.
     FaultType.ELEVATOR_TIMEOUT: ("TRANSFER_SAFE_HOME_RETRY", None, 1),
@@ -97,6 +97,11 @@ _STRATEGIES: dict[FaultType, tuple[str, str | None, int]] = {
     FaultType.CONTACT_SAFETY_STOP: ("MANUAL_REVIEW", None, 0),
     FaultType.TRAY_STATE_INCONSISTENT: ("MANUAL_REVIEW", None, 0),
 }
+
+# A failed grasp is a transient execution miss, not a product disposition.
+# Keep routing the tray back to S3B until the physical single-fin reinstall
+# passes S4; do not convert a repeated detection into manual review.
+_REWORK_UNTIL_PASS: frozenset[FaultType] = frozenset({FaultType.FIN_PICK_FAILED})
 
 SIMULATED_MANUAL_REVIEW_SECONDS = 10.0
 
@@ -581,6 +586,37 @@ class V2FaultController:
             if request.status == "ARMED":
                 request.status = "MISSED"
 
+    def requires_arm3_fin_install(self) -> bool:
+        """Whether an armed physical grasp-failure demo needs Arm3's gripper."""
+
+        return any(
+            request.status == "ARMED" and request.fault_type is FaultType.FIN_PICK_FAILED
+            for request in self.pending.values()
+        )
+
+    def claim_arm3_fin_install(self, unit_id: str) -> bool:
+        """Bind the armed grasp-failure demonstration to one physical unit."""
+
+        for request in self.pending.values():
+            if request.fault_type is not FaultType.FIN_PICK_FAILED:
+                continue
+            if request.status != "ARMED" or request.unit_id not in {None, str(unit_id)}:
+                continue
+            request.unit_id = str(unit_id)
+            return True
+        return False
+
+    def arm3_rework_station_available_to(self, unit_id: str) -> bool:
+        """Keep S3B free for a latent or detected failed-grasp unit."""
+
+        candidate = str(unit_id)
+        return not any(
+            request.fault_type is FaultType.FIN_PICK_FAILED
+            and request.status not in {"RECOVERED", "MISSED"}
+            and request.unit_id not in {None, candidate}
+            for request in self.pending.values()
+        )
+
     # --------------------------------------------------------------- injection
     def inject(
         self,
@@ -671,10 +707,13 @@ class V2FaultController:
 
         # Per-(strategy, unit, target) retry ceiling, as in V1: after the limit
         # the fault stops being auto-recoverable and goes to a human.
-        retry_bounded = rollback is not None or strategy in {
+        retry_bounded = (
+            record.fault_type not in _REWORK_UNTIL_PASS
+            and (rollback is not None or strategy in {
             "TRANSFER_SAFE_HOME_RETRY",
             "FURNACE_INTERLOCK_RECHECK",
-        }
+            })
+        )
         if retry_bounded and unit_id:
             key = (f"{record.fault_type.value}:{strategy}:{unit_id}", target)
             attempts = self.rework_counts.get(key, 0)
@@ -728,7 +767,6 @@ class V2FaultController:
         visual_type = str(record.details.get("visual_type", record.fault_type.value)).upper()
         return record.fault_type in {
             FaultType.FURNACE_PROFILE,
-            FaultType.FIN_PICK_FAILED,
             FaultType.ARM_UNAVAILABLE,
             FaultType.CONTACT_SAFETY_STOP,
             FaultType.TRAY_STATE_INCONSISTENT,

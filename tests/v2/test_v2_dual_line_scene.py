@@ -144,6 +144,12 @@ def test_v2_scene_has_six_physical_trays_and_explicit_ownership_welds(model) -> 
             model.equality(f"{owner}_{tray}_weld")
 
 
+def test_v2_tray_dock_sites_remain_resolvable_but_are_not_rendered(model) -> None:
+    for index in range(1, 7):
+        site = model.site(f"v2_tray_{index:02d}_dock_site")
+        assert float(site.rgba[3]) == pytest.approx(0.0)
+
+
 def test_v2_scene_has_dual_direct_branches_and_shared_inspection(model) -> None:
     for station in (
         "v2_station_s1",
@@ -425,6 +431,10 @@ def test_v2_s1_has_a_visible_base_supply_fixture_and_pickup_reference(model) -> 
         assert geom.rgba[3] > 0.9
     pickup = model.site("v2_base_supply_pickup_site")
     assert pickup.pos[2] > model.geom("v2_base_supply_deck").pos[2]
+    stock = model.geom("v2_base_supply_stock_plate")
+    assert stock.rgba[3] > 0.0
+    assert stock.contype == 0
+    assert stock.conaffinity == 0
 
 
 def test_v2_base_supply_is_an_independent_reachable_table_clear_of_s1(model) -> None:
@@ -954,12 +964,12 @@ def test_v2_arm3_fin_gripper_is_the_same_parallel_gripper_as_arm1(model) -> None
     for side in ("left", "right"):
         np.testing.assert_allclose(
             model.geom(f"v2_arm1_gripper_{side}").size,
-            (0.0032, 0.0020, 0.0400),
+            (0.0032, 0.0010, 0.0400),
             atol=1.0e-9,
         )
         np.testing.assert_allclose(
             model.geom(f"v2_arm1_gripper_{side}_pad").size,
-            (0.0035, 0.0012, 0.0340),
+            (0.0035, 0.0006, 0.0340),
             atol=1.0e-9,
         )
         np.testing.assert_allclose(
@@ -969,6 +979,22 @@ def test_v2_arm3_fin_gripper_is_the_same_parallel_gripper_as_arm1(model) -> None
         np.testing.assert_allclose(
             model.geom(f"v2_arm3_gripper_{side}_pad").size,
             model.geom(f"v2_arm1_gripper_{side}_pad").size,
+        )
+        body = model.body(f"v2_arm1_gripper_{side}_body")
+        finger = model.geom(f"v2_arm1_gripper_{side}")
+        pad = model.geom(f"v2_arm1_gripper_{side}_pad")
+        finger_center_y = float(body.pos[1] + finger.pos[1])
+        pad_center_y = float(body.pos[1] + pad.pos[1])
+        # The dark inner pad must meet the inward face of its metal finger;
+        # a visible gap here makes it look like a floating third component.
+        if side == "left":
+            assert pad_center_y + float(pad.size[1]) >= finger_center_y - float(finger.size[1]) - 1.0e-6
+        else:
+            assert pad_center_y - float(pad.size[1]) <= finger_center_y + float(finger.size[1]) + 1.0e-6
+        np.testing.assert_allclose(
+            model.geom(f"v2_arm3_gripper_{side}_pad").pos,
+            pad.pos,
+            atol=1.0e-9,
         )
         np.testing.assert_allclose(
             model.joint(f"v2_arm3_{side}_finger_joint").axis,

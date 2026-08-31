@@ -4,6 +4,9 @@ import pytest
 
 from brazing_sim.experiments import MetricsCollector, compare_experiments
 from brazing_sim.flexible import build_inline_plan, build_preset_plan
+from brazing_sim.dual_line.runtime import DualLineRuntime
+from brazing_sim.dual_line.scene_adapter import DualLineSceneAdapter
+from brazing_sim.dual_line.unified_runtime import UnifiedV2Runtime
 from brazing_sim.manufacturing_runtime import ManufacturingRuntime, OrderRunStatus
 from brazing_sim.recovery import FaultType, RecoveryStatus
 
@@ -73,6 +76,237 @@ def test_brazing_fault_inserts_idempotent_rework_chain_and_continues() -> None:
     plan = next(iter(runtime.recovery.plans.values()))
     assert plan.status is RecoveryStatus.SUCCEEDED
     assert next(iter(runtime.orders.values())).status is OrderRunStatus.COMPLETED
+
+
+@pytest.mark.parametrize("fault_type", ("BRAZING_MISSING", "BRAZING_PATH_DEVIATION"))
+def test_multi_order_brazing_rework_waits_for_s2a_instead_of_bypassing_return(
+    fault_type: str,
+) -> None:
+    """A busy S2A must delay the faulty tray, never send it forward to S3."""
+
+    runtime = DualLineRuntime(fast=True)
+    for preset in ("A", "B", "C"):
+        runtime.submit_order(preset, order_id=f"MULTI_{preset}")
+    runtime.inject_fault(fault_type, target="path_02")
+
+    for _ in range(20_000):
+        runtime.tick(0.02)
+        if runtime.complete:
+            break
+    assert runtime.complete
+
+    faulty_unit = runtime.units["MULTI_A_UNIT_01"]
+    recovery_return = next(
+        event
+        for event in runtime.events
+        if event["type"] == "RECOVERY_RETURN_STARTED" and event["unit_id"] == faulty_unit.unit_id
+    )
+    assert recovery_return["source"] == "S2B"
+    assert recovery_return["target"] == "S2A"
+
+    forward_handoffs = [
+        event
+        for event in runtime.events
+        if event["type"] == "TRAY_HANDOFF"
+        and event["unit_id"] == faulty_unit.unit_id
+        and event["source"] == "S2B"
+        and event["target"] in {"INSTALL_A", "INSTALL_B"}
+    ]
+    assert forward_handoffs
+    assert all(event["time"] > recovery_return["time"] for event in forward_handoffs)
+
+    # The unrelated orders are allowed to progress while A waits for S2A.
+    assert any(
+        event["type"] == "OPERATION_COMPLETED"
+        and event["unit_id"] != faulty_unit.unit_id
+        and event["time"] < recovery_return["time"]
+        for event in runtime.events
+    )
+
+
+def _s1_to_s2a_handoff_time(runtime: DualLineRuntime, unit_id: str) -> float:
+    return next(
+        float(event["time"])
+        for event in runtime.events
+        if event["type"] == "TRAY_HANDOFF"
+        and event["unit_id"] == unit_id
+        and event["source"] == "S1"
+        and event["target"] == "S2A"
+    )
+
+
+def _material_inspection_pass_time(runtime: DualLineRuntime, unit_id: str) -> float:
+    return max(
+        float(event["time"])
+        for event in runtime.events
+        if event["type"] == "OPERATION_COMPLETED"
+        and event["unit_id"] == unit_id
+        and event["kind"] == "MATERIAL_INSPECTION"
+    )
+
+
+def test_next_board_enters_s2a_only_after_previous_brazing_inspection_passes() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="INSPECTION_GATE_A")
+    runtime.submit_order("B", order_id="INSPECTION_GATE_B")
+
+    for _ in range(4_000):
+        runtime.tick(0.02)
+        if runtime.complete:
+            break
+
+    assert runtime.complete
+    inspection_passed_at = _material_inspection_pass_time(runtime, "INSPECTION_GATE_A_UNIT_01")
+    next_board_released_at = _s1_to_s2a_handoff_time(runtime, "INSPECTION_GATE_B_UNIT_01")
+    assert inspection_passed_at <= next_board_released_at
+    assert next_board_released_at - inspection_passed_at <= 0.02
+
+
+def test_next_board_waits_for_brazing_rework_reinspection_before_entering_s2a() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="REWORK_GATE_A")
+    runtime.submit_order("B", order_id="REWORK_GATE_B")
+    runtime.inject_fault("BRAZING_MISSING", target="path_02")
+
+    for _ in range(4_000):
+        runtime.tick(0.02)
+        if runtime.complete:
+            break
+
+    assert runtime.complete
+    assert any(
+        event["type"] == "RECOVERY_RETURN_STARTED" and event.get("unit_id") == "REWORK_GATE_A_UNIT_01"
+        for event in runtime.events
+    )
+    reinspection_passed_at = _material_inspection_pass_time(runtime, "REWORK_GATE_A_UNIT_01")
+    next_board_released_at = _s1_to_s2a_handoff_time(runtime, "REWORK_GATE_B_UNIT_01")
+    assert reinspection_passed_at <= next_board_released_at
+    assert next_board_released_at - reinspection_passed_at <= 0.02
+
+
+def test_unified_mujoco_brazing_rework_preserves_bridge_and_releases_next_board() -> None:
+    pytest.importorskip("mujoco")
+    runtime = UnifiedV2Runtime(fast=True)
+    scene = DualLineSceneAdapter("scenes/production/brazing_line_v2.xml")
+    runtime.set_execution_gate(scene)
+    runtime.submit_order("A", order_id="MUJOCO_REWORK_A")
+    runtime.submit_order("B", order_id="MUJOCO_REWORK_B")
+    runtime.inject_fault("BRAZING_MISSING", target="path_02")
+
+    try:
+        for _ in range(4_000):
+            runtime.tick(0.05)
+            scene.sync(runtime.physical_runtime)
+            scene.step_physics(0.05)
+            if runtime.complete and scene.transport_settled:
+                break
+
+        assert runtime.complete
+        assert scene.transport_settled
+        assert runtime.physical_runtime._execution_gate is runtime.bridge
+        assert any(
+            event["type"] == "RECOVERY_RETURN_STARTED" and event.get("unit_id") == "MUJOCO_REWORK_A_UNIT_01"
+            for event in runtime.physical_runtime.events
+        )
+        reinspection_passed_at = _material_inspection_pass_time(
+            runtime.physical_runtime,
+            "MUJOCO_REWORK_A_UNIT_01",
+        )
+        next_board_released_at = _s1_to_s2a_handoff_time(
+            runtime.physical_runtime,
+            "MUJOCO_REWORK_B_UNIT_01",
+        )
+        assert reinspection_passed_at <= next_board_released_at
+        assert next_board_released_at - reinspection_passed_at <= 0.05
+    finally:
+        scene.close()
+
+
+def test_unified_mujoco_fin_pick_failure_returns_to_arm3_and_reinspects() -> None:
+    """The production runtime must authorize Arm3's physical one-fin recovery."""
+
+    pytest.importorskip("mujoco")
+    runtime = UnifiedV2Runtime(fast=True)
+    scene = DualLineSceneAdapter("scenes/production/brazing_line_v2.xml")
+    runtime.set_execution_gate(scene)
+    runtime.submit_order("A", order_id="MUJOCO_FIN_REWORK_A")
+    runtime.submit_order("B", order_id="MUJOCO_FIN_REWORK_B")
+    runtime.submit_order("C", order_id="MUJOCO_FIN_REWORK_C")
+    runtime.inject_fault("FIN_PICK_FAILED", target="fin_02")
+
+    try:
+        for _ in range(8_000):
+            runtime.tick(0.05)
+            scene.sync(runtime.physical_runtime)
+            scene.step_physics(0.05)
+            if runtime.complete and scene.transport_settled:
+                break
+
+        assert runtime.complete
+        assert scene.transport_settled
+        assert runtime.physical_runtime._execution_gate is runtime.bridge
+        assert not runtime.physical_runtime.snapshot()["manual_review_notices"]
+        faulty_unit_id = "MUJOCO_FIN_REWORK_A_UNIT_01"
+        return_event = next(
+            event
+            for event in runtime.physical_runtime.events
+            if event["type"] == "RECOVERY_RETURN_STARTED"
+            and event.get("unit_id") == faulty_unit_id
+        )
+        assert return_event["source"] == "S4"
+        assert return_event["target"] == "INSTALL_B"
+        assert not any(
+            event["type"] == "TRAY_HANDOFF"
+            and event.get("unit_id") != faulty_unit_id
+            and event.get("target") == "INSTALL_B"
+            and event["time"] < return_event["time"]
+            for event in runtime.physical_runtime.events
+        )
+        inspections = [
+            event
+            for event in runtime.physical_runtime.events
+            if event["type"] == "OPERATION_STARTED"
+            and event.get("unit_id") == faulty_unit_id
+            and event.get("kind") == "PRE_BRAZE_INSPECTION"
+        ]
+        assert len(inspections) == 2
+        faulty_unit = runtime.physical_runtime.units[faulty_unit_id]
+        assert faulty_unit.fins_installed == faulty_unit.fin_count
+    finally:
+        scene.close()
+
+
+def test_fin_pick_recovery_clears_an_occupied_s3b_without_deadlock() -> None:
+    """A blocked S4 inspection must not reserve Arm3 forever."""
+
+    runtime = DualLineRuntime(fast=True)
+    runtime.submit_order("A", order_id="S3B_DEADLOCK_FAULT")
+    runtime.submit_order("B", order_id="S3B_DEADLOCK_MERGE")
+    runtime.submit_order("C", order_id="S3B_DEADLOCK_OCCUPANT")
+    runtime.inject_fault("FIN_PICK_FAILED", target="fin_02")
+
+    for _ in range(30_000):
+        runtime.tick(0.02)
+        if runtime.complete:
+            break
+
+    assert runtime.complete
+    recovery_return = next(
+        event
+        for event in runtime.events
+        if event["type"] == "RECOVERY_RETURN_STARTED"
+        and event.get("unit_id") == "S3B_DEADLOCK_FAULT_UNIT_01"
+    )
+    assert not any(
+        event["type"] == "TRAY_HANDOFF"
+        and event.get("unit_id") != "S3B_DEADLOCK_FAULT_UNIT_01"
+        and event.get("target") == "INSTALL_B"
+        and event["time"] < recovery_return["time"]
+        for event in runtime.events
+    )
+    assert recovery_return["source"] == "S4"
+    assert recovery_return["target"] == "INSTALL_B"
+    assert not runtime.snapshot()["manual_review_notices"]
 
 
 def test_manual_fault_waits_for_matching_task_then_runs_recovery() -> None:

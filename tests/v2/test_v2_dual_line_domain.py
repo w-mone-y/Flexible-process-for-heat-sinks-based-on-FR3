@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from brazing_sim.dual_line import (
@@ -88,6 +90,130 @@ def test_dispatcher_uses_arm3_when_camera_has_a_genuine_idle_window() -> None:
 
     assert decision.branch is InstallBranch.ARM3_B
     assert decision.finish_at == pytest.approx(6.0)
+    assert decision.arm3_activated
+    assert decision.arm3_net_gain_s > 0.0
+    assert "净收益" in decision.explanation_zh
+
+
+def test_dispatcher_rejects_arm3_when_line_penalties_exceed_local_install_gain() -> None:
+    decision = DualInstallDispatcher(minimum_arm3_net_gain_s=0.5).assign(
+        InstallRequest("V2_TRAY_THRESHOLD", fin_count=4, ready_at=0.0),
+        (
+            InstallResourceState(
+                branch=InstallBranch.ARM1_A,
+                available_at=8.0,
+                seconds_per_fin=2.0,
+            ),
+            InstallResourceState(
+                branch=InstallBranch.ARM3_B,
+                available_at=7.0,
+                seconds_per_fin=2.0,
+                downstream_blocking_s=2.0,
+            ),
+        ),
+    )
+
+    assert decision.branch is InstallBranch.ARM1_A
+    assert not decision.arm3_activated
+    assert decision.arm3_expected_gain_s == pytest.approx(1.0)
+    assert decision.arm3_blocking_penalty_s == pytest.approx(2.0)
+    assert decision.arm3_net_gain_s == pytest.approx(-1.0)
+    assert decision.activation_reason_zh == "Arm3局部节拍更快，但检测与下游阻塞代价超过收益"
+
+
+def test_dispatcher_activates_arm3_only_when_net_line_gain_clears_threshold() -> None:
+    dispatcher = DualInstallDispatcher(minimum_arm3_net_gain_s=0.5)
+    decision = dispatcher.assign(
+        InstallRequest("V2_TRAY_IDLE_WINDOW", fin_count=4, ready_at=0.0),
+        (
+            InstallResourceState(
+                branch=InstallBranch.ARM1_A,
+                available_at=15.0,
+                seconds_per_fin=2.0,
+            ),
+            InstallResourceState(
+                branch=InstallBranch.ARM3_B,
+                available_at=0.0,
+                seconds_per_fin=2.0,
+                inspection_reservations=((20.0, 24.0),),
+                downstream_blocking_s=1.0,
+            ),
+        ),
+    )
+
+    assert decision.branch is InstallBranch.ARM3_B
+    assert decision.arm3_activated
+    assert decision.arm3_expected_gain_s == pytest.approx(15.0)
+    assert decision.arm3_net_gain_s == pytest.approx(14.0)
+    assert decision.activation_reason_zh == "Arm3存在完整安装空窗，产线级净收益超过启用阈值"
+    snapshot = dispatcher.snapshot()
+    assert snapshot["selected_branch"] == "ARM3_B"
+    assert snapshot["arm3_activation"]["activated"] is True
+
+
+def test_dispatcher_charges_arm3_inspection_wait_exactly_once() -> None:
+    decision = DualInstallDispatcher(minimum_arm3_net_gain_s=0.5).assign(
+        InstallRequest("V2_TRAY_SINGLE_INSPECTION_COST", fin_count=2, ready_at=0.0),
+        (
+            InstallResourceState(
+                branch=InstallBranch.ARM1_A,
+                available_at=7.0,
+                seconds_per_fin=2.0,
+            ),
+            InstallResourceState(
+                branch=InstallBranch.ARM3_B,
+                available_at=0.0,
+                seconds_per_fin=2.0,
+                inspection_reservations=((2.0, 6.0),),
+            ),
+        ),
+    )
+
+    # Arm1 finishes at 11 s. Arm3 would finish at 4 s without inspection and
+    # at 8 s with it, so 7 - 4 = 3 s net gain. The 4 s reservation must not
+    # be subtracted once in finish_at and then a second time in net_gain.
+    assert decision.candidates[InstallBranch.ARM3_B].finish_at == pytest.approx(8.0)
+    assert decision.arm3_expected_gain_s == pytest.approx(7.0)
+    assert decision.arm3_inspection_penalty_s == pytest.approx(4.0)
+    assert decision.arm3_net_gain_s == pytest.approx(3.0)
+    assert decision.branch is InstallBranch.ARM3_B
+
+
+def test_dispatcher_snapshot_is_strict_json_when_arm3_is_offline() -> None:
+    dispatcher = DualInstallDispatcher()
+    dispatcher.assign(
+        InstallRequest("V2_TRAY_ARM3_OFFLINE", fin_count=4, ready_at=0.0),
+        (
+            InstallResourceState(InstallBranch.ARM1_A, 0.0, 2.0),
+            InstallResourceState(InstallBranch.ARM3_B, 0.0, 1.5, enabled=False),
+        ),
+    )
+
+    encoded = json.dumps(dispatcher.snapshot(), allow_nan=False)
+
+    assert '"finish_at": null' in encoded
+
+
+def test_dispatcher_reset_clears_previous_decision_explanation() -> None:
+    dispatcher = DualInstallDispatcher()
+    dispatcher.assign(
+        InstallRequest("V2_TRAY_RESET", fin_count=4, ready_at=0.0),
+        (
+            InstallResourceState(InstallBranch.ARM1_A, 0.0, 2.0),
+            InstallResourceState(InstallBranch.ARM3_B, 0.0, 1.5),
+        ),
+    )
+
+    dispatcher.reset()
+
+    snapshot = dispatcher.snapshot()
+    assert snapshot["selected_branch"] is None
+    assert snapshot["arm3_activation"] == {
+        "activated": False,
+        "reason_zh": "等待托盘进入分支决策点",
+    }
+    assert snapshot["rolling_horizon"]["selected_action_id"] is None
+    assert snapshot["rolling_horizon"]["candidates"] == []
 
 
 def test_six_trays_have_one_owner_and_virtual_return_is_explicit() -> None:

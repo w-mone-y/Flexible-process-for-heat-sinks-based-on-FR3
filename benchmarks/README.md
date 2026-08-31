@@ -39,3 +39,55 @@ python benchmarks/compare_versions.py \
   门控，也明确保留 Phase 2 真实 TCP/抓取验收边界。
 
 精选报告见 [2026-07-29 V1/V2 对照](results/2026-07-29-v1-v2/comparison.md)。
+
+## CP-SAT 小规模参照
+
+Phase 2 的旁路求解器可为 1 至 6 件 V2 订单输出 objective、best bound、gap、独立
+校验结果、资源占用和炉批成员：
+
+```bash
+python benchmarks/run_reference_plan.py \
+  --orders A,B,C,A,B,C \
+  --time-limit 10 \
+  --seed 0 \
+  --output benchmarks/results/local-reference-abcabc.json
+```
+
+该结果是当前数字孪生任务图的预测参照，不会派工，也不能替代完整 MuJoCo 物理回放
+makespan。模型、状态解释和已知边界见
+[CP-SAT 最优参照规划规格](../docs/specs/cp-sat-reference-planning.md)。
+
+## TwinShield-RH 影子比较
+
+Phase 3 以同一快照同时生成当前派工边界、TwinShield-RH 影子计划和 CP-SAT 参照：
+
+```bash
+python benchmarks/run_shadow_comparison.py \
+  --orders A,B,C \
+  --time-limit 10 \
+  --seed 0 \
+  --output benchmarks/results/local-shadow-abc.json
+```
+
+命令会检查影子求解前后的实际派工记录没有变化。`shadow_schedule` 中的 `selected`
+是下一安全窗口的建议动作，`rejected` 是候选被资源、工具、WIP、区域或窗口容量拒绝
+的原因；它们不是物理执行许可。
+
+## TwinShield-RH V2 权威派工对照
+
+Phase 4 使用完整 MuJoCo headless 流程，对比 TwinShield 权威模式和操作员回退模式：
+
+```bash
+python benchmarks/run_authority_comparison.py \
+  --orders A,B,C \
+  --modes AUTHORITY,FALLBACK \
+  --output benchmarks/results/local-authority-abc.json
+```
+
+报告同时保存物理 makespan、吞吐、Arm1 空闲、跨臂重叠、墙钟耗时、原子接管次数、
+回退次数和决策延迟。`FALLBACK` 完全绕过 TwinShield，因此是同一代码与物理场景下的
+可复现回滚基线。详细边界见
+[TwinShield-RH V2 权威派工规格](../docs/specs/twinshield-v2-authority.md)。
+
+本阶段精选实测见
+[2026-08-22 Phase 4 权威派工验收](results/2026-08-22-phase4/README.md)。

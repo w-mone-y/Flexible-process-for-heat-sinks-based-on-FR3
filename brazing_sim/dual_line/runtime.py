@@ -24,9 +24,16 @@ from .dispatch import (
     InstallResourceState,
 )
 from .furnace import BatchRecipe, FurnacePhase, ThroughBatchFurnace
+from .inspection_windows import (
+    Arm3InspectionWindow,
+    InspectionWindowRequest,
+    schedule_arm3_inspection_windows,
+)
 from .process_geometry import V2_MAX_PRODUCT_HEIGHT_M, V2ProcessGeometry
 from .topology import DualLineTopology
 from .tray_flow import TrayFlowController, TrayOwner, TrayPhase
+from ..events import EventType
+from ..twin import DecisionEvent, DigitalTwinSnapshot
 
 
 class UnitStage(str, Enum):
@@ -186,6 +193,8 @@ class RuntimeExecutionGate(Protocol):
         kind: str,
     ) -> bool: ...
 
+    def install_transfer_allowed(self, unit_id: str, resource: str) -> bool: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _Durations:
@@ -269,6 +278,8 @@ class DualLineRuntime:
         self.robot_transport_overlap_s = 0.0
         self.s1_s2a_dual_occupancy_s = 0.0
         self.preposition_seconds = {resource: 0.0 for resource in ("ARM1", "ARM2", "ARM3")}
+        self.arm3_inspection_reservation_wait_s = 0.0
+        self._arm3_reservation_blocked = False
         self.maximum_wip = 0
         # Disturbance flexibility: fault injection, recovery planning and
         # resource isolation.  Holds no MuJoCo reference, so the logical runtime
@@ -513,6 +524,18 @@ class DualLineRuntime:
 
         return self.faults.resource_available(resource)
 
+    def recovery_operation_authorized(self, resource: str, unit_id: str, kind: str) -> bool:
+        """Authorize only the physical operation created by an applied rollback."""
+
+        work = self._rework_effort.get(str(unit_id))
+        if work is None:
+            return False
+        expected = {
+            "LOCAL_BRAZING_REWORK": ("ARM2", "DISPENSING"),
+            "FIN_REINSTALL": ("ARM3", "INSTALL_FIN"),
+        }.get(work.strategy)
+        return expected == (str(resource).upper(), str(kind).upper())
+
     def _start(self, resource: str, unit: V2UnitState, kind: str, duration: float) -> bool:
         """Begin an operation, or decline when the resource is unavailable.
 
@@ -590,7 +613,9 @@ class DualLineRuntime:
             (
                 unit
                 for unit in self.units.values()
-                if unit.stage in allowed and not self._unit_waiting_for_manual_review(unit.unit_id)
+                if unit.stage in allowed
+                and not self._unit_waiting_for_manual_review(unit.unit_id)
+                and not self._unit_waiting_for_recovery_transport(unit.unit_id)
             ),
             key=lambda unit: (
                 -int(unit.urgent),
@@ -604,6 +629,67 @@ class DualLineRuntime:
     def _unit_waiting_for_manual_review(self, unit_id: str) -> bool:
         return any(
             plan.unit_id == unit_id and plan.status is RecoveryStatus.MANUAL_REVIEW
+            for plan in self.faults.plans.values()
+        )
+
+    def _unit_waiting_for_recovery_transport(self, unit_id: str) -> bool:
+        """Keep a quality-fault unit out of normal dispatch until it returns.
+
+        A detected defect can coincide with a full S2A or S3B station.  The
+        recovery planner must wait for that physical reservation rather than
+        allowing the unit's old stage (``MATERIAL_INSPECTION`` or
+        ``PRE_BRAZE_INSPECTION``) to be dispatched as a fresh forward task.
+        """
+
+        return any(
+            plan.unit_id == unit_id
+            and plan.status is RecoveryStatus.RUNNING
+            and not plan.rollback_applied
+            and plan.strategy in {"LOCAL_BRAZING_REWORK", "FIN_REINSTALL"}
+            for plan in self.faults.plans.values()
+        )
+
+    def _s2a_inspection_clearance_required(self) -> bool:
+        """Keep S2A clear until the pallet at S2B passes material inspection.
+
+        S2A is both the forward dispensing station and the only physical
+        return destination for local brazing rework.  Releasing the next S1
+        pallet while the previous pallet is still being inspected can fill
+        S2A just before a defect is detected, creating a circular wait.  The
+        reservation is released in the same dispatch cycle that inspection
+        succeeds, so a passing pallet does not introduce an extra idle delay.
+        """
+
+        for unit in self.units.values():
+            if unit.tray_id is None:
+                continue
+            tray = self.flow.get(unit.tray_id)
+            if tray.owner is TrayOwner.S2B and unit.stage in {
+                UnitStage.WAITING_S2B,
+                UnitStage.MATERIAL_INSPECTION,
+            }:
+                return True
+
+        # Keep the explicit fault-plan checks as a fail-safe for externally
+        # injected detections whose stage update may arrive one tick later.
+        for defect in self.faults.physical_faults.values():
+            if defect.status not in {"MANIFESTED", "DETECTED"}:
+                continue
+            if defect.fault_type.value not in {"BRAZING_MISSING", "BRAZING_PATH_DEVIATION"}:
+                continue
+            unit = self.units.get(defect.unit_id)
+            if unit is None or unit.tray_id is None:
+                continue
+            if self.flow.get(unit.tray_id).owner is TrayOwner.S2B:
+                return True
+        return any(
+            plan.strategy == "LOCAL_BRAZING_REWORK"
+            and plan.status is RecoveryStatus.RUNNING
+            and not plan.rollback_applied
+            and plan.unit_id is not None
+            and self.units.get(plan.unit_id) is not None
+            and self.units[plan.unit_id].tray_id is not None
+            and self.flow.get(self.units[plan.unit_id].tray_id).owner is TrayOwner.S2B
             for plan in self.faults.plans.values()
         )
 
@@ -622,6 +708,115 @@ class DualLineRuntime:
         if self._execution_gate is None:
             return True
         return bool(self._execution_gate.owner_available(owner))
+
+    def _install_transfer_allowed(self, unit: V2UnitState) -> bool:
+        if (
+            unit.branch is InstallBranch.ARM3_B
+            and not self.faults.arm3_rework_station_available_to(unit.unit_id)
+        ):
+            return False
+        if self._execution_gate is None or unit.branch is None:
+            return True
+        callback = getattr(self._execution_gate, "install_transfer_allowed", None)
+        if callback is None:
+            return True
+        resource = "ARM1" if unit.branch is InstallBranch.ARM1_A else "ARM3"
+        return bool(callback(unit.unit_id, resource))
+
+    def _estimated_tray_ready_in(self, unit: V2UnitState, owner: TrayOwner) -> float:
+        if unit.tray_id is None:
+            return float("inf")
+        if self._execution_gate is None or self._tray_ready(unit):
+            return 0.0
+        callback = getattr(self._execution_gate, "estimated_tray_ready_in", None)
+        if callback is None:
+            # A gate without a forecast remains fail-safe: reserve immediately
+            # rather than allowing new Arm3 work to delay an incoming check.
+            return 0.0
+        estimate = float(callback(unit.tray_id, owner))
+        return estimate if isfinite(estimate) and estimate >= 0.0 else float("inf")
+
+    def arm3_inspection_windows(self) -> tuple[Arm3InspectionWindow, ...]:
+        """Predict Arm3 checks while preserving physical arrival authority."""
+
+        stage_specs = {
+            UnitStage.WAITING_S2B: (
+                "MATERIAL_INSPECTION",
+                TrayOwner.S2B,
+                self.durations.material_inspection,
+                "托盘预计到达S2B，预留Arm3钎料检测时间窗",
+            ),
+            UnitStage.MATERIAL_INSPECTION: (
+                "MATERIAL_INSPECTION",
+                TrayOwner.S2B,
+                self.durations.material_inspection,
+                "托盘正在进入S2B，预留Arm3钎料检测时间窗",
+            ),
+            UnitStage.WAITING_S4: (
+                "PRE_BRAZE_INSPECTION",
+                TrayOwner.S4,
+                self.durations.pre_braze_inspection,
+                "托盘预计到达S4，预留Arm3焊前检测时间窗",
+            ),
+            UnitStage.PRE_BRAZE_INSPECTION: (
+                "PRE_BRAZE_INSPECTION",
+                TrayOwner.S4,
+                self.durations.pre_braze_inspection,
+                "托盘正在进入S4，预留Arm3焊前检测时间窗",
+            ),
+        }
+        requests: list[InspectionWindowRequest] = []
+        candidates = self._waiting_units(*stage_specs)
+        for unit in candidates:
+            kind, owner, duration, reason = stage_specs[unit.stage]
+            incoming_stage = unit.stage in {UnitStage.WAITING_S2B, UnitStage.WAITING_S4}
+            if incoming_stage and not (
+                self._owner_free(owner) and self._target_available(owner)
+            ):
+                # A pallet blocked outside the inspection station is not an
+                # actionable Arm3 reservation. Reserving it immediately can
+                # prevent Arm3 from finishing the S3B pallet that must leave
+                # before a defective S4 pallet can return for rework, creating
+                # a closed wait cycle. Once the destination is physically
+                # available this candidate reappears and regains inspection
+                # priority at the next non-preemptible-fin boundary.
+                continue
+            active = self.operations.get("ARM3")
+            if active is not None and active.unit_id == unit.unit_id and active.kind == kind:
+                continue
+            ready_in = self._estimated_tray_ready_in(unit, owner)
+            requests.append(
+                InspectionWindowRequest(
+                    unit_id=unit.unit_id,
+                    inspection_kind=kind,
+                    source_stage=unit.stage.value,
+                    ready_at=self.sim_time + ready_in,
+                    duration_s=duration,
+                    reason_zh=reason,
+                )
+            )
+        return schedule_arm3_inspection_windows(
+            requests,
+            arm3_available_at=self._resource_available_at("ARM3"),
+        )
+
+    def _arm3_fin_fits_before_inspection(self, unit: V2UnitState) -> bool:
+        committed_callback = (
+            None
+            if self._execution_gate is None
+            else getattr(self._execution_gate, "arm3_fin_operation_committed", None)
+        )
+        if committed_callback is not None and committed_callback(unit.unit_id):
+            # The unified DAG grants one fin at a time. Once that boundary has
+            # been crossed, physical execution must finish the authorized fin;
+            # the next scheduler boundary will give inspection first priority.
+            return True
+        finish_at = self.sim_time + self.durations.arm3_fin
+        for window in self.arm3_inspection_windows():
+            if self.sim_time < window.end_at and finish_at > window.start_at:
+                self._arm3_reservation_blocked = True
+                return False
+        return True
 
     def _arm1_tail_fin_candidate(self) -> V2UnitState | None:
         """Return future Arm1 fin work once the accepted base wave is complete.
@@ -655,6 +850,40 @@ class DualLineRuntime:
             (unit for unit in candidates if unit.branch is InstallBranch.ARM1_A),
             next(iter(candidates), None),
         )
+
+    def next_s1_base_ready_in(self) -> float:
+        """Forecast the next admitted blank without reserving Arm1.
+
+        The logical S1 owner changes before the authored carrier has always
+        settled.  Looking only at immediately executable PICK_BASE tasks can
+        therefore miss a blank that will arrive as soon as the current S1
+        tray advances to a clearing S2A lane.  The estimate is advisory and
+        never moves a tray or bypasses ownership checks.
+        """
+
+        base_loading = self._waiting_units(UnitStage.BASE_LOADING)
+        for unit in base_loading:
+            if self._tray_ready(unit):
+                return 0.0
+            return self._estimated_tray_ready_in(unit, TrayOwner.S1)
+        if not self._waiting_units(UnitStage.QUEUED):
+            return float("inf")
+        s1_blockers = self._waiting_units(UnitStage.WAITING_S2A)
+        if not s1_blockers:
+            return 0.0 if self._owner_free(TrayOwner.S1) else float("inf")
+        if self._owner_free(TrayOwner.S2A) and self._target_available(TrayOwner.S2A):
+            return 0.0
+        # S2A may already be logically free while its previous tray is still
+        # completing the authored S2A->S2B rail.  Include that measured
+        # remainder rather than treating the next S1 blank as unavailable.
+        downstream = self._waiting_units(UnitStage.WAITING_S2B, UnitStage.MATERIAL_INSPECTION)
+        estimates = [
+            self._estimated_tray_ready_in(unit, TrayOwner.S2B)
+            for unit in downstream
+            if unit.tray_id is not None
+        ]
+        finite = [value for value in estimates if isfinite(value)]
+        return min(finite, default=float("inf"))
 
     def prepositioning_snapshot(self) -> dict[str, dict[str, str]]:
         """Return safe robot approach intents while the target tray is moving.
@@ -739,6 +968,24 @@ class DualLineRuntime:
             if resource in self.operations or not self._resource_online(resource):
                 continue
             if resource in intents:
+                continue
+            if (
+                resource == "ARM1"
+                and operation_kind == "INSTALL_FIN"
+                and self.next_s1_base_ready_in() <= 12.0
+                and not bool(
+                    getattr(
+                        self._execution_gate,
+                        "arm1_fin_preposition_allowed",
+                        lambda: False,
+                    )()
+                )
+            ):
+                # Standalone V2 keeps the conservative S1 lookahead.  Under
+                # the unified facade, the single DAG authority may explicitly
+                # release the fin wave even while another admitted blank is
+                # visible; in that case physical prepositioning must follow
+                # the scheduler instead of re-applying a conflicting rule.
                 continue
             physically_ready_work = any(
                 unit.tray_id is not None
@@ -860,7 +1107,26 @@ class DualLineRuntime:
             }
         )
 
+    def _arm3_downstream_blocking_estimate(self) -> float:
+        """Estimate congestion Arm3 would feed into the shared merge/S4 path."""
+
+        congested = sum(
+            unit.stage
+            in {
+                UnitStage.WAITING_MERGE,
+                UnitStage.MERGING,
+                UnitStage.WAITING_S4,
+                UnitStage.PRE_BRAZE_INSPECTION,
+                UnitStage.WAITING_BUFFER,
+            }
+            for unit in self.units.values()
+        )
+        return congested * (self.durations.merge + self.durations.pre_braze_inspection)
+
     def _assign_branch(self, unit: V2UnitState) -> InstallBranch:
+        camera_review_required = self._camera_review_reason(unit) is not None
+        arm3_fault_demonstration_required = self.faults.claim_arm3_fin_install(unit.unit_id)
+        force_arm3 = camera_review_required or arm3_fault_demonstration_required
         request = InstallRequest(
             tray_id=unit.tray_id or unit.unit_id,
             fin_count=unit.fin_count,
@@ -868,16 +1134,9 @@ class DualLineRuntime:
             due_at=unit.due_at,
             priority=unit.priority,
         )
-        arm3_reservations: tuple[tuple[float, float], ...] = ()
-        if self._waiting_units(UnitStage.WAITING_S2B, UnitStage.WAITING_S4):
-            arm3_reservations = (
-                (
-                    self._resource_available_at("ARM3"),
-                    self._resource_available_at("ARM3")
-                    + self.durations.material_inspection
-                    + self.durations.pre_braze_inspection,
-                ),
-            )
+        arm3_reservations = tuple(
+            (window.start_at, window.end_at) for window in self.arm3_inspection_windows()
+        )
         decision = self.dispatcher.assign(
             request,
             (
@@ -886,6 +1145,7 @@ class DualLineRuntime:
                     self._resource_available_at("ARM1"),
                     self.durations.arm1_fin,
                     queued_fins=self._queued_fins(InstallBranch.ARM1_A, excluding=unit.unit_id),
+                    enabled=self._resource_online("ARM1") and not force_arm3,
                 ),
                 InstallResourceState(
                     InstallBranch.ARM3_B,
@@ -893,24 +1153,15 @@ class DualLineRuntime:
                     self.durations.arm3_fin,
                     queued_fins=self._queued_fins(InstallBranch.ARM3_B, excluding=unit.unit_id),
                     inspection_reservations=arm3_reservations,
+                    downstream_blocking_s=self._arm3_downstream_blocking_estimate(),
+                    enabled=(
+                        self._resource_online("ARM3")
+                        and self.faults.arm3_rework_station_available_to(unit.unit_id)
+                    ),
                 ),
             ),
         )
         selected_branch = decision.branch
-        preferred_callback = (
-            None
-            if self._execution_gate is None
-            else getattr(self._execution_gate, "preferred_install_resource", None)
-        )
-        preferred_resource = None if preferred_callback is None else preferred_callback(unit.unit_id)
-        preferred_branch = {
-            "ARM1": InstallBranch.ARM1_A,
-            "ARM3": InstallBranch.ARM3_B,
-        }.get(str(preferred_resource).upper())
-        if preferred_branch is not None:
-            selected_branch = preferred_branch
-        if self._camera_review_reason(unit) is not None:
-            selected_branch = InstallBranch.ARM3_B
         unit.branch = selected_branch
         self.install_branch_counts[selected_branch] += 1
         selected_candidate = decision.candidates[selected_branch]
@@ -920,11 +1171,21 @@ class DualLineRuntime:
             tray_id=unit.tray_id,
             branch=selected_branch.value,
             explanation_zh=(
-                decision.explanation_zh
-                if selected_branch is decision.branch
-                else f"统一运行时按全局DAG、交期与资源占用选择{selected_branch.value}"
+                "高可靠路线要求Arm3在同一支路完成安装与近景复核"
+                if camera_review_required
+                else (
+                    "故障验收要求由Arm3执行本次翅片安装"
+                    if arm3_fault_demonstration_required
+                    else decision.explanation_zh
+                )
             ),
             selected_cost=selected_candidate.cost,
+            arm3_activated=decision.arm3_activated,
+            arm3_expected_gain_s=decision.arm3_expected_gain_s,
+            arm3_inspection_penalty_s=decision.arm3_inspection_penalty_s,
+            arm3_blocking_penalty_s=decision.arm3_blocking_penalty_s,
+            arm3_net_gain_s=decision.arm3_net_gain_s,
+            activation_reason_zh=decision.activation_reason_zh,
             candidates=[
                 {
                     "resource_id": candidate.branch.value,
@@ -969,6 +1230,11 @@ class DualLineRuntime:
 
         replacement = InstallBranch.ARM3_B if unit.branch is InstallBranch.ARM1_A else InstallBranch.ARM1_A
         replacement_owner = branch_owners[replacement]
+        if (
+            replacement is InstallBranch.ARM3_B
+            and not self.faults.arm3_rework_station_available_to(unit.unit_id)
+        ):
+            return False
         if not (self._owner_free(replacement_owner) and self._target_available(replacement_owner)):
             return False
 
@@ -1251,7 +1517,8 @@ class DualLineRuntime:
         changed = False
         for unit in self._waiting_units(UnitStage.WAITING_S2A):
             if (
-                self._tray_ready(unit)
+                not self._s2a_inspection_clearance_required()
+                and self._tray_ready(unit)
                 and self._owner_free(TrayOwner.S2A)
                 and self._target_available(TrayOwner.S2A)
             ):
@@ -1277,6 +1544,7 @@ class DualLineRuntime:
         for unit in self._waiting_units(UnitStage.WAITING_BRAZING_REVIEW):
             if (
                 unit.branch is InstallBranch.ARM3_B
+                and self._install_transfer_allowed(unit)
                 and self._tray_ready(unit)
                 and self._owner_free(TrayOwner.INSTALL_B)
                 and self._target_available(TrayOwner.INSTALL_B)
@@ -1293,7 +1561,8 @@ class DualLineRuntime:
         for unit in self._waiting_units(UnitStage.WAITING_INSTALL):
             self._reroute_blocked_install(unit)
             if (
-                unit.branch is InstallBranch.ARM3_B
+                self._install_transfer_allowed(unit)
+                and unit.branch is InstallBranch.ARM3_B
                 and unit.tray_id is not None
                 and self._tray_ready(unit)
                 and self.flow.get(unit.tray_id).owner is TrayOwner.INSTALL_B
@@ -1303,6 +1572,7 @@ class DualLineRuntime:
                 break
             if (
                 self._tray_ready(unit)
+                and self._install_transfer_allowed(unit)
                 and unit.branch is InstallBranch.ARM1_A
                 and self._owner_free(TrayOwner.INSTALL_A)
                 and self._target_available(TrayOwner.INSTALL_A)
@@ -1318,6 +1588,7 @@ class DualLineRuntime:
                 break
             if (
                 self._tray_ready(unit)
+                and self._install_transfer_allowed(unit)
                 and unit.branch is InstallBranch.ARM3_B
                 and self._owner_free(TrayOwner.INSTALL_B)
                 and self._target_available(TrayOwner.INSTALL_B)
@@ -1343,6 +1614,38 @@ class DualLineRuntime:
             if not self._tray_ready(unit):
                 continue
             owner = self.flow.get(unit.tray_id).owner
+            if owner is TrayOwner.S2B and unit.branch is InstallBranch.ARM3_B:
+                # A completed S3B pallet can temporarily yield to S2B when an
+                # S4 fin correction needs Arm3's station.  Keep its completed
+                # fin state and WAITING_MERGE stage intact; once every active
+                # FIN_REINSTALL plan has passed reinspection, return it along
+                # the same branch rail without replaying any process task.
+                recovery_claims_s3b = any(
+                    plan.strategy == "FIN_REINSTALL"
+                    and plan.status is RecoveryStatus.RUNNING
+                    for plan in self.faults.plans.values()
+                )
+                if recovery_claims_s3b:
+                    continue
+                if self._owner_free(TrayOwner.INSTALL_B) and self._target_available(
+                    TrayOwner.INSTALL_B
+                ):
+                    self._handoff(
+                        unit,
+                        TrayOwner.S2B,
+                        TrayOwner.INSTALL_B,
+                        TrayPhase.MERGE_WAIT,
+                    )
+                    self._event(
+                        "RECOVERY_STATION_YIELD_COMPLETED",
+                        unit_id=unit.unit_id,
+                        tray_id=unit.tray_id,
+                        source=TrayOwner.S2B.value,
+                        target=TrayOwner.INSTALL_B.value,
+                    )
+                    changed = True
+                    break
+                continue
             wait_owner = (
                 TrayOwner.MERGE_A_WAIT if unit.branch is InstallBranch.ARM1_A else TrayOwner.MERGE_B_WAIT
             )
@@ -1502,7 +1805,7 @@ class DualLineRuntime:
                 and (unit.fins_installed < unit.fin_count or unit.rework_fin_index is not None)
                 and self._tray_ready(unit)
             ]
-            if install:
+            if install and self._arm3_fin_fits_before_inspection(install[0]):
                 changed |= self._start("ARM3", install[0], "INSTALL_FIN", self.durations.arm3_fin)
         if "OUTPUT" not in self.operations and self._resource_online("OUTPUT"):
             delivering = [
@@ -1858,7 +2161,10 @@ class DualLineRuntime:
             return self.snapshot()
         self._advance_operations(dt)
         self.furnace.update(self.sim_time)
+        self._arm3_reservation_blocked = False
         self._dispatch()
+        if self._arm3_reservation_blocked:
+            self.arm3_inspection_reservation_wait_s += dt
         prepositioning = self.prepositioning_snapshot()
         if prepositioning:
             self.robot_transport_overlap_s += dt
@@ -2023,6 +2329,12 @@ class DualLineRuntime:
             if unit.tray_id is not None:
                 owner = self.flow.get(unit.tray_id).owner
                 if plan.strategy == "LOCAL_BRAZING_REWORK" and owner is TrayOwner.S2B:
+                    # A camera can only report a defect after the pallet has
+                    # settled at S2B.  Keep this physical gate here as well so
+                    # an externally driven/manual detection cannot change the
+                    # logical owner while the carrier is still moving.
+                    if not self._tray_ready(unit):
+                        continue
                     if not (self._owner_free(TrayOwner.S2A) and self._target_available(TrayOwner.S2A)):
                         continue
                     self._handoff(
@@ -2039,6 +2351,12 @@ class DualLineRuntime:
                         target=TrayOwner.S2A.value,
                         strategy=plan.strategy,
                     )
+                elif plan.strategy == "LOCAL_BRAZING_REWORK":
+                    # The logical stage must never rewind without the carrier
+                    # handoff.  Keep the plan pending until S2B is the actual
+                    # owner again; normal dispatch is filtered above while it
+                    # waits for this reservation.
+                    continue
                 elif plan.strategy == "FIN_REINSTALL" and owner is TrayOwner.S4:
                     # Quality reseating is an Arm3 camera+gripper skill.  Keep
                     # the defective assembly intact at S4 until S3B is free,
@@ -2047,6 +2365,48 @@ class DualLineRuntime:
                     # to Arm1 and replay the normal magazine-pick sequence.
                     target_branch = InstallBranch.ARM3_B
                     target_owner = TrayOwner.INSTALL_B
+                    if not self._tray_ready(unit):
+                        continue
+                    if not self._owner_free(target_owner):
+                        blocker_tray = next(
+                            (
+                                tray
+                                for tray in self.flow.trays
+                                if tray.owner is target_owner and tray.unit_id != unit.unit_id
+                            ),
+                            None,
+                        )
+                        blocker = (
+                            None
+                            if blocker_tray is None or blocker_tray.unit_id is None
+                            else self.units.get(blocker_tray.unit_id)
+                        )
+                        if (
+                            blocker is not None
+                            and blocker.stage is UnitStage.WAITING_MERGE
+                            and blocker.branch is InstallBranch.ARM3_B
+                            and blocker.fins_installed >= blocker.fin_count
+                            and blocker.rework_fin_index is None
+                            and self._tray_ready(blocker)
+                            and self._owner_free(TrayOwner.S2B)
+                            and self._target_available(TrayOwner.S2B)
+                        ):
+                            self._handoff(
+                                blocker,
+                                TrayOwner.INSTALL_B,
+                                TrayOwner.S2B,
+                                TrayPhase.MERGE_WAIT,
+                            )
+                            self._event(
+                                "RECOVERY_STATION_YIELD_STARTED",
+                                unit_id=blocker.unit_id,
+                                tray_id=blocker.tray_id,
+                                recovery_unit_id=unit.unit_id,
+                                source=TrayOwner.INSTALL_B.value,
+                                target=TrayOwner.S2B.value,
+                                reason_zh="S4翅片纠偏需要Arm3工位，已完工托盘沿原滑轨临时让路",
+                            )
+                        continue
                     if not (self._owner_free(target_owner) and self._target_available(target_owner)):
                         continue
                     previous_branch = unit.branch
@@ -2080,6 +2440,10 @@ class DualLineRuntime:
                         target=target_owner.value,
                         strategy=plan.strategy,
                     )
+                elif plan.strategy == "FIN_REINSTALL":
+                    # As above, do not turn a failed S4 inspection into a
+                    # state-only rewind when the S3B return corridor is busy.
+                    continue
             # Cancel any in-flight operation for this unit before rewinding, so a
             # completing operation cannot advance a unit that is being redone.
             for resource, operation in list(self.operations.items()):
@@ -2226,10 +2590,36 @@ class DualLineRuntime:
         self.robot_transport_overlap_s = 0.0
         self.s1_s2a_dual_occupancy_s = 0.0
         self.preposition_seconds = {resource: 0.0 for resource in ("ARM1", "ARM2", "ARM3")}
+        self.arm3_inspection_reservation_wait_s = 0.0
+        self._arm3_reservation_blocked = False
         self.maximum_wip = 0
+        self.dispatcher.reset()
         self.faults.reset()
         self.camera_coordination.reset()
         self._rework_effort.clear()
+
+    def capture_digital_twin(self, *, emit_event: bool = False) -> DigitalTwinSnapshot:
+        """Capture an immutable shadow view without changing V2 execution."""
+
+        state = self.snapshot()
+        snapshot = DigitalTwinSnapshot.from_mapping(
+            state,
+            source_name="DualLineRuntime",
+            captured_at=float(state.get("sim_time", 0.0)),
+            plan_version=len(self.events),
+        )
+        if emit_event:
+            encoded = DecisionEvent(
+                event_type=EventType.STATE_SNAPSHOT_CAPTURED,
+                sim_time=snapshot.sim_time,
+                source="DualLineRuntime",
+                plan_version=snapshot.plan_version,
+                trigger="EXPLICIT_CAPTURE",
+                payload={"fingerprint": snapshot.fingerprint},
+            ).as_dict()
+            encoded["type"] = encoded["event_type"]
+            self.events.append(encoded)
+        return snapshot
 
     def snapshot(self) -> dict[str, Any]:
         completed_orders = [
@@ -2284,6 +2674,8 @@ class DualLineRuntime:
                 for resource, operation in sorted(self.operations.items())
             },
             "prepositioning": self.prepositioning_snapshot(),
+            "arm3_inspection_windows": [window.as_dict() for window in self.arm3_inspection_windows()],
+            "rolling_horizon_scheduler": self.dispatcher.snapshot(),
             "install_branch_counts": {
                 branch.value: count for branch, count in self.install_branch_counts.items() if count > 0
             },
@@ -2303,6 +2695,10 @@ class DualLineRuntime:
                 "upstream_work_during_brazing_s": round(self.upstream_work_during_brazing_s, 6),
                 "robot_transport_overlap_s": round(self.robot_transport_overlap_s, 6),
                 "s1_s2a_dual_occupancy_s": round(self.s1_s2a_dual_occupancy_s, 6),
+                "arm3_inspection_reservation_wait_s": round(
+                    self.arm3_inspection_reservation_wait_s,
+                    6,
+                ),
                 "preposition_seconds": {
                     resource: round(seconds, 6) for resource, seconds in self.preposition_seconds.items()
                 },

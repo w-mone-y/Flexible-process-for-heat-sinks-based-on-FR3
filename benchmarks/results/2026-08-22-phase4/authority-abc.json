@@ -1,0 +1,72 @@
+{
+  "benchmark": "TWINSHIELD_RH_V2_AUTHORITY_COMPARISON",
+  "comparison": {
+    "arm1_idle_improvement_pct": 0.047214,
+    "both_completed": true,
+    "makespan_improvement_pct": 0.029833,
+    "throughput_improvement_pct": 0.029842
+  },
+  "inputs": {
+    "dt": 0.05,
+    "max_sim_time": 2000.0,
+    "modes": [
+      "AUTHORITY",
+      "FALLBACK"
+    ],
+    "orders": [
+      "A",
+      "B",
+      "C"
+    ],
+    "unit_count": 3
+  },
+  "runs": {
+    "AUTHORITY": {
+      "arm1_idle_s": 105.85,
+      "arm1_utilization": 0.36824828,
+      "assignment_count": 92,
+      "authority_count": 86,
+      "completed": true,
+      "decision_latency_ms": {
+        "maximum": 30.031292,
+        "p50": 18.462667,
+        "p95": 28.263792,
+        "sample_count": 93
+      },
+      "fallback_count": 32,
+      "last_error": "",
+      "last_fallback_reason": "",
+      "maximum_parallel_tasks": 3,
+      "mode": "AUTHORITY",
+      "multi_arm_overlap_s": 52.2,
+      "simulation_seconds": 167.55,
+      "throughput_per_sim_hour": 64.458371,
+      "unit_count": 3,
+      "wall_seconds": 21.985618
+    },
+    "FALLBACK": {
+      "arm1_idle_s": 105.9,
+      "arm1_utilization": 0.36813842,
+      "assignment_count": 92,
+      "authority_count": 0,
+      "completed": true,
+      "decision_latency_ms": {
+        "maximum": 0.0,
+        "p50": 0.0,
+        "p95": 0.0,
+        "sample_count": 0
+      },
+      "fallback_count": 0,
+      "last_error": "",
+      "last_fallback_reason": "",
+      "maximum_parallel_tasks": 3,
+      "mode": "FALLBACK",
+      "multi_arm_overlap_s": 52.2,
+      "simulation_seconds": 167.6,
+      "throughput_per_sim_hour": 64.439141,
+      "unit_count": 3,
+      "wall_seconds": 20.092375
+    }
+  },
+  "schema_version": 1
+}

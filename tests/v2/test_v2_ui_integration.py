@@ -9,7 +9,7 @@ from brazing_sim.dual_line.application import V2BrazingApplication, V2ControlSur
 from brazing_sim.dual_line.cli import parse_args
 from brazing_sim.dual_line.presentation import V2StatePresenter
 from brazing_sim.api import validate_http_command
-from brazing_sim.ui import line_ui_profile
+from brazing_sim.ui import initial_control_panel_size, line_ui_profile
 
 
 def test_v2_viewer_starts_idle_and_only_explicit_headless_orders_are_submitted() -> None:
@@ -18,6 +18,14 @@ def test_v2_viewer_starts_idle_and_only_explicit_headless_orders_are_submitted()
 
     assert viewer.order_presets == ()
     assert explicit_headless.order_presets == ("A", "B")
+
+
+def test_v2_cli_exposes_twinshield_authority_and_operator_rollback_modes() -> None:
+    default = parse_args(["--headless"])
+    rollback = parse_args(["--headless", "--twinshield-mode", "fallback"])
+
+    assert default.twinshield_mode == "AUTHORITY"
+    assert rollback.twinshield_mode == "FALLBACK"
 
 
 def test_v2_reuses_the_full_v1_console_with_dual_branch_controls() -> None:
@@ -50,6 +58,16 @@ def test_v2_reuses_the_full_v1_console_with_dual_branch_controls() -> None:
     ]
     assert profile.station_titles["S3A_ARM1_INSTALL"] == "S3A Arm1 翅片安装"
     assert profile.station_titles["S3B_ARM3_INSTALL"] == "S3B Arm3 翅片安装"
+
+
+def test_control_panel_uses_nearly_the_full_available_desktop_width() -> None:
+    """The initial console should expose horizontal content without left-right scrolling."""
+
+    assert initial_control_panel_size(1512, 982) == (1451, 785)
+    width, height = initial_control_panel_size(1920, 1080)
+    assert (width, height) == (1843, 850)
+    assert width <= 1920
+    assert height <= 1080
 
 
 def test_v2_state_presenter_matches_the_shared_ui_contract_without_fake_capabilities() -> None:
@@ -247,6 +265,8 @@ def test_v2_application_publishes_real_carrier_transport_to_the_shared_ui() -> N
         assert state["arms"]["arm1"]["status"] == "prepositioning"
         assert state["arms"]["arm1"]["preposition_for"] == "BASE_LOADING"
         assert state["ui_capabilities"]["orders"]
+        assert state["twinshield"]["mode"] == "AUTHORITY"
+        assert "decision_latency_ms" in state["twinshield"]
     finally:
         application.close()
 

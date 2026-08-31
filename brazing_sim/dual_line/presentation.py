@@ -989,6 +989,11 @@ class V2StatePresenter:
                 "candidates": scheduler_candidates,
                 "blocked_candidates": scheduler_blocked,
             },
+            "twinshield": (
+                dict(authority.get("twinshield", {}))
+                if isinstance(authority.get("twinshield"), Mapping)
+                else {}
+            ),
             "tasks": tasks,
             "resources_v2": resources_v2,
             # V2 enforces exclusivity through single tray ownership rather than a

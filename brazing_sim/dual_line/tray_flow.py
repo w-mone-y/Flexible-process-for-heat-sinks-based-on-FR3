@@ -72,7 +72,12 @@ _ALLOWED_OWNER_TRANSITIONS: dict[TrayOwner, frozenset[TrayOwner]] = {
     # ownership-checked physical handoffs, never a teleport or free-joint write.
     TrayOwner.S2B: frozenset({TrayOwner.S2A, TrayOwner.INSTALL_A, TrayOwner.INSTALL_B}),
     TrayOwner.INSTALL_A: frozenset({TrayOwner.MERGE_A_WAIT}),
-    TrayOwner.INSTALL_B: frozenset({TrayOwner.MERGE_B_WAIT}),
+    # S3B normally advances to the south merge wait.  A camera-confirmed S4
+    # fin defect may need the shared Arm3 correction station while a completed
+    # healthy pallet is still parked there.  That blocker is allowed to yield
+    # backward to S2B on the same physical branch rail, then return after the
+    # correction loop releases S3B.
+    TrayOwner.INSTALL_B: frozenset({TrayOwner.S2B, TrayOwner.MERGE_B_WAIT}),
     TrayOwner.MERGE_A_WAIT: frozenset({TrayOwner.MERGE}),
     TrayOwner.MERGE_B_WAIT: frozenset({TrayOwner.MERGE}),
     TrayOwner.MERGE: frozenset({TrayOwner.S4}),

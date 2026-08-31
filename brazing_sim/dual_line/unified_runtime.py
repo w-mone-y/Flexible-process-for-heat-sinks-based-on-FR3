@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..execution import PhysicalCompletionEvidence, SkillExecutionResult, SkillRegistry
 from ..flexible import ProcessPlan, build_inline_plan
 from ..manufacturing_runtime import ManufacturingRuntime
+from ..manufacturing_config import load_scheduler_config
+from ..paths import CONFIG_DIR
 from ..planning import ManufacturingTask, TaskType, V2_DUAL_INSTALL_PROFILE
-from ..scheduling import ResourceStatus
+from ..scheduling import Arm1ToolPolicyConfig, ResourceStatus
 from .dispatch import InstallBranch
 from .furnace import FurnacePhase
 from .runtime import DualLineRuntime, RuntimeExecutionGate, UnitStage
@@ -172,6 +174,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         self._task_permits.clear()
         self._tasks.clear()
 
+    def task_ids_for_operation(self, unit_id: str, kind: str) -> tuple[str, ...]:
+        """Return logical tasks currently authorizing one physical operation."""
+
+        return tuple(self._permits.get((str(unit_id), str(kind).upper()), {}))
+
     def _permit_completed(
         self,
         task_id: str,
@@ -237,6 +244,54 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             return True
         return self.physical_gate.owner_available(owner)
 
+    def estimated_tray_ready_in(self, tray_id: str, owner: TrayOwner) -> float:
+        if self.physical_gate is None:
+            return 0.0
+        callback = getattr(self.physical_gate, "estimated_tray_ready_in", None)
+        return 0.0 if callback is None else float(callback(tray_id, owner))
+
+    def next_s1_base_ready_in(self) -> float:
+        """Expose the physical S1 lookahead to the single DAG authority."""
+
+        return float(self.runtime.next_s1_base_ready_in())
+
+    def install_transfer_allowed(self, unit_id: str, resource: str) -> bool:
+        """Keep an Arm1 pallet at S2B until the tool policy selects fin work."""
+
+        if str(resource).upper() != "ARM1" or self.manufacturing_runtime is None:
+            return True
+        policy = self.manufacturing_runtime.arm1_tool_policy.snapshot()
+        if str(policy.get("selected_action", "")) in {
+            "SWITCH_GRIPPER",
+            "CONTINUE_FIN_UNIT",
+        }:
+            return True
+        # CONFIGURE_COMB is the DAG's explicit commitment to this install
+        # unit. Waiting for the subsequent PICK_FIN node before moving the
+        # pallet creates a cycle: PICK_FIN cannot become READY until the
+        # pallet reaches S3A, while S2B blocks every upstream base. Allow the
+        # logistics transfer now; Arm1 contact still requires its own later
+        # physical permit and tool-policy decision.
+        upstream_blocked = not self.runtime._owner_free(TrayOwner.S2A)
+        recovery_reroute = not self.runtime.faults.arm3_rework_station_available_to(unit_id)
+        return upstream_blocked and recovery_reroute and any(
+            task.unit_id == str(unit_id)
+            and task.task_type is TaskType.CONFIGURE_COMB
+            and task.status.value in {"RUNNING", "SUCCEEDED"}
+            for task in self.manufacturing_runtime.graph
+        )
+
+    def arm1_fin_preposition_allowed(self) -> bool:
+        """Follow the unified tool decision at a non-contact motion boundary."""
+
+        if self.manufacturing_runtime is None:
+            return False
+        policy = self.manufacturing_runtime.arm1_tool_policy.snapshot()
+        return str(policy.get("selected_action", "")) in {
+            "SWITCH_GRIPPER",
+            "CONTINUE_FIN_UNIT",
+        }
+
     def operation_complete(self, resource: str, unit_id: str, kind: str) -> bool:
         if self.physical_gate is None:
             return True
@@ -291,6 +346,8 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
                 key_kind == kind and holders for (_unit, key_kind), holders in self._permits.items()
             )
         if not permitted:
+            permitted = self.runtime.recovery_operation_authorized(resource, unit_id, kind)
+        if not permitted:
             return False
         callback = (
             None
@@ -316,11 +373,11 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             return True
         return any(unit_id in entry.admitted_unit_ids for entry in self.manufacturing_runtime.orders.values())
 
-    def preferred_install_resource(self, unit_id: str) -> str | None:
-        """Return the resource selected by the global DAG scheduler's OR branch."""
+    def arm3_fin_operation_committed(self, unit_id: str) -> bool:
+        """Whether the global DAG has authorized this exact Arm3 fin action."""
 
-        resources = sorted(set(self._permits.get((str(unit_id), "INSTALL_FIN"), {}).values()))
-        return next((item for item in resources if item in {"ARM1", "ARM3"}), None)
+        holders = self._permits.get((str(unit_id), "INSTALL_FIN"), {})
+        return "ARM3" in set(holders.values())
 
     def _event(
         self,
@@ -499,6 +556,7 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             unit = self.runtime.units.get(task.unit_id)
             physically_at_s2b = bool(
                 unit is not None
+                and not self.runtime._unit_waiting_for_recovery_transport(task.unit_id)
                 and (
                     unit.stage is UnitStage.MATERIAL_INSPECTION
                     or self._event(
@@ -591,7 +649,9 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
         if task.task_type is TaskType.INSPECT_FINS:
             unit = self.runtime.units.get(task.unit_id)
             allowed = bool(
-                unit is not None and _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.PRE_BRAZE_INSPECTION]
+                unit is not None
+                and not self.runtime._unit_waiting_for_recovery_transport(task.unit_id)
+                and _STAGE_RANK[unit.stage] >= _STAGE_RANK[UnitStage.PRE_BRAZE_INSPECTION]
             )
             return allowed, ("" if allowed else "等待托盘完成合流并到达S4")
         if task.task_type is TaskType.REVIEW_BRAZING_CLOSEUP:
@@ -660,20 +720,37 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
 class UnifiedV2Runtime:
     """Compatibility facade: one manufacturing authority, one V2 physical adapter."""
 
-    def __init__(self, *, fast: bool = False) -> None:
+    def __init__(self, *, fast: bool = False, twinshield_mode: str = "AUTHORITY") -> None:
         self.physical_runtime = DualLineRuntime(fast=fast)
         self.bridge = V2PhysicalExecutionBridge(self.physical_runtime)
+        self._physical_event_cursor = 0
         self.physical_runtime.set_execution_gate(self.bridge)
+        scheduler_config = load_scheduler_config(CONFIG_DIR / "scheduler.yaml")
+        scheduler_config = replace(
+            scheduler_config,
+            arm1_tool_policy=Arm1ToolPolicyConfig(
+                # Six is only the admitted-WIP safety ceiling.  The policy
+                # derives the actual first wave from the two executable fin
+                # branches plus one upstream buffer (currently three bases).
+                max_base_microbatch=6,
+                lookahead_seconds=scheduler_config.arm1_tool_policy.lookahead_seconds,
+                starvation_seconds=scheduler_config.arm1_tool_policy.starvation_seconds,
+                drain_admitted_base_wave=True,
+            ),
+        )
         self.manufacturing_runtime = ManufacturingRuntime(
             scheduler_mode="dynamic",
+            scheduler_config=scheduler_config,
             skill_registry=self.bridge.build_registry(),
             context=self.bridge,
             max_wip_units=6,
+            enable_arm1_tool_policy=True,
             camera_coordination=True,
             enable_motion_planning=True,
             execution_profile=V2_DUAL_INSTALL_PROFILE,
             dispatch_guard=self.bridge.task_dispatch_allowed,
             external_batch_controller=True,
+            twinshield_mode=twinshield_mode,
         )
         self.bridge.manufacturing_runtime = self.manufacturing_runtime
         # Arm3's V2 head is a fixed camera + narrow-gripper composite, so fin
@@ -694,6 +771,31 @@ class UnifiedV2Runtime:
             if state.status is ResourceStatus.OFFLINE:
                 state.status = ResourceStatus.IDLE
                 state.fault_code = None
+
+    def _sync_physical_quality_cancellations(self) -> None:
+        """Requeue a DAG inspection canceled by a detected physical defect."""
+
+        events = self.physical_runtime.events
+        if self._physical_event_cursor > len(events):
+            self._physical_event_cursor = 0
+        new_events = events[self._physical_event_cursor :]
+        self._physical_event_cursor = len(events)
+        for event in new_events:
+            if (
+                event.get("type") != "OPERATION_CANCELLED"
+                or event.get("reason") != "QUALITY_DEFECT_DETECTED"
+            ):
+                continue
+            unit_id = str(event.get("unit_id") or "")
+            kind = str(event.get("kind") or "").upper()
+            if not unit_id or kind not in {"MATERIAL_INSPECTION", "PRE_BRAZE_INSPECTION"}:
+                continue
+            for task_id in self.bridge.task_ids_for_operation(unit_id, kind):
+                self.manufacturing_runtime.requeue_running_physical_task(
+                    task_id,
+                    now=float(event.get("time", self.physical_runtime.sim_time)),
+                    reason="物理检测发现质量缺陷，等待实体返工后重新检测",
+                )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.physical_runtime, name)
@@ -736,7 +838,12 @@ class UnifiedV2Runtime:
             dispatch=False,
         )
         self._sync_physical_resources()
-        entry = self.manufacturing_runtime.submit_plan(plan, urgent=urgent, now=self.sim_time)
+        entry = self.manufacturing_runtime.submit_plan(
+            plan,
+            urgent=urgent,
+            now=self.sim_time,
+            due_at=due_at,
+        )
         self._apply_v2_station_zones(entry.graph_task_ids)
         return order
 
@@ -851,6 +958,7 @@ class UnifiedV2Runtime:
         now = float(self.physical_runtime.sim_time)
         self.manufacturing_runtime.tick(now)
         self.physical_runtime.tick(dt)
+        self._sync_physical_quality_cancellations()
         self._sync_physical_install_branches()
         now = float(self.physical_runtime.sim_time)
         self.manufacturing_runtime.advance_active_skills(now)
@@ -873,6 +981,7 @@ class UnifiedV2Runtime:
         self.physical_runtime.reset()
         self.manufacturing_runtime.reset(self.sim_time)
         self.bridge.reset()
+        self._physical_event_cursor = 0
         self.physical_runtime.set_execution_gate(self.bridge)
 
     @staticmethod
@@ -988,6 +1097,40 @@ class UnifiedV2Runtime:
         state["physical_completion_gates"] = completion
         state["physical_execution_complete"] = bool(completion["passed"])
         return state
+
+    def compute_reference_plan(
+        self,
+        *,
+        time_limit_s: float = 2.0,
+        random_seed: int = 0,
+        emit_event: bool = True,
+    ):
+        """Expose the manufacturing authority's non-executing CP-SAT plan."""
+
+        return self.manufacturing_runtime.compute_reference_plan(
+            self.sim_time,
+            time_limit_s=time_limit_s,
+            random_seed=random_seed,
+            emit_event=emit_event,
+        )
+
+    def compute_shadow_schedule(
+        self,
+        *,
+        include_reference: bool = False,
+        time_limit_s: float | None = None,
+        random_seed: int = 0,
+        emit_event: bool = True,
+    ):
+        """Expose the non-authoritative TwinShield-RH proposal to UI/headless clients."""
+
+        return self.manufacturing_runtime.compute_shadow_schedule(
+            self.sim_time,
+            include_reference=include_reference,
+            time_limit_s=time_limit_s,
+            random_seed=random_seed,
+            emit_event=emit_event,
+        )
 
 
 __all__ = ["UnifiedV2Runtime", "V2PhysicalExecutionBridge"]

@@ -134,7 +134,12 @@ def load_scheduler_config(path: str | Path) -> SchedulerConfig:
         raw_arm1_policy,
         set(),
         "scheduler.arm1_tool_policy",
-        optional={"max_base_microbatch", "lookahead_seconds", "starvation_seconds"},
+        optional={
+            "max_base_microbatch",
+            "lookahead_seconds",
+            "starvation_seconds",
+            "drain_admitted_base_wave",
+        },
     )
     if "max_base_microbatch" in raw_arm1_policy:
         _expect(
@@ -142,6 +147,13 @@ def load_scheduler_config(path: str | Path) -> SchedulerConfig:
             raw_arm1_policy["max_base_microbatch"],
             int,
             "scheduler.arm1_tool_policy.max_base_microbatch",
+        )
+    if "drain_admitted_base_wave" in raw_arm1_policy:
+        _expect(
+            source,
+            raw_arm1_policy["drain_admitted_base_wave"],
+            bool,
+            "scheduler.arm1_tool_policy.drain_admitted_base_wave",
         )
     for key in ("lookahead_seconds", "starvation_seconds"):
         if key in raw_arm1_policy and (
@@ -158,6 +170,7 @@ def load_scheduler_config(path: str | Path) -> SchedulerConfig:
             max_base_microbatch=int(raw_arm1_policy.get("max_base_microbatch", 2)),
             lookahead_seconds=float(raw_arm1_policy.get("lookahead_seconds", 12.0)),
             starvation_seconds=float(raw_arm1_policy.get("starvation_seconds", 30.0)),
+            drain_admitted_base_wave=bool(raw_arm1_policy.get("drain_admitted_base_wave", False)),
         )
     except ValueError as exc:
         raise ManufacturingConfigError(f"{source} [scheduler.arm1_tool_policy]: {exc}") from exc

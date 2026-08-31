@@ -17,6 +17,41 @@ from brazing_sim.planning import TaskType
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class _LegacyBranchPreferenceGate:
+    """Compatibility gate whose obsolete preference must not own dispatch."""
+
+    def tray_ready(self, *_args) -> bool:
+        return True
+
+    def owner_available(self, *_args) -> bool:
+        return True
+
+    def operation_complete(self, *_args) -> bool:
+        return True
+
+    def operation_start_allowed(self, *_args) -> bool:
+        return True
+
+    def preferred_install_resource(self, *_args) -> str:
+        return "ARM3"
+
+
+def test_physical_branch_threshold_is_not_overridden_by_a_legacy_dag_preference() -> None:
+    runtime = DualLineRuntime(fast=True)
+    runtime.dispatcher.minimum_arm3_net_gain_s = 10_000.0
+    runtime.set_execution_gate(_LegacyBranchPreferenceGate())
+    order = runtime.submit_order("A", order_id="BRANCH_AUTHORITY")
+    unit = runtime.units[order.unit_ids[0]]
+
+    selected = runtime._assign_branch(unit)
+
+    assert selected is InstallBranch.ARM1_A
+    event = next(item for item in reversed(runtime.events) if item["type"] == "INSTALL_ASSIGNED")
+    assert event["branch"] == InstallBranch.ARM1_A.value
+    assert event["arm3_activated"] is False
+    assert runtime.snapshot()["rolling_horizon_scheduler"]["selected_branch"] == "ARM1_A"
+
+
 def _custom_plan(*, order_id: str = "CUSTOM_RUNTIME", quantity: int = 1):
     return build_custom_plan(
         order_id=order_id,
@@ -97,6 +132,15 @@ def test_v2_runtime_schedules_three_mixed_orders_across_both_install_branches() 
     assert snapshot["furnace"]["last_batch"]["real_equivalent_cycle_s"] == pytest.approx(3600.0)
     assert all(tray["stage"] == "EMPTY_BUFFER" for tray in snapshot["trays"])
     assert all(unit["stage"] == UnitStage.COMPLETE.value for unit in snapshot["units"])
+    scheduling = snapshot["rolling_horizon_scheduler"]
+    assert scheduling["horizon_seconds"] == 45.0
+    assert scheduling["maximum_candidates"] == 4
+    assert scheduling["selected_branch"] in {"ARM1_A", "ARM3_B"}
+    assert scheduling["arm3_activation"]["reason_zh"]
+    assert scheduling["rolling_horizon"]["candidates"]
+    assignments = [event for event in snapshot["events"] if event["type"] == "INSTALL_ASSIGNED"]
+    assert assignments
+    assert all("arm3_net_gain_s" in event for event in assignments)
     batch_started = next(
         event["time"] for event in snapshot["events"] if event["type"] == "FURNACE_BATCH_STARTED"
     )
@@ -140,6 +184,70 @@ def test_unified_v2_admits_fourth_order_into_the_next_upstream_wip_cohort() -> N
     assert runtime.manufacturing_runtime._active_wip() == 4
     assert len(runtime.manufacturing_runtime.tray_routes) == 6
     assert runtime.physical_runtime._active_batch_units == []
+
+
+def test_unified_v2_sizes_the_base_wave_from_its_two_parallel_install_branches() -> None:
+    runtime = UnifiedV2Runtime(fast=True)
+    for index, preset in enumerate("ABCABC", start=1):
+        runtime.submit_order(preset, order_id=f"BRANCH_WAVE_{index}")
+    runtime.tick(0.05)
+
+    policy = runtime.manufacturing_runtime.arm1_tool_policy.config
+    assert policy.max_base_microbatch == 6
+    assert policy.drain_admitted_base_wave is True
+
+    snapshot = runtime.manufacturing_runtime.arm1_tool_policy.snapshot()
+    assert snapshot["parallel_fin_branches"] == 2
+
+
+def test_six_order_viewer_pipeline_releases_fin_work_after_a_three_base_wave() -> None:
+    args = parse_args(
+        (
+            "--headless",
+            "--fast",
+            "--no-ui",
+            "--orders",
+            "A,B,C,A,B,C",
+            "--max-sim-time",
+            "80",
+        )
+    )
+    application = V2BrazingApplication(args)
+    application.submit_cli_orders()
+    runtime = application.runtime.physical_runtime
+    first_arm1_fin_started = False
+    arm2_ready_idle_streak = 0
+    longest_arm2_ready_idle_streak = 0
+    try:
+        for _ in range(2_000):
+            application.advance_frame()
+            arm2_ready_work = any(
+                unit.stage is UnitStage.DISPENSING and runtime._tray_ready(unit)
+                for unit in runtime.units.values()
+            )
+            if arm2_ready_work and "ARM2" not in runtime.operations:
+                arm2_ready_idle_streak += 1
+                longest_arm2_ready_idle_streak = max(
+                    longest_arm2_ready_idle_streak,
+                    arm2_ready_idle_streak,
+                )
+            else:
+                arm2_ready_idle_streak = 0
+            arm1 = runtime.operations.get("ARM1")
+            if arm1 is not None and arm1.kind == "INSTALL_FIN":
+                completed_bases = {
+                    event["unit_id"]
+                    for event in runtime.events
+                    if event["type"] == "OPERATION_COMPLETED" and event.get("kind") == "BASE_LOADING"
+                }
+                assert len(completed_bases) >= 3
+                first_arm1_fin_started = True
+                break
+    finally:
+        application.scene.close()
+
+    assert first_arm1_fin_started
+    assert longest_arm2_ready_idle_streak <= 1
 
 
 def test_unified_v2_physical_admission_follows_global_release_order() -> None:
@@ -421,9 +529,11 @@ def test_v2_loads_each_arriving_tray_top_down_before_the_batch_is_full() -> None
             ]
             if starts:
                 first_load_started_at = float(starts[0]["time"])
-        occupied = [layer for layer in runtime.furnace.state.layers if layer.tray_id is not None]
-        if first_locked_layer is None and occupied and occupied[0].locked:
-            first_locked_layer = occupied[0].index
+        locked = [
+            layer for layer in runtime.furnace.state.layers if layer.tray_id is not None and layer.locked
+        ]
+        if first_locked_layer is None and locked:
+            first_locked_layer = max(locked, key=lambda layer: layer.index).index
         if runtime.furnace.state.phase in {
             FurnacePhase.PREHEAT,
             FurnacePhase.RAMP,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -764,6 +765,58 @@ def test_v2_arm1_visibly_returns_suction_and_collects_gripper_before_fin_work() 
         adapter.close()
 
 
+@pytest.mark.parametrize("fast", (False, True))
+def test_v2_arm1_leaves_gripper_change_on_a_direct_continuous_fin_approach(
+    fast: bool,
+) -> None:
+    """The first fin approach must keep the rack-exit redundancy branch."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=fast)
+    adapter = DualLineSceneAdapter(V2_XML)
+    joint_samples: list[np.ndarray] = []
+    tcp_samples: list[np.ndarray] = []
+    tracing = False
+    try:
+        runtime.submit_order("A", order_id="DIRECT_FIN_A")
+        runtime.submit_order("C", order_id="DIRECT_FIN_C")
+        for _ in range(12_000):
+            runtime.tick(0.01)
+            adapter.sync(runtime)
+            adapter.step_physics(0.01)
+            state = adapter.robot_motion_snapshot()["arm1"]
+            label = str(state["target_zh"])
+            operation = str(state["operation"])
+            if "带夹爪高位离开工具架" in label:
+                tracing = True
+            if tracing:
+                joint_samples.append(np.asarray(state["joint_positions"], dtype=float))
+                tcp_samples.append(np.asarray(state["actual_tcp_position_m"], dtype=float))
+            if (
+                tracing
+                and ":INSTALL_FIN:" in operation
+                and "缓慢纯Z下降夹取" in label
+            ):
+                break
+
+        assert tracing
+        assert len(joint_samples) >= 10
+        joints = np.stack(joint_samples)
+        tcp = np.stack(tcp_samples)
+        joint_travel = np.sum(np.abs(np.diff(joints, axis=0)), axis=0)
+        tcp_path_m = float(np.sum(np.linalg.norm(np.diff(tcp, axis=0), axis=1)))
+        direct_distance_m = float(np.linalg.norm(tcp[-1] - tcp[0]))
+
+        # No joint may make the former near-full-turn branch unwind.  The
+        # collision-free redundancy transition needs about 151° at most.
+        assert float(np.max(joint_travel)) <= np.deg2rad(155.0)
+        # The certified 405 mm rack plane adds one short vertical component;
+        # the complete route still stays within 1.4x of the direct chord.
+        assert tcp_path_m <= 1.40 * direct_distance_m
+    finally:
+        adapter.close()
+
+
 def test_v2_base_visual_ownership_handoff_has_no_disappearing_frame() -> None:
     """The tray base must appear before the temporary suction proxy vanishes."""
 
@@ -773,19 +826,25 @@ def test_v2_base_visual_ownership_handoff_has_no_disappearing_frame() -> None:
     try:
         runtime.submit_order("A", order_id="BASE_HANDOFF_A")
         observed_release = False
+        observed_moving_proxy = False
         for _ in range(2_000):
             runtime.tick(0.01)
             adapter.sync(runtime)
             adapter.step_physics(0.01)
             unit = runtime.units["BASE_HANDOFF_A_UNIT_01"]
             state = adapter.robot_motion_snapshot()["arm1"]
+            if adapter.model.geom("v2_arm1_raw_base_proxy_geom").rgba[3] > 0.0:
+                assert adapter.model.geom("v2_base_supply_stock_plate").rgba[3] == pytest.approx(0.0)
+                observed_moving_proxy = True
             if not state["release_verified"]:
                 continue
             assert unit.tray_id is not None
             assert adapter.component_visible(unit.tray_id, "base_plate")
             assert adapter.model.geom("v2_arm1_raw_base_proxy_geom").rgba[3] == pytest.approx(0.0)
+            assert adapter.model.geom("v2_base_supply_stock_plate").rgba[3] > 0.0
             observed_release = True
             break
+        assert observed_moving_proxy
         assert observed_release
     finally:
         adapter.close()
@@ -893,6 +952,149 @@ def test_v2_arm1_toolchange_dock_and_retreat_are_measured_vertical_lines() -> No
             else:
                 assert float(positions[-1, 2] - positions[0, 2]) >= 0.09, marker
                 assert float(np.min(z_steps)) >= -0.001, marker
+    finally:
+        adapter.close()
+
+
+def test_v2_arm1_gripper_change_uses_nearest_continuous_table_clear_route() -> None:
+    """S1→rack→fin travel must not flip IK branches or cross the base table."""
+
+    mujoco = pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="NEAREST_TOOL_A")
+        runtime.submit_order("C", order_id="NEAREST_TOOL_C")
+        plan = None
+        for _ in range(12_000):
+            runtime.tick(0.01)
+            adapter.sync(runtime)
+            adapter.step_physics(0.01)
+            candidate = adapter._robots._plans["arm1"]
+            if (
+                candidate is not None
+                and candidate.operation_kind == "TOOL_CHANGE"
+                and candidate.next_tool == "arm1_gripper"
+            ):
+                plan = candidate
+                break
+
+        assert plan is not None
+        assert not plan.failure
+        joint_path = np.stack((plan.segment_start, *plan.joint_goals))
+        adjacent_joint_steps = np.max(np.abs(np.diff(joint_path, axis=0)), axis=1)
+        # A dense, current-branch route should never begin with the historical
+        # 2.5 rad redundancy jump that made Arm1 travel around the other side.
+        assert float(np.max(adjacent_joint_steps)) <= 0.25
+
+        arm_geoms = tuple(
+            int(adapter.model.geom(f"arm1_fr3_link{index}_collision").id)
+            for index in range(8)
+        )
+        base_table_geoms = tuple(
+            geom_id
+            for geom_id in range(int(adapter.model.ngeom))
+            if (adapter.model.geom(geom_id).name or "").startswith("v2_base_supply_")
+        )
+        saved_qpos = np.asarray(adapter.data.qpos, dtype=float).copy()
+        minimum_clearance_m = float("inf")
+        try:
+            qpos_ids = adapter._robots.controllers["arm1"].qpos_ids
+            for joint_positions in plan.joint_goals:
+                adapter.data.qpos[qpos_ids] = joint_positions
+                mujoco.mj_kinematics(adapter.model, adapter.data)
+                minimum_clearance_m = min(
+                    minimum_clearance_m,
+                    *(
+                        _signed_aabb_clearance_m(
+                            adapter,
+                            arm_geom,
+                            table_geom,
+                        )
+                        for arm_geom in arm_geoms
+                        for table_geom in base_table_geoms
+                    ),
+                )
+        finally:
+            adapter.data.qpos[:] = saved_qpos
+            mujoco.mj_forward(adapter.model, adapter.data)
+
+        assert minimum_clearance_m >= 0.005
+    finally:
+        adapter.close()
+
+
+def test_v2_arm1_returns_from_fin_branch_on_the_same_short_table_clear_route() -> None:
+    """The reverse S3A→rack move must not select the rear elbow branch."""
+
+    mujoco = pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        runtime.submit_order("A", order_id="REVERSE_TOOL_A")
+        unit = next(iter(runtime.units.values()))
+        projector = adapter._robots
+        controller = projector.controllers["arm1"]
+        controller.set_tool_transform(projector._tool_transforms["arm1_flange"])
+        adapter.data.qpos[controller.qpos_ids] = projector.ARM1_FIN_ENTRY_SEED
+        mujoco.mj_forward(adapter.model, adapter.data)
+        projector._arm1_tools.current_tool = "arm1_gripper"
+        operation = SimpleNamespace(
+            unit_id=unit.unit_id,
+            kind="BASE_LOADING",
+            started_at=0.0,
+        )
+
+        plan = projector._build_arm1_tool_change_plan(
+            operation,
+            "arm1_suction",
+            unit,
+            fast=True,
+        )
+
+        assert not plan.failure
+        joint_path = np.stack((plan.segment_start, *plan.joint_goals))
+        assert float(np.max(np.abs(np.diff(joint_path, axis=0)))) <= 0.10
+
+        entry_end = next(
+            index
+            for index, waypoint in enumerate(plan.waypoints)
+            if "高位横移至夹爪拆卸点" in waypoint.label_zh
+        )
+        arm_geoms = tuple(
+            int(adapter.model.geom(f"arm1_fr3_link{index}_collision").id)
+            for index in range(8)
+        )
+        base_table_geoms = tuple(
+            geom_id
+            for geom_id in range(int(adapter.model.ngeom))
+            if (adapter.model.geom(geom_id).name or "").startswith("v2_base_supply_")
+        )
+        flange_positions: list[np.ndarray] = []
+        minimum_clearance_m = float("inf")
+        saved_qpos = np.asarray(adapter.data.qpos, dtype=float).copy()
+        try:
+            for joint_positions in plan.joint_goals:
+                adapter.data.qpos[controller.qpos_ids] = joint_positions
+                mujoco.mj_kinematics(adapter.model, adapter.data)
+                flange_positions.append(controller.current_flange_pose().position.copy())
+                minimum_clearance_m = min(
+                    minimum_clearance_m,
+                    *(
+                        _signed_aabb_clearance_m(adapter, arm_geom, table_geom)
+                        for arm_geom in arm_geoms
+                        for table_geom in base_table_geoms
+                    ),
+                )
+        finally:
+            adapter.data.qpos[:] = saved_qpos
+            mujoco.mj_forward(adapter.model, adapter.data)
+
+        entry = np.stack(flange_positions[:entry_end])
+        path_length_m = float(np.sum(np.linalg.norm(np.diff(entry, axis=0), axis=1)))
+        direct_length_m = float(np.linalg.norm(entry[-1] - entry[0]))
+        assert path_length_m <= 1.35 * direct_length_m
+        assert minimum_clearance_m >= 0.005
     finally:
         adapter.close()
 
@@ -1329,34 +1531,35 @@ def test_arm1_and_arm3_preposition_during_incoming_tray_motion_without_process_c
     assert observed == {"ARM1": True, "ARM3": True}
 
 
-def test_arm1_physically_starts_the_gripper_exchange_when_the_base_wave_ends() -> None:
+def test_arm1_starts_fin_work_after_three_bases_while_later_blanks_remain() -> None:
     pytest.importorskip("mujoco")
     runtime = UnifiedV2Runtime(fast=True)
     adapter = DualLineSceneAdapter(V2_XML)
-    base_wave_was_complete = False
     observed = None
     try:
-        for index, preset in enumerate("ABCAB", start=1):
+        for index, preset in enumerate("ABCABC", start=1):
             runtime.submit_order(preset, order_id=f"TAIL_TOOL_{index}")
 
         for _ in range(5_000):
             runtime.tick(0.05)
             adapter.sync(runtime.physical_runtime)
             adapter.step_physics(0.05)
-            units = tuple(runtime.physical_runtime.units.values())
-            base_wave_complete = bool(units) and all(
-                unit.stage not in {UnitStage.QUEUED, UnitStage.BASE_LOADING} for unit in units
-            )
-            if base_wave_complete and not base_wave_was_complete:
-                arm1 = adapter.robot_motion_snapshot()["arm1"]
-                observed = arm1
-                assert arm1["prepositioning"] is True
-                assert arm1["preposition_for"] == "INSTALL_FIN"
-                assert "换刀" in str(arm1["target_zh"])
-                assert arm1["workpiece_held"] is False
-                assert "ARM1" not in runtime.physical_runtime.operations
+            operation = runtime.physical_runtime.operations.get("ARM1")
+            if operation is not None and operation.kind == "INSTALL_FIN":
+                completed_bases = {
+                    event["unit_id"]
+                    for event in runtime.physical_runtime.events
+                    if event["type"] == "OPERATION_COMPLETED" and event.get("kind") == "BASE_LOADING"
+                }
+                remaining_bases = [
+                    unit
+                    for unit in runtime.physical_runtime.units.values()
+                    if unit.stage in {UnitStage.QUEUED, UnitStage.BASE_LOADING}
+                ]
+                observed = operation
+                assert len(completed_bases) == 3
+                assert remaining_bases
                 break
-            base_wave_was_complete = base_wave_complete
     finally:
         adapter.close()
 

@@ -142,12 +142,31 @@ class V2RobotMotionProjector:
     # former 0.4 mm stroke, while the narrowed fingers retain ample clearance
     # to the 15 mm-pitch C product's neighbouring fins.
     FIN_RELEASE_CLEARANCE_M = 0.0020
+    # A fin already surrounded by installed neighbours must not be approached
+    # with the 42 mm magazine-pick opening.  Leave 2 mm per finger at the safe
+    # overhead pose, then descend into the occupied comb with a narrow envelope.
+    FIN_REWORK_APPROACH_CLEARANCE_M = 0.0040
     FIN_PICK_FAILURE_EXTRA_GAP_M = 0.006
     LATERAL_FIN_FAULT_TYPES = frozenset({"FIN_POSE", "FIN_GEOMETRY_FAILED"})
     FINGER_CONTACT_TOLERANCE_M = 0.000075
     FIN_INSERT_SPEED_M_S = 0.025
     ARM1_TOOL_CHANGE_SEED = np.asarray(
         [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+        dtype=float,
+    )
+    # Certified first-fin configuration reached from the table-clear rack
+    # branch.  q7=-0.6 keeps the wrist away from its +/-pi branch cut; solving
+    # the same aerial pose from HOME otherwise selects q7 near +3.0 and makes
+    # Arm1 unwind around the opposite side of the cell.
+    ARM1_FIN_ENTRY_SEED = np.asarray(
+        [-0.33, -1.43, 0.79, -1.62, 1.30, 0.84, -0.60],
+        dtype=float,
+    )
+    ARM1_FIN_ENTRY_JOINT7_RAD = -0.60
+    # Matching table-clear gate configuration on the gripper side of the
+    # rack.  It is the reverse endpoint of the certified S3A corridor above.
+    ARM1_GRIPPER_RACK_GATE_SEED = np.asarray(
+        [-0.65, -1.63, -0.90, -2.38, -1.09, 1.07, -2.89],
         dtype=float,
     )
     # Certified elbow-up branch for Arm3's complete magazine→S3B corridor.
@@ -344,6 +363,12 @@ class V2RobotMotionProjector:
         }
         for proxy in self._proxies.values():
             self._set_proxy_visible(proxy, False)
+        self._base_stock_id = int(model.geom("v2_base_supply_stock_plate").id)
+        self._base_stock_rgba = np.asarray(
+            model.geom_rgba[self._base_stock_id],
+            dtype=float,
+        ).copy()
+        self._set_base_stock_visible(True)
         self._raw_fin_rgba = {
             (branch, index): np.asarray(
                 self.model.geom(f"v2_fin_{branch}_raw_fin_{index:02d}").rgba,
@@ -464,6 +489,13 @@ class V2RobotMotionProjector:
         self.model.geom_rgba[proxy.geom_id] = rgba
         proxy.visible = bool(visible)
 
+    def _set_base_stock_visible(self, visible: bool) -> None:
+        """Show the next indexed blank without duplicating the moving proxy."""
+
+        rgba = self._base_stock_rgba.copy()
+        rgba[3] = self._base_stock_rgba[3] if visible else 0.0
+        self.model.geom_rgba[self._base_stock_id] = rgba
+
     def _set_arm1_suction_fraction(self, fraction: float) -> None:
         """Mirror V1's cyan energized-pad feedback and compression."""
 
@@ -487,6 +519,8 @@ class V2RobotMotionProjector:
         quaternion: np.ndarray | None = None,
     ) -> None:
         proxy = self._proxies[proxy_key]
+        if proxy_key == "arm1_base":
+            self._set_base_stock_visible(False)
         self.data.eq_active[proxy.grasp_weld_id] = 0
         self.data.eq_active[proxy.feed_weld_id] = 0
         address = proxy.qpos_address
@@ -560,6 +594,7 @@ class V2RobotMotionProjector:
         self._set_proxy_visible(proxy, False)
         if plan.operation_kind == "BASE_LOADING":
             self._set_arm1_suction_fraction(0.0)
+            self._set_base_stock_visible(True)
         self.mujoco.mj_forward(self.model, self.data)
 
     def _tray_frame(
@@ -762,9 +797,9 @@ class V2RobotMotionProjector:
         recovering_failed_pick: bool = False,
     ) -> None:
         if operation_kind == "BASE_LOADING":
-            self.model.geom("v2_arm1_raw_base_proxy_geom").size[:3] = (
-                np.asarray(geometry.base_size_m, dtype=float) / 2.0
-            )
+            half_size = np.asarray(geometry.base_size_m, dtype=float) / 2.0
+            self.model.geom("v2_arm1_raw_base_proxy_geom").size[:3] = half_size
+            self.model.geom("v2_base_supply_stock_plate").size[:3] = half_size
             return
         if operation_kind != "INSTALL_FIN":
             return
@@ -1469,6 +1504,7 @@ class V2RobotMotionProjector:
             plan = self._build_arm1_tool_change_plan(
                 operation,
                 required_tool,
+                unit,
                 fast=fast,
             )
             plan.operation_key = f"{unit.unit_id}:PREPOSITION_{operation_kind}"
@@ -1646,22 +1682,32 @@ class V2RobotMotionProjector:
         self,
         operation: Any,
         target_tool: str,
+        unit: "V2UnitState",
         *,
         fast: bool,
     ) -> _JointPlan:
         """Plan a visible rack return/dock sequence with the bare flange.
 
         The weld ownership changes only at the physical rack contact pose.
-        Solving the whole sequence for the flange keeps the joint branch
-        continuous across the instant where the active TCP changes.
+        Free-space entry is solved from the measured flange configuration,
+        while the rack contact section retains its strict flange pose.  This
+        prevents a distant certified seed from selecting an equivalent IK
+        branch and sending the arm around the opposite side of the cell.
         """
 
         controller = self.controllers["arm1"]
         current_tool = self._arm1_tools.current_tool
+        controller.set_tool_transform(self._tool_transforms["arm1_flange"])
+        start = np.asarray(self.data.qpos[controller.qpos_ids], dtype=float).copy()
+        current_flange = controller.current_flange_pose()
         waypoints: list[_Waypoint] = []
-        rack_gate_offset_m = 0.12
+        # The former -Y gate sat between the rack and the base-stock table.
+        # Enter from the +X/workcell side instead: this is both closer to S3A
+        # and outside the complete base-table footprint.
+        rack_gate_offset_x_m = 0.18
 
         safe_plane_z_m = float(self.data.site("v2_arm1_tool_rack_safe_plane").xpos[2])
+        transit_plane_z_m = max(safe_plane_z_m, float(current_flange.position[2]))
 
         def rack_change_poses(tool: str) -> tuple[Pose, Pose, Pose]:
             _hover, dock, _retreat = self._arm1_tools.change_poses(tool, hover_m=0.0)
@@ -1677,16 +1723,22 @@ class V2RobotMotionProjector:
             *,
             speed_m_s: float,
             final_interaction: str = "",
+            sample_spacing_m: float = 0.003,
         ) -> None:
             distance = float(np.linalg.norm(end_pose.position - start_pose.position))
-            sample_count = max(2, int(math.ceil(distance / 0.003)))
+            quaternion_dot = abs(float(np.dot(start_pose.quaternion, end_pose.quaternion)))
+            orientation_distance = 2.0 * math.acos(float(np.clip(quaternion_dot, -1.0, 1.0)))
+            sample_count = max(
+                2,
+                int(math.ceil(distance / sample_spacing_m)),
+                int(math.ceil(orientation_distance / math.radians(2.0))),
+            )
             for sample_index in range(1, sample_count + 1):
                 fraction = sample_index / sample_count
-                position = start_pose.position + fraction * (end_pose.position - start_pose.position)
                 final = sample_index == sample_count
                 waypoints.append(
                     _Waypoint(
-                        Pose(position, end_pose.quaternion),
+                        start_pose.interpolate(end_pose, fraction),
                         label,
                         stop=final,
                         interaction=final_interaction if final else "",
@@ -1694,18 +1746,55 @@ class V2RobotMotionProjector:
                     )
                 )
 
-        # Every rack crossing happens on one certified high plane.  The first
-        # joint-space move ends at a gate in front of the rack; after that all
-        # motion near the structure is an authored dense Cartesian segment.
-        # This prevents an IK-equivalent joint interpolation from bowing down
-        # through the beam while approaching or leaving a dock.
+        # Every rack crossing happens on one certified high plane.  Include
+        # the measured pose as a zero-motion anchor, then author the complete
+        # entry as dense SE(3) samples.  The previous single joint-space jump
+        # to the gate was the source of the multi-radian detour.
         reference_tool = current_tool or target_tool
         reference_hover, _dock, _retreat = rack_change_poses(reference_tool)
         gate = Pose(
-            reference_hover.position + np.asarray([0.0, -rack_gate_offset_m, 0.0]),
+            reference_hover.position + np.asarray([rack_gate_offset_x_m, 0.0, 0.0]),
             reference_hover.quaternion,
         )
-        waypoints.append(_Waypoint(gate, "换刀：进入工具架前方高位门点"))
+        waypoints.append(_Waypoint(current_flange, "换刀：从当前关节分支进入连续安全路径"))
+        lifted_flange = Pose(
+            np.asarray(
+                [
+                    current_flange.position[0],
+                    current_flange.position[1],
+                    transit_plane_z_m,
+                ]
+            ),
+            current_flange.quaternion,
+        )
+        if np.linalg.norm(lifted_flange.position - current_flange.position) > 1.0e-9:
+            append_cartesian_segment(
+                current_flange,
+                lifted_flange,
+                "换刀：从当前位姿竖直抬升到安全高度",
+                speed_m_s=0.10,
+                sample_spacing_m=0.006,
+            )
+        transit_gate = Pose(
+            np.asarray([gate.position[0], gate.position[1], transit_plane_z_m]),
+            gate.quaternion,
+        )
+        append_cartesian_segment(
+            lifted_flange,
+            transit_gate,
+            "换刀：沿最短安全走廊进入工具架工作侧高位门点",
+            speed_m_s=0.18,
+            sample_spacing_m=0.010,
+        )
+        if transit_plane_z_m > safe_plane_z_m + 1.0e-9:
+            append_cartesian_segment(
+                transit_gate,
+                gate,
+                "换刀：在工具架工作侧竖直降至认证安全高度",
+                speed_m_s=0.10,
+                sample_spacing_m=0.006,
+            )
+        entry_waypoint_count = len(waypoints)
 
         if current_tool is not None:
             hover, dock, _retreat = rack_change_poses(current_tool)
@@ -1752,7 +1841,7 @@ class V2RobotMotionProjector:
             speed_m_s=0.035,
         )
         departure_gate = Pose(
-            hover.position + np.asarray([0.0, -rack_gate_offset_m, 0.0]),
+            hover.position + np.asarray([rack_gate_offset_x_m, 0.0, 0.0]),
             hover.quaternion,
         )
         append_cartesian_segment(
@@ -1761,22 +1850,139 @@ class V2RobotMotionProjector:
             f"换刀：带{target_zh}高位离开工具架",
             speed_m_s=0.055,
         )
-        waypoint_tuple = tuple(waypoints)
-        controller.set_tool_transform(self._tool_transforms["arm1_flange"])
-        start = np.asarray(self.data.qpos[controller.qpos_ids], dtype=float).copy()
-        goals, failure = self._solve_waypoint_chain(
-            controller,
-            waypoint_tuple,
-            seed=start,
-            operation_kind="TOOL_CHANGE",
-        )
-        if failure:
+        rack_waypoint_count = len(waypoints)
+        # The free-space turn inherits the nearest continuous branch selected
+        # from the live arm state.  The rack path remains far inside the
+        # project's 3 mm / 3 degree physical acceptance envelope; the weld
+        # ownership change itself still occurs only at the authored dock
+        # waypoint after the vertical approach has settled.
+        returning_from_fin_branch = current_tool == "arm1_gripper" and target_tool == "arm1_suction"
+        if returning_from_fin_branch:
+            # The return corridor has a real base-stock table beside it.  Pick
+            # its certified elbow branch first, then replay the short joint
+            # homotopy.  Each authored waypoint is regenerated from FK so the
+            # playback target remains exactly consistent with that collision-
+            # free joint path (a raw q interpolation with the old Cartesian
+            # labels would otherwise settle forever on a false pose error).
+            gate_result = controller.solve_ik(
+                gate,
+                tcp=True,
+                seed=self.ARM1_GRIPPER_RACK_GATE_SEED,
+                max_iterations=2_400,
+                position_tolerance_m=0.0015,
+                orientation_tolerance_rad=math.radians(3.0),
+                full_orientation=True,
+            )
+            if gate_result.reachable:
+                gate_goal = np.asarray(gate_result.joint_positions, dtype=float)
+                denominator = max(1, entry_waypoint_count - 1)
+                entry_goals = [
+                    start + (index / denominator) * (gate_goal - start)
+                    for index in range(entry_waypoint_count)
+                ]
+                saved_state = controller._save_kinematic_state()
+                try:
+                    regenerated: list[_Waypoint] = []
+                    for index, (waypoint, joint_goal) in enumerate(
+                        zip(waypoints[:entry_waypoint_count], entry_goals)
+                    ):
+                        self.data.qpos[controller.qpos_ids] = joint_goal
+                        self.mujoco.mj_kinematics(self.model, self.data)
+                        regenerated.append(
+                            _Waypoint(
+                                controller.current_flange_pose(),
+                                waypoint.label_zh,
+                                stop=waypoint.stop,
+                                interaction=waypoint.interaction,
+                                cartesian_speed_m_s=waypoint.cartesian_speed_m_s,
+                            )
+                        )
+                finally:
+                    controller._restore_kinematic_state(saved_state)
+                waypoints = regenerated + waypoints[entry_waypoint_count:]
+                goals = entry_goals
+                failure = ""
+            else:
+                goals = []
+                failure = (
+                    "S3A返回工具架的桌面避让门点不可达：位置误差 "
+                    f"{gate_result.position_error_m * 1_000.0:.1f} mm，姿态误差 "
+                    f"{math.degrees(gate_result.orientation_error_rad):.1f}°"
+                )
+        else:
             goals, failure = self._solve_waypoint_chain(
                 controller,
-                waypoint_tuple,
-                seed=self.ARM1_TOOL_CHANGE_SEED,
+                tuple(waypoints[:entry_waypoint_count]),
+                seed=start,
                 operation_kind="TOOL_CHANGE",
+                position_tolerance_override_m=0.0015,
+                orientation_tolerance_override_rad=math.radians(3.0),
             )
+        if not failure:
+            rack_goals, rack_failure = self._solve_waypoint_chain(
+                controller,
+                tuple(waypoints[entry_waypoint_count:rack_waypoint_count]),
+                seed=goals[-1],
+                operation_kind="TOOL_CHANGE",
+                position_tolerance_override_m=0.0015,
+                orientation_tolerance_override_rad=math.radians(3.0),
+            )
+            goals.extend(rack_goals)
+            failure = rack_failure
+        if not failure and target_tool == "arm1_gripper" and operation.kind == "INSTALL_FIN":
+            _tool_name, fin_waypoints = self._operation_waypoints("arm1", operation, unit)
+            fin_approach_flange = fin_waypoints[0].pose.transformed(
+                self._tool_transforms["arm1_gripper"].inverse()
+            )
+            fin_entry = controller.solve_ik(
+                fin_approach_flange,
+                tcp=True,
+                seed=self.ARM1_FIN_ENTRY_SEED,
+                locked_joints={6: self.ARM1_FIN_ENTRY_JOINT7_RAD},
+                max_iterations=2_400,
+                position_tolerance_m=0.003,
+                orientation_tolerance_rad=math.radians(3.0),
+                full_orientation=True,
+            )
+            if not fin_entry.reachable:
+                failure = (
+                    "S3A换夹爪后的短路进入构型不可达：位置误差 "
+                    f"{fin_entry.position_error_m * 1_000.0:.1f} mm，姿态误差 "
+                    f"{math.degrees(fin_entry.orientation_error_rad):.1f}°"
+                )
+            else:
+                # The rack contact itself must stay on the table-clear elbow
+                # branch.  Once the attached gripper has left the rack, the
+                # free-space move may use the shortest joint-space homotopy to
+                # the certified S3A branch.  Dense two-degree samples make the
+                # transition continuous and avoid both the former q7 wrap and
+                # the large HOME-seeded first segment.
+                transfer_start = np.asarray(goals[-1], dtype=float)
+                transfer_end = np.asarray(fin_entry.joint_positions, dtype=float)
+                sample_count = max(
+                    2,
+                    int(
+                        math.ceil(
+                            float(np.max(np.abs(transfer_end - transfer_start)))
+                            / math.radians(2.0)
+                        )
+                    ),
+                )
+                transfer_label = "S3A换夹爪后沿最短安全关节走廊直达翅片原料位上方"
+                for sample_index in range(1, sample_count + 1):
+                    fraction = sample_index / sample_count
+                    final = sample_index == sample_count
+                    waypoints.append(
+                        _Waypoint(
+                            departure_gate.interpolate(fin_approach_flange, fraction),
+                            transfer_label,
+                            stop=final,
+                        )
+                    )
+                    goals.append(
+                        transfer_start + fraction * (transfer_end - transfer_start)
+                    )
+        waypoint_tuple = tuple(waypoints)
         first_goal = start if not goals else goals[0]
         # Fast/headless mode must absorb the two new rack-clearance segments
         # without regressing its established process windows.  The Cartesian
@@ -2261,7 +2467,16 @@ class V2RobotMotionProjector:
             closing and plan.manifested_fault_type == "FIN_PICK_FAILED" and not plan.rework_fin
         )
         if interaction == "open":
-            target = 0.0
+            if plan.rework_fin:
+                if plan.fin_clamp_position_m is None:
+                    raise RuntimeError("翅片返工预张开缺少厚度驱动的夹爪目标")
+                target = max(
+                    0.0,
+                    plan.fin_clamp_position_m
+                    - 0.5 * self.FIN_REWORK_APPROACH_CLEARANCE_M,
+                )
+            else:
+                target = 0.0
             duration = self.GRIPPER_RELEASE_SECONDS
         elif closing:
             if plan.fin_clamp_position_m is None:
@@ -2446,6 +2661,7 @@ class V2RobotMotionProjector:
                     self._plans[arm_name] = self._build_arm1_tool_change_plan(
                         operation,
                         required_tool,
+                        unit,
                         fast=bool(runtime.fast),
                     )
                 else:
@@ -2554,15 +2770,32 @@ class V2RobotMotionProjector:
             )
             if not settled:
                 continue
+            # A tool-change plan is authored for the bare flange.  While the
+            # old tool is still welded on (until the dock interaction), the
+            # mounted TCP is intentionally different from the flange target;
+            # comparing against it made the planner settle forever at the rack
+            # gate whenever a gripper→suction exchange was requested.
             actual_tcp = pose_from_site(
                 self.data,
-                self._tool_tcp_sites[plan.tool_name],
+                "arm1_attachment_site" if plan.operation_kind == "TOOL_CHANGE" else self._tool_tcp_sites[plan.tool_name],
             )
             position_error, orientation_error = self._pose_errors(
                 actual_tcp,
                 plan.waypoints[plan.waypoint_index].pose,
             )
-            if position_error > 0.003 or orientation_error > math.radians(3.0):
+            # Full-orientation IK constrains its axis and roll residuals
+            # independently to 3 degrees.  Their combined quaternion angle
+            # can therefore be as high as sqrt(2)*3 degrees at a free-space
+            # tool-change gate even though both authored constraints pass.
+            # Rack-contact waypoints converge far more tightly; this wider
+            # gate acceptance only reconciles playback with the IK contract.
+            orientation_acceptance_rad = (
+                math.radians(4.5)
+                if plan.operation_kind == "TOOL_CHANGE"
+                and not plan.waypoints[plan.waypoint_index].interaction
+                else math.radians(3.0)
+            )
+            if position_error > 0.003 or orientation_error > orientation_acceptance_rad:
                 continue
             if not self._interaction_complete(arm_name, plan, timestep):
                 continue
@@ -2771,6 +3004,7 @@ class V2RobotMotionProjector:
             self.data.eq_active[proxy.grasp_weld_id] = 0
             proxy.held = False
             self._set_proxy_visible(proxy, False)
+        self._set_base_stock_visible(True)
         for branch, index in self._raw_fin_rgba:
             self._set_raw_fin_visible(branch, index, False)
         for actuator_ids in self._finger_actuators.values():
@@ -2798,6 +3032,14 @@ class V2RobotMotionProjector:
         result: dict[str, dict[str, object]] = {}
         for arm_name, controller in self.controllers.items():
             plan = self._plans[arm_name]
+            visible_operation = self._active_operation[arm_name]
+            if plan is not None and plan.operation_kind == "TOOL_CHANGE":
+                # The parent runtime operation may already be INSTALL_FIN, but
+                # this physical sub-plan is still changing tools and owns no
+                # fin. Expose the actual action atomically so UI/tests do not
+                # interpret a null fin index as a half-created installation.
+                unit_id = plan.operation_key.rsplit(":", 1)[0]
+                visible_operation = f"TOOL_CHANGE:{unit_id}:{plan.instance_key.rsplit(':', 1)[-1]}"
             finger_inner_gap_m = None
             if arm_name in self._finger_qpos:
                 finger_inner_gap_m = self._finger_open_gap_m[arm_name] - sum(
@@ -2835,7 +3077,7 @@ class V2RobotMotionProjector:
             result[arm_name] = {
                 "mode": "V1_COMPATIBLE_JOINT_PLAYBACK",
                 "planner": "POSE_LOCKED_CARTESIAN_QUINTIC",
-                "operation": self._active_operation[arm_name],
+                "operation": visible_operation,
                 "prepositioning": bool(plan is not None and plan.preposition_for),
                 "preposition_for": "" if plan is None else plan.preposition_for,
                 "target_zh": (

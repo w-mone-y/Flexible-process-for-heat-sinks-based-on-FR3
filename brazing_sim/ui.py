@@ -27,6 +27,16 @@ PLANNING_TAB_TITLES = (
 )
 
 
+def initial_control_panel_size(available_width: int, available_height: int) -> tuple[int, int]:
+    """Use the desktop width instead of forcing the planning tabs to scroll."""
+
+    available_width = max(1, int(available_width))
+    available_height = max(1, int(available_height))
+    width = min(available_width, max(760, int(available_width * 0.96)))
+    height = min(available_height, min(850, max(560, int(available_height * 0.80))))
+    return width, height
+
+
 @dataclass(frozen=True, slots=True)
 class UiSegmentAction:
     label_zh: str
@@ -2158,12 +2168,9 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
     screen = app.primaryScreen()
     if screen is not None:
         available = screen.availableGeometry()
-        panel.resize(
-            min(1300, max(760, int(available.width() * 0.86))),
-            min(850, max(560, int(available.height() * 0.80))),
-        )
+        panel.resize(*initial_control_panel_size(available.width(), available.height()))
     else:
-        panel.resize(1300, 850)
+        panel.resize(1450, 850)
     panel.show()
     camera = CameraWindow()
     camera.setMinimumSize(320, 240)
@@ -2174,4 +2181,4 @@ def run_ui_client(args_or_url: Any = "http://127.0.0.1:8765") -> int:
     return int(app.exec())
 
 
-__all__ = ["run_ui_client"]
+__all__ = ["initial_control_panel_size", "run_ui_client"]

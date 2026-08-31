@@ -10,6 +10,7 @@ from brazing_sim.dual_line import (
     DualLineRuntime,
     DualLineSceneAdapter,
     TrayOwner,
+    UnitStage,
     V2ProcessGeometry,
 )
 from brazing_sim.flexible import build_custom_plan
@@ -17,6 +18,61 @@ from brazing_sim.recovery.fault_models import RecoveryStatus
 
 ROOT = Path(__file__).resolve().parents[2]
 V2_XML = ROOT / "scenes" / "production" / "brazing_line_v2.xml"
+
+
+def test_recovery_transport_discards_stale_outbound_motion_without_teleport() -> None:
+    """A rollback must replan from the measured carrier pose, not finish the old route."""
+
+    pytest.importorskip("mujoco")
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        tray_id = "V2_TRAY_01"
+        start = adapter.tray_position(tray_id)
+        adapter._physical_owner[tray_id] = TrayOwner.S4
+        adapter._begin_motion(
+            tray_id,
+            np.asarray([0.35, -0.45, 0.225]),
+            0.0,
+            TrayOwner.S4,
+            TrayOwner.INSTALL_B,
+        )
+        adapter._pending_owners[tray_id].append(TrayOwner.INSTALL_B)
+        adapter._reconcile_transport_target(tray_id, TrayOwner.INSTALL_A)
+
+        np.testing.assert_allclose(adapter.tray_position(tray_id), start, atol=1.0e-12)
+        assert tray_id not in adapter._motions
+        assert list(adapter._pending_owners[tray_id]) == [TrayOwner.INSTALL_A]
+    finally:
+        adapter.close()
+
+
+def test_recovery_routes_reverse_the_authored_b_branch_in_the_transport_plane() -> None:
+    """S4 to S3B uses the exact south corridor in reverse, with no lift."""
+
+    start = np.asarray([1.40, 0.00, 0.225])
+    target = np.asarray([0.35, -0.45, 0.225])
+    route = DualLineSceneAdapter._route_targets(
+        start,
+        target,
+        source_owner=TrayOwner.S4,
+        target_owner=TrayOwner.INSTALL_B,
+    )
+    assert len(route) == 5
+    np.testing.assert_allclose(route[0], [1.40, -1.22, 0.225], atol=1.0e-9)
+    np.testing.assert_allclose(route[-1], target, atol=1.0e-9)
+    assert all(float(point[2]) == pytest.approx(0.225) for point in route)
+
+    install_b = np.asarray([0.35, -0.45, 0.225])
+    s2b = np.asarray([0.50, 0.00, 0.225])
+    yield_route = DualLineSceneAdapter._route_targets(
+        install_b,
+        s2b,
+        source_owner=TrayOwner.INSTALL_B,
+        target_owner=TrayOwner.S2B,
+    )
+    assert len(yield_route) == 1
+    np.testing.assert_allclose(yield_route[0], s2b, atol=1.0e-9)
+    assert float(yield_route[0][2]) == pytest.approx(0.225)
 
 
 def test_v2_s3_s4_waypoints_are_planar_north_and_south_bypasses() -> None:
@@ -268,6 +324,51 @@ def test_local_brazing_rework_preserves_beads_during_s2b_to_s2a_return() -> None
         adapter.close()
 
 
+def test_multi_order_brazing_rework_uses_the_physical_s2b_to_s2a_route() -> None:
+    """A busy S2A must not make the faulty tray bypass its physical return."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    try:
+        for preset in ("A", "B", "C"):
+            runtime.submit_order(preset, order_id=f"PHYSICAL_MULTI_{preset}")
+        runtime.inject_fault("BRAZING_MISSING", target="path_02")
+        adapter.sync(runtime)
+        faulty_unit = runtime.units["PHYSICAL_MULTI_A_UNIT_01"]
+        return_started = False
+        return_motion_seen = False
+        bypass_before_return = False
+        for _ in range(14_000):
+            runtime.tick(0.02)
+            adapter.sync(runtime)
+            adapter.step_physics(0.02)
+            if any(
+                event["type"] == "RECOVERY_RETURN_STARTED" and event["unit_id"] == faulty_unit.unit_id
+                for event in runtime.events
+            ):
+                return_started = True
+            transport = adapter.transport_snapshot().get(faulty_unit.tray_id)
+            if transport is not None and transport["status"] == "MOVING":
+                if transport["source"] == "S2B" and transport["target"] == "S2A":
+                    return_motion_seen = True
+                if (
+                    not return_started
+                    and transport["source"] == "S2B"
+                    and transport["target"] in {"INSTALL_A", "INSTALL_B"}
+                ):
+                    bypass_before_return = True
+            if runtime.complete and adapter.transport_settled:
+                break
+
+        assert return_started
+        assert return_motion_seen
+        assert not bypass_before_return
+        assert runtime.complete
+    finally:
+        adapter.close()
+
+
 def test_deviated_braze_arm2_removes_before_reapplying_the_target_path() -> None:
     pytest.importorskip("mujoco")
     runtime = DualLineRuntime(fast=True)
@@ -318,6 +419,10 @@ def test_fin_pose_rework_keeps_press_off_and_uses_arm3_in_slot_reseat() -> None:
         rework_release_position: np.ndarray | None = None
         last_defect_world_position: np.ndarray | None = None
         proxy_takeover_position: np.ndarray | None = None
+        rework_near_slot_gap_samples_m: list[float] = []
+        rework_fin_thickness_m: float | None = None
+        saw_rework_grasp_gap = False
+        saw_rework_release_gap = False
         for _ in range(12_000):
             runtime.tick(0.02)
             adapter.sync(runtime)
@@ -360,6 +465,20 @@ def test_fin_pose_rework_keeps_press_off_and_uses_arm3_in_slot_reseat() -> None:
             if recovery_running:
                 arm3_state = adapter.robot_motion_snapshot()["arm3"]
                 recovery_labels.add(str(arm3_state["target_zh"]))
+                gap_m = float(arm3_state["finger_inner_gap_m"])
+                thickness_m = float(arm3_state["fin_thickness_m"])
+                rework_fin_thickness_m = thickness_m
+                label = str(arm3_state["target_zh"])
+                if any(
+                    stage in label
+                    for stage in ("下降夹取", "纯Z抬升", "渐进纠偏", "纯Z回插", "小行程松爪")
+                ):
+                    rework_near_slot_gap_samples_m.append(gap_m)
+                if arm3_state["grasp_verified"] and arm3_state["workpiece_held"]:
+                    saw_rework_grasp_gap |= abs(gap_m - thickness_m) <= 0.00025
+                if arm3_state["release_verified"]:
+                    assert gap_m == pytest.approx(thickness_m + 0.0020, abs=0.00025)
+                    saw_rework_release_gap = True
                 if proxy_takeover_position is None:
                     proxy_takeover_position = np.asarray(
                         adapter.data.geom("v2_arm3_raw_fin_proxy_geom").xpos,
@@ -394,6 +513,11 @@ def test_fin_pose_rework_keeps_press_off_and_uses_arm3_in_slot_reseat() -> None:
         assert proxy_takeover_position is not None
         assert rework_held_positions
         assert rework_release_position is not None
+        assert rework_near_slot_gap_samples_m
+        assert rework_fin_thickness_m is not None
+        assert max(rework_near_slot_gap_samples_m) <= rework_fin_thickness_m + 0.0042
+        assert saw_rework_grasp_gap
+        assert saw_rework_release_gap
         np.testing.assert_allclose(
             proxy_takeover_position,
             last_defect_world_position,
@@ -415,6 +539,94 @@ def test_fin_pose_rework_keeps_press_off_and_uses_arm3_in_slot_reseat() -> None:
         assert returned["target"] == "INSTALL_B"
         assert runtime.complete
         assert runtime.snapshot()["manual_fault_requests"][0]["status"] == "RECOVERED"
+    finally:
+        adapter.close()
+
+
+def test_fin_pose_rework_yields_an_occupied_s3b_and_completes_both_orders() -> None:
+    """A healthy S3B pallet must not deadlock a defective pallet at S4."""
+
+    pytest.importorskip("mujoco")
+    runtime = DualLineRuntime(fast=True)
+    adapter = DualLineSceneAdapter(V2_XML)
+    injected = False
+    saw_yielded_payload = False
+    saw_arm3_reseat = False
+    try:
+        runtime.submit_order("A", order_id="FIN_POSE_BLOCKED_A")
+        runtime.submit_order("A", order_id="FIN_POSE_BLOCKED_B")
+        for _ in range(8_000):
+            if not injected and runtime.sim_time >= 20.0:
+                runtime.inject_fault("FIN_POSE", target="fin_04")
+                injected = True
+            runtime.tick(0.05)
+            adapter.sync(runtime)
+            adapter.step_physics(0.05)
+            yield_event = next(
+                (
+                    event
+                    for event in runtime.events
+                    if event["type"] == "RECOVERY_STATION_YIELD_STARTED"
+                ),
+                None,
+            )
+            if yield_event is not None:
+                yielded = runtime.units[str(yield_event["unit_id"])]
+                assert yielded.tray_id is not None
+                if runtime.flow.get(yielded.tray_id).owner is TrayOwner.S2B:
+                    assert yielded.stage is UnitStage.WAITING_MERGE
+                    assert yielded.fins_installed == yielded.fin_count
+                    assert all(
+                        adapter.component_visible(yielded.tray_id, f"fin_{index:02d}")
+                        for index in range(1, yielded.fin_count + 1)
+                    )
+                    assert not any(
+                        operation.unit_id == yielded.unit_id
+                        for operation in runtime.operations.values()
+                    )
+                    saw_yielded_payload = True
+            arm3_operation = runtime.operations.get("ARM3")
+            saw_arm3_reseat |= bool(
+                arm3_operation is not None
+                and arm3_operation.kind == "INSTALL_FIN"
+                and arm3_operation.recovery
+                and arm3_operation.recovery_strategy == "FIN_REINSTALL"
+            )
+            if runtime.complete and adapter.transport_settled:
+                break
+
+        assert injected
+        assert saw_yielded_payload
+        assert saw_arm3_reseat
+        assert any(
+            event["type"] == "RECOVERY_STATION_YIELD_STARTED"
+            and event.get("source") == "INSTALL_B"
+            and event.get("target") == "S2B"
+            for event in runtime.events
+        )
+        assert any(
+            event["type"] == "RECOVERY_RETURN_STARTED"
+            and event.get("source") == "S4"
+            and event.get("target") == "INSTALL_B"
+            for event in runtime.events
+        )
+        assert any(
+            event["type"] == "RECOVERY_STATION_YIELD_COMPLETED"
+            and event.get("source") == "S2B"
+            and event.get("target") == "INSTALL_B"
+            for event in runtime.events
+        )
+        assert runtime.complete
+        assert runtime.snapshot()["manual_fault_requests"][0]["status"] == "RECOVERED"
+        fault_unit_id = str(runtime.snapshot()["manual_fault_requests"][0]["unit_id"])
+        inspections = [
+            event
+            for event in runtime.events
+            if event["type"] == "OPERATION_STARTED"
+            and event.get("unit_id") == fault_unit_id
+            and event.get("kind") == "PRE_BRAZE_INSPECTION"
+        ]
+        assert len(inspections) == 2
     finally:
         adapter.close()
 
@@ -480,21 +692,23 @@ def test_fin_pose_fault_descends_at_offset_and_hands_off_without_teleport() -> N
         adapter.close()
 
 
-def test_arm3_pick_failure_is_missing_at_s4_then_restored_by_manual_review() -> None:
-    """The failed wide-gap grasp remains physical until the ten-second review."""
+def test_arm3_pick_failure_returns_for_physical_reinstall_and_reinspection() -> None:
+    """A missed fin stays missing until Arm3 physically reinstalls it at S3B."""
 
     pytest.importorskip("mujoco")
     runtime = DualLineRuntime(fast=True)
     adapter = DualLineSceneAdapter(V2_XML)
     try:
         runtime.submit_order("A", order_id="FIN_PICK_REAL")
+        runtime.submit_order("B", order_id="FIN_PICK_NEIGHBOR")
         runtime.inject_fault("FIN_PICK_FAILED", target="fin_02")
         unit = runtime.units["FIN_PICK_REAL_UNIT_01"]
         saw_empty_carry = False
         saw_missing_at_s4 = False
-        saw_manual_review = False
-        saw_manual_restore = False
-        for _ in range(16_000):
+        saw_return_to_s3b = False
+        saw_recovery_grasp = False
+        saw_physical_restore = False
+        for _ in range(24_000):
             runtime.tick(0.02)
             adapter.sync(runtime)
             adapter.step_physics(0.02)
@@ -521,17 +735,46 @@ def test_arm3_pick_failure_is_missing_at_s4_then_restored_by_manual_review() -> 
                 assert not adapter.component_visible(unit.tray_id, "fin_02")
             if runtime.faults.plans:
                 plan = next(iter(runtime.faults.plans.values()))
-                saw_manual_review |= plan.status is RecoveryStatus.MANUAL_REVIEW
-                if plan.status is RecoveryStatus.SUCCEEDED:
-                    saw_manual_restore |= adapter.component_visible(unit.tray_id, "fin_02")
+                assert plan.strategy == "FIN_REINSTALL"
+                assert plan.status is not RecoveryStatus.MANUAL_REVIEW
+            if any(
+                event["type"] == "RECOVERY_RETURN_STARTED"
+                and event.get("unit_id") == unit.unit_id
+                and event.get("source") == "S4"
+                and event.get("target") == "INSTALL_B"
+                for event in runtime.events
+            ):
+                saw_return_to_s3b = True
+            recovery_target_operation = bool(
+                operation is not None
+                and operation.unit_id == unit.unit_id
+                and operation.kind == "INSTALL_FIN"
+                and operation.recovery
+                and state["fin_index"] == 2
+            )
+            if recovery_target_operation and state["workpiece_held"]:
+                saw_recovery_grasp = True
+                assert state["grasp_verified"]
+                assert not state["grasp_failed"]
+            if saw_recovery_grasp and adapter.component_visible(unit.tray_id, "fin_02"):
+                saw_physical_restore = True
             if runtime.complete and adapter.transport_settled:
                 break
 
         assert saw_empty_carry
         assert saw_missing_at_s4
-        assert saw_manual_review
-        assert saw_manual_restore
-        assert not any(event["type"] == "RECOVERY_RETURN_STARTED" for event in runtime.events)
+        assert saw_return_to_s3b
+        assert saw_recovery_grasp
+        assert saw_physical_restore
+        assert not runtime.snapshot()["manual_review_notices"]
+        inspections = [
+            event
+            for event in runtime.events
+            if event["type"] == "OPERATION_STARTED"
+            and event.get("unit_id") == unit.unit_id
+            and event.get("kind") == "PRE_BRAZE_INSPECTION"
+        ]
+        assert len(inspections) == 2
         assert runtime.complete
         assert runtime.snapshot()["manual_fault_requests"][0]["status"] == "RECOVERED"
     finally:
