@@ -12,6 +12,7 @@ import numpy as np
 
 from ..motion import HOME_QPOS
 from ..profiles import quintic_time_scaling
+from ..safety import ContactMonitor
 from .process_geometry import V2ProcessGeometry
 from .robot_projector import V2RobotMotionProjector
 from .fault_visuals import (
@@ -87,6 +88,7 @@ class DualLineSceneAdapter:
         self.xml_path = Path(xml_path).expanduser().resolve()
         self.model = mujoco.MjModel.from_xml_path(str(self.xml_path))
         self.data = mujoco.MjData(self.model)
+        self._contact_monitor = ContactMonitor(self.model)
         for arm_name in ("arm1", "arm2", "arm3"):
             qpos_ids: list[int] = []
             dof_ids: list[int] = []
@@ -1175,6 +1177,45 @@ class DualLineSceneAdapter:
 
     def robot_motion_snapshot(self) -> dict[str, dict[str, object]]:
         return self._robots.snapshot()
+
+    def motion_clearance(self, resource: str, q: np.ndarray, task: Any | None = None) -> float:
+        """Return a signed conservative clearance for one candidate pose.
+
+        MuJoCo's broad-phase contact list is used at planning samples, so an
+        actual penetration becomes a negative clearance and is rejected by the
+        Phase-6 force barrier.  Contact-free candidates receive the authored
+        50 mm verification margin; this avoids treating an absent contact as
+        proof of an arbitrarily large clearance while keeping roadmap planning
+        deterministic and lightweight.
+        """
+
+        del task
+        arm = str(resource).lower()
+        controller = self._robots.controllers.get(arm)
+        if controller is None:
+            return float("inf")
+        qpos = np.asarray(self.data.qpos[controller.qpos_ids], dtype=float).copy()
+        qvel = np.asarray(self.data.qvel[controller.dof_ids], dtype=float).copy()
+        ctrl = np.asarray(self.data.ctrl[controller.actuator_ids], dtype=float).copy()
+        try:
+            self.data.qpos[controller.qpos_ids] = np.asarray(q, dtype=float)
+            self.data.qvel[controller.dof_ids] = 0.0
+            self.data.ctrl[controller.actuator_ids] = np.asarray(q, dtype=float)
+            self.mujoco.mj_forward(self.model, self.data)
+            unexpected = self._contact_monitor.unexpected(self.data)
+            arm_contacts = [
+                contact
+                for contact in unexpected
+                if contact.body1.startswith(f"{arm}_") or contact.body2.startswith(f"{arm}_")
+            ]
+            if arm_contacts:
+                return min(float(contact.distance) for contact in arm_contacts)
+            return 0.05
+        finally:
+            self.data.qpos[controller.qpos_ids] = qpos
+            self.data.qvel[controller.dof_ids] = qvel
+            self.data.ctrl[controller.actuator_ids] = ctrl
+            self.mujoco.mj_forward(self.model, self.data)
 
     def inspection_snapshot(self) -> list[dict[str, object]]:
         """Return capture/analysis truth for UI, API and regression tests."""

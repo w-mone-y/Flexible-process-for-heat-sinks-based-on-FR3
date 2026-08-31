@@ -17,6 +17,29 @@ import pytest
 from brazing_sim.flexibility_report import FULL, NONE, PARTIAL, flexibility_report
 
 
+def test_committed_task_records_the_selected_alternative_mode() -> None:
+    from brazing_sim.manufacturing_runtime import ManufacturingRuntime
+    from brazing_sim.planning import ManufacturingTask, TaskType
+
+    task = ManufacturingTask(
+        task_id="ALT-1",
+        task_type=TaskType.INSTALL_FIN,
+        order_id="ALT",
+        unit_id="ALT-UNIT",
+        payload={
+            "capability_alternatives": {
+                "ARM1_FAST": {"candidates": [{"resource_id": "ARM1", "duration": 3.0}]},
+                "ARM3_SAFE": {"candidates": [{"resource_id": "ARM3", "duration": 4.0}]},
+            }
+        },
+    )
+
+    ManufacturingRuntime._record_alternative_selection(task, "ARM3")
+
+    assert task.payload["selected_alternative"] == "ARM3_SAFE"
+    assert "ARM3" in task.payload["alternative_selection_reason"]
+
+
 @pytest.fixture(scope="module")
 def report():
     return flexibility_report({"line_profile": "V2_DUAL_INSTALL"})

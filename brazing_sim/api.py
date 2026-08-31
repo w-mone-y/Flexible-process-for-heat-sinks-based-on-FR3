@@ -131,6 +131,7 @@ class SharedState:
             "motion_plans": [],
             "space_time_reservations": [],
             "motion_blockers": {},
+            "safety_barrier": {"mode": "OFF", "checked_count": 0, "blocked_count": 0},
             "gantt_events": [],
             "server_time": time.time(),
         }
@@ -335,7 +336,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "/motion/reservations": {
                     "motion_plans": state.get("motion_plans", []),
                     "reservations": state.get("space_time_reservations", []),
+                    "blockers": state.get("motion_blockers", {}),
                 },
+                "/safety/barrier": {"safety_barrier": state.get("safety_barrier", {})},
                 # Deliberately not added to ``views``: the report reloads config
                 # and compiles a routing, which is far too much work to run on
                 # every /state poll.  See the explicit branch below.

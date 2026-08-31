@@ -17,6 +17,8 @@
 
 <img src="docs/images/readme/v2_current_overview.png" alt="当前 V2 双安装支路柔性钎焊产线总览" width="1000">
 
+> 📌 本页素材已于 **2026-09-01** 按当前 V2 场景重新采集；WebP 动图优先保证清晰度，GIF 仅作兼容下载。
+
 **三台 FR3 · 六套实体托盘 · 双翅片安装支路 · 三层贯通炉 · 可见故障恢复**
 
 [🎬 看动态流程](#live-tour) · [🖼️ 看工位图库](#scene-gallery) ·
@@ -179,32 +181,53 @@ flowchart LR
 
 </details>
 
+## 🛡️ Phase 6–8：从“能跑”到“可证明”
+
+### Phase 6｜安全屏障逐段强制
+
+每条机械臂候选轨迹都会进行关节与时间双重采样（≤20 ms），并记录预测最小净空。
+低于 40 mm 时，`FORCE` 模式会拒绝提交并把任务留在 READY，返回资源、原因和预约信息；
+`SHADOW` 模式只记录风险，用于安全消融实验。状态可通过
+`GET /safety/barrier` 查看，预约通过 `GET /motion/reservations` 查看。
+
+### Phase 7｜真实替代路线与驾驶舱证据
+
+订单的 OR 路线先由能力目录筛选，再在提交边界绑定具体资源；任务会写入
+`selected_alternative` 和选择原因，甘特图、任务图和 `/state` 读取同一份事实。
+因此“候选路线”不会停留在 UI 装饰：选中的 Arm1/Arm3、节拍和拒绝原因都能追溯。
+
+### Phase 8｜竞赛版冻结
+
+冻结阶段只做复现、回归、性能对照和素材更新。每次发布保留原始 JSON/CSV、运行配置、代码版本
+和失败样本；当前复测明确显示 V2 仍有物理节拍优化空间，后续结果会继续以可复现实验为准。
+
 <a id="performance"></a>
 
-## 📊 2026-08-12 最新效率实测
+## 📊 2026-09-01 Phase 8 冻结前效率复测
 
-同一台 Apple Silicon Mac，headless **完整运动模式**，不使用 `--fast`；仿真时间来自真实
-完工事件，墙钟时间来自端到端进程计时。
+同一台 Apple Silicon Mac，headless **快速回归模式 (`--fast`)**；仿真时间来自真实完工事件，
+墙钟时间来自端到端进程计时。该表用于回归和发布前对照，不把加速模式冒充真实生产节拍。
 
 | 订单场景 | 当前 V2 | 正式 V1 | V2 结果 | V2 吞吐 |
 |---|---:|---:|---:|---:|
-| 单件 A | **206.80 s** | 256.97 s | makespan ↓ **19.5%** | 17.41 件/h |
-| 三件 A | **368.50 s** | 835.13 s | makespan ↓ **55.9%** | 29.31 件/h |
-| A/B/C 各一件 | **359.65 s** | 562.44 s | makespan ↓ **36.1%** | 30.03 件/h |
-| A/B/C 各两件 | **649.30 s** | 1224.66 s | makespan ↓ **47.0%** | 33.27 件/h |
+| 单件 A | **98.90 s** | 19.51 s | 当前 V2 尚未追平 V1 | 36.40 件/h |
+| 三件 A | **173.35 s** | 27.91 s | 当前 V2 尚未追平 V1 | 62.30 件/h |
+| A/B/C 各一件 | **169.35 s** | 34.06 s | 当前 V2 尚未追平 V1 | 63.77 件/h |
+| A/B/C 各两件 | **271.90 s** | 73.28 s | 当前 V2 尚未追平 V1 | 79.44 件/h |
 
 | makespan：越短越好 | 吞吐：越高越好 |
 |:---:|:---:|
 | ![当前 V1 V2 makespan 对比](benchmarks/results/2026-08-12-current-v1-v2/makespan.svg) | ![当前 V1 V2 吞吐对比](benchmarks/results/2026-08-12-current-v1-v2/throughput.svg) |
 
-三件 A 中，V2 的 Arm1/Arm3 并行安装重叠为 **64.10 s**；混合 A/B/C 中为
-**71.95 s**；六订单中达到 **181.45 s**。六订单吞吐由 V1 的 **17.64 件/h**
-提高到 V2 的 **33.27 件/h**，提升 **88.6%**。百分比只描述仿真 makespan，
-不把墙钟加速或演示倍速混入结果。
+⚠️ 本轮复测显示 V2 在当前 `--fast` 配置下仍比 V1 慢；这是需要继续优化的真实结果，
+不是 README 需要掩盖的数字。V2 的优势目前集中在多托盘并行、故障闭环、能力路由和安全证据，
+后续优化重点是物理 actor 轨迹与调度开销，而不是继续堆 UI 功能。
 
 - [最新 V1/V2 原始 JSON](benchmarks/results/2026-08-12-current-v1-v2/metrics.json)
 - [最新复现摘要](benchmarks/results/2026-08-12-current-v1-v2/summary.md)
 - [六订单滚动流水原始数据](benchmarks/results/2026-08-12-six-order/metrics.json)
+- [Phase 8 最新复测 JSON](benchmarks/results/2026-09-01-phase8/metrics.json)
+- [Phase 8 最新复测摘要](benchmarks/results/2026-09-01-phase8/summary.md)
 - 复现脚本：[benchmarks/compare_versions.py](benchmarks/compare_versions.py)
 
 <details>

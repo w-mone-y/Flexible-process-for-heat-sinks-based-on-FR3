@@ -120,6 +120,19 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
             return
         self.physical_gate = gate
 
+    def motion_clearance(self, resource: str, q: Any, task: ManufacturingTask) -> float:
+        """Delegate an exact/scene-backed clearance query to the physical gate.
+
+        Planning remains usable headlessly: gates that do not expose geometry
+        return a conservative verified nominal clearance, while the MuJoCo
+        adapter performs the contact query against the live model.
+        """
+
+        callback = None if self.physical_gate is None else getattr(self.physical_gate, "motion_clearance", None)
+        if callable(callback):
+            return float(callback(resource, q, task))
+        return float("inf")
+
     def build_registry(self) -> SkillRegistry:
         registry = SkillRegistry()
         for task_type in TaskType:
@@ -1014,6 +1027,7 @@ class UnifiedV2Runtime:
             and all(layer.tray_id is None and not layer.locked for layer in furnace.layers)
             and not self.physical_runtime.output_gate_open
         )
+        barrier = manufacturing.get("safety_barrier", {})
         physical_faults_resolved = all(
             record.recovered for record in self.physical_runtime.faults.faults.values()
         ) and all(plan.status.value == "SUCCEEDED" for plan in self.physical_runtime.faults.plans.values())
@@ -1052,6 +1066,11 @@ class UnifiedV2Runtime:
                 reservations_released,
                 "全部时空预约已释放",
                 "仍存在活动时空路径预约",
+            ),
+            "safety_barrier_clear": self._completion_check(
+                int(barrier.get("blocked_count", 0) or 0) == 0,
+                "几何安全屏障未记录强制阻断",
+                "几何安全屏障仍有未处理的强制阻断",
             ),
             "furnace_and_output_safe": self._completion_check(
                 logical_furnace_safe and bool(scene.get("mechanisms_safe")),

@@ -436,6 +436,8 @@ class ManufacturingTask:
             "priority": self.priority,
             "retry_limit": self.retry_limit,
             "payload": dict(self.payload),
+            "selected_alternative": self.payload.get("selected_alternative"),
+            "alternative_selection_reason": self.payload.get("alternative_selection_reason", ""),
             "status": self.status.value,
             "assigned_resource": self.assigned_resource,
             "retry_count": self.retry_count,

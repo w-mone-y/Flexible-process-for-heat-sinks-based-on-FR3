@@ -903,6 +903,38 @@ class ManufacturingRuntime:
         )
 
     @staticmethod
+    def _record_alternative_selection(task: ManufacturingTask, resource_id: str) -> None:
+        """Bind a real OR-route mode at the commit boundary.
+
+        The routing compiler keeps every alternative for explanation.  This
+        small boundary makes the selected mode explicit once a concrete
+        resource is committed, so the task graph, gantt and API all describe
+        the same executable choice.
+        """
+
+        alternatives = task.payload.get("capability_alternatives")
+        if not isinstance(alternatives, dict):
+            return
+        resource = str(resource_id).upper()
+        matches: list[tuple[float, str]] = []
+        for mode, raw in alternatives.items():
+            if not isinstance(raw, dict):
+                continue
+            candidates = raw.get("candidates", ())
+            for candidate in candidates if isinstance(candidates, (list, tuple)) else ():
+                if not isinstance(candidate, dict) or str(candidate.get("resource_id", "")).upper() != resource:
+                    continue
+                duration = float(candidate.get("duration", float("inf")))
+                matches.append((duration, str(mode)))
+        if matches:
+            _, mode = min(matches, key=lambda item: (item[0], item[1]))
+            task.payload["selected_alternative"] = mode
+            task.payload["alternative_selection_reason"] = f"提交时绑定{resource}可执行的{mode}路线"
+        else:
+            task.payload["selected_alternative"] = None
+            task.payload["alternative_selection_reason"] = f"资源{resource}不在任何替代路线候选中"
+
+    @staticmethod
     def _fault_type_for_task(task: ManufacturingTask, code: str) -> FaultType:
         if task.task_type in {TaskType.DISPENSE_BRAZING, TaskType.INSPECT_BRAZING}:
             return FaultType.BRAZING_MISSING
@@ -1475,6 +1507,7 @@ class ManufacturingRuntime:
                 self.zones.release(task.task_id)
                 continue
             try:
+                self._record_alternative_selection(task, assignment.resource_id)
                 task.reserve(assignment.resource_id)
                 self.events.publish(
                     EventType.TASK_RESERVED,
@@ -2617,6 +2650,7 @@ class ManufacturingRuntime:
                 ):
                     self.zones.release(task.task_id)
                     raise RuntimeError(f"无法原子预留资源{assignment.resource_id}")
+                self._record_alternative_selection(task, assignment.resource_id)
                 task.reserve(assignment.resource_id)
                 reserved.append((assignment, task))
 
@@ -2782,6 +2816,11 @@ class ManufacturingRuntime:
                 [] if self.motion_planning is None else self.motion_planning.reservation_snapshots()
             ),
             "motion_blockers": ({} if self.motion_planning is None else dict(self.motion_planning.blockers)),
+            "safety_barrier": (
+                {"mode": "OFF", "checked_count": 0, "blocked_count": 0}
+                if self.motion_planning is None
+                else self.motion_planning.safety_snapshot()
+            ),
             "furnace_batches": [
                 batch.as_dict()
                 for batch in sorted(self.furnace_batches.values(), key=lambda item: item.batch_id)

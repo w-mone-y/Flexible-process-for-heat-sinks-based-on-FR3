@@ -14,6 +14,7 @@ from .motion_planner import (
     SpaceTimeReservationTable,
     always_collision_free,
 )
+from ..safety import GeometrySafetyBarrier, SafetyBarrierReport
 from .task_models import ManufacturingTask
 
 FR3_LIMITS = (
@@ -34,6 +35,7 @@ class MotionPlanningDecision:
     path: JointPath | None
     blocker: str | None = None
     blocked_by: str | None = None
+    safety_report: SafetyBarrierReport | None = None
 
     @property
     def start_time(self) -> float:
@@ -45,7 +47,7 @@ class WorkcellMotionPlanningService:
 
     ROBOTS = ("ARM1", "ARM2", "ARM3")
 
-    def __init__(self, *, seed: int = 0) -> None:
+    def __init__(self, *, seed: int = 0, safety_mode: str = "FORCE") -> None:
         self.seed = int(seed)
         self.planners = {
             resource: HybridMotionPlanner(
@@ -60,6 +62,7 @@ class WorkcellMotionPlanningService:
         self.reservations = SpaceTimeReservationTable(safety_time_s=0.02)
         self.paths: dict[str, JointPath] = {}
         self.blockers: dict[str, dict[str, Any]] = {}
+        self.safety_barrier = GeometrySafetyBarrier(mode=safety_mode)
         self._logical_q = {resource: HOME.copy() for resource in self.ROBOTS}
 
     @staticmethod
@@ -182,6 +185,30 @@ class WorkcellMotionPlanningService:
             details = {"reason": str(exc), "resource_id": resource}
             self.blockers[task.task_id] = details
             return MotionPlanningDecision(task.task_id, None, str(exc))
+        # When the physical context exposes an exact capsule/geometry query,
+        # enforce the continuous barrier here.  Dry-run planners intentionally
+        # omit that callback and retain their historical deterministic path.
+        clearance_fn = getattr(context, "motion_clearance", None)
+        safety_report = None
+        if callable(clearance_fn):
+            safety_report = self.safety_barrier.evaluate(
+                path.samples,
+                clearance=lambda q: clearance_fn(resource, q, task),
+            )
+            if not safety_report.allowed:
+                self.reservations.release(path.reservation_id or "")
+                self.blockers[task.task_id] = {
+                    "reason": safety_report.reason_zh,
+                    "reason_code": safety_report.reason_code,
+                    "resource_id": resource,
+                    "minimum_clearance_m": safety_report.minimum_clearance_m,
+                }
+                return MotionPlanningDecision(
+                    task.task_id,
+                    None,
+                    safety_report.reason_zh,
+                    safety_report=safety_report,
+                )
         task.reservation_id = reservation.reservation_id
         self.paths[task.task_id] = path
         self._logical_q[resource] = np.asarray(path.samples[-1].position, dtype=float)
@@ -191,9 +218,9 @@ class WorkcellMotionPlanningService:
                 "resource_id": resource,
                 "available_at": path.start_time,
             }
-            return MotionPlanningDecision(task.task_id, path, "时空路径预约等待")
+            return MotionPlanningDecision(task.task_id, path, "时空路径预约等待", safety_report=safety_report)
         self.blockers.pop(task.task_id, None)
-        return MotionPlanningDecision(task.task_id, path)
+        return MotionPlanningDecision(task.task_id, path, safety_report=safety_report)
 
     def release_task(self, task: ManufacturingTask, *, retain_path: bool = True) -> None:
         if task.reservation_id:
@@ -208,12 +235,18 @@ class WorkcellMotionPlanningService:
         self.blockers.clear()
         self.reservations.clear()
         self._logical_q = {resource: HOME.copy() for resource in self.ROBOTS}
+        self.safety_barrier.reset()
 
     def path_snapshots(self) -> list[dict[str, object]]:
         return [self.paths[key].as_dict() for key in sorted(self.paths)]
 
     def reservation_snapshots(self) -> list[dict[str, object]]:
         return [item.as_dict() for item in self.reservations.reservations]
+
+    def safety_snapshot(self) -> dict[str, object]:
+        """Expose barrier mode, thresholds and latest evidence to the UI."""
+
+        return self.safety_barrier.snapshot()
 
 
 __all__ = ["MotionPlanningDecision", "WorkcellMotionPlanningService"]

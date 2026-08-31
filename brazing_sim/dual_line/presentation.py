@@ -1020,6 +1020,9 @@ class V2StatePresenter:
             "motion_plans": list(authority.get("motion_plans", [])),
             "space_time_reservations": list(authority.get("space_time_reservations", [])),
             "motion_blockers": dict(authority.get("motion_blockers", {})),
+            "safety_barrier": dict(
+                authority.get("safety_barrier", snapshot.get("safety_barrier", {}))
+            ),
             "physical_completion_gates": dict(snapshot.get("physical_completion_gates", {})),
             "gantt_events": self._gantt_events(all_events, float(snapshot.get("sim_time", 0.0))),
             "ui_capabilities": {

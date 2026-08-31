@@ -1,0 +1,13 @@
+case,version,supported,completed,exit_code,simulation_seconds,wall_seconds,units,throughput_per_sim_hour,parallel_install_seconds,error,command
+single_a,v2,True,True,0,98.9,9.390404833000503,1,36.40040444893832,0.0,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A', '--fast', '--max-sim-time', '2000']"
+single_a,v1,True,True,0,19.514000000000063,3.3760971250012517,1,184.48293532848152,,,"['python', 'brazing_line.py', '--headless', '--order', 'A', '--fast', '--max-sim-time', '2000']"
+single_a,v1-early,True,True,0,19.514000000000063,3.303836582999793,1,184.48293532848152,,,"['python', 'brazing_line.py', '--headless', '--order', 'A', '--fast', '--max-sim-time', '2000']"
+three_a,v2,True,True,0,173.35,26.64049916699878,3,62.30170175944621,23.9,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A,A,A', '--fast', '--max-sim-time', '2000']"
+three_a,v1,True,True,0,27.90799999999541,4.8056129590004275,3,386.98581052034456,,,"['python', 'brazing_line.py', '--headless', '--batch', 'A', '--fast', '--max-sim-time', '2000']"
+three_a,v1-early,False,False,,,,3,,,该历史版本不支持此订单模式,[]
+mixed_abc,v2,True,True,0,169.35,27.22029258299881,3,63.7732506643047,23.0,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A,B,C', '--fast', '--max-sim-time', '2000']"
+mixed_abc,v1,True,True,0,34.05999999999566,33.94963920900045,3,317.08749266005213,,,"['python', 'brazing_line.py', '--headless', '--orders-file', '/var/folders/r0/xw74vdf55_z8sg9wvydmg_240000gn/T/fr3-benchmark-qbk786bh/v1-abc.yaml', '--fast', '--max-sim-time', '2000']"
+mixed_abc,v1-early,False,False,,,,3,,,该历史版本不支持此订单模式,[]
+six_abcabc,v2,True,True,0,271.9,68.03954729200268,6,79.44097094520045,47.0,,"['python', 'brazing_line_v2.py', '--headless', '--orders', 'A,B,C,A,B,C', '--fast', '--max-sim-time', '2000']"
+six_abcabc,v1,True,True,0,73.28000000001062,49.46148029100004,6,294.7598253274682,,,"['python', 'brazing_line.py', '--headless', '--orders-file', '/var/folders/r0/xw74vdf55_z8sg9wvydmg_240000gn/T/fr3-benchmark-qbk786bh/v1-abc.yaml', '--fast', '--max-sim-time', '2000']"
+six_abcabc,v1-early,False,False,,,,6,,,该历史版本不支持此订单模式,[]
