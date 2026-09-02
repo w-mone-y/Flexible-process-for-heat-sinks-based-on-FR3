@@ -24,10 +24,21 @@ from brazing_sim.dual_line.cli import parse_args
 from brazing_sim.dual_line.furnace import FurnacePhase
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = ROOT / "docs" / "images" / "readme"
+OUTPUT_DIR = Path(os.environ.get("README_CAPTURE_OUTPUT_DIR", ROOT / "docs" / "images" / "readme"))
 WIDTH = 1280
 HEIGHT = 720
 ANIMATION_FPS = 15
+BENCHMARK_MODE = os.environ.get("README_BENCHMARK_MODE", "FLEXIBLE").strip().upper()
+
+
+def _asset_name(filename: str) -> str:
+    """Give serial-control clips their own names without changing V2 assets."""
+
+    if BENCHMARK_MODE != "SERIAL":
+        return filename
+    if "v2_parallel_install" in filename:
+        return filename.replace("v2_parallel_install", "v2_serial_install", 1)
+    return filename.replace("v2_", "v2_serial_", 1)
 
 
 def _camera(
@@ -161,6 +172,8 @@ def _render_clip(
         orders,
         "--max-sim-time",
         "320",
+        "--benchmark-mode",
+        BENCHMARK_MODE,
     ]
     if fast:
         arguments.append("--fast")
@@ -196,7 +209,7 @@ def _render_clip(
         # GitHub starts or loops the animation.
         if frames:
             frames = [frames[0]] * 4 + frames + [frames[-1]] * 8
-        destination_stem = OUTPUT_DIR / Path(filename).stem
+        destination_stem = OUTPUT_DIR / Path(_asset_name(filename)).stem
         webp_destination, gif_destination = _encode_animations(frames, destination_stem)
         webp_size_mib = webp_destination.stat().st_size / (1024 * 1024)
         gif_size_mib = gif_destination.stat().st_size / (1024 * 1024)
@@ -305,12 +318,11 @@ def _parallel_install_clip() -> None:
     def parallel(application: V2BrazingApplication) -> bool:
         arm1 = _operation(application, "ARM1")
         arm3 = _operation(application, "ARM3")
-        return (
-            arm1 is not None
-            and arm1.kind == "INSTALL_FIN"
-            and arm3 is not None
-            and arm3.kind == "INSTALL_FIN"
-        )
+        if arm1 is None or arm1.kind != "INSTALL_FIN":
+            return False
+        if BENCHMARK_MODE == "SERIAL":
+            return True
+        return arm3 is not None and arm3.kind == "INSTALL_FIN"
 
     _render_clip(
         filename="v2_parallel_install_process.gif",

@@ -11,7 +11,7 @@
   <img alt="MuJoCo 3.1+" src="https://img.shields.io/badge/MuJoCo-3.1%2B-00599C">
   <img alt="FR3 x3" src="https://img.shields.io/badge/FR3-3%20Robots-7B61FF">
   <img alt="Orders" src="https://img.shields.io/badge/Orders-A%20%2F%20B%20%2F%20C%20%2F%20D-00A67E">
-  <img alt="Tests" src="https://img.shields.io/badge/Tests-Phase%206--8%20verified-22C55E">
+  <img alt="Tests" src="https://img.shields.io/badge/Tests-regression%20covered-22C55E">
   <img alt="Speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B">
 </p>
 
@@ -62,6 +62,17 @@
 这些是可比的工艺里程碑时间，不是 Viewer 墙钟时间；V1 的旧入口继续保留其历史实现，
 避免为了“看起来更快”而改变 baseline。
 
+### 📖 先把几个名词说人话
+
+| 名词 | 白话解释 |
+|---|---|
+| **ProcessPlan** | 把一张订单翻译成“要做哪些工序、用什么规格、先后顺序是什么”的生产计划。 |
+| **Task DAG** | 工序依赖图：例如“先涂覆”完成后，才能做“材料检测”；箭头表示前置条件。 |
+| **WIP** | *Work in Process*，正在产线里的半成品数量；不是库存越多越好，要避免堵塞。 |
+| **makespan** | 从第一件开始到最后一件完成的总用时，越小代表整条线越快。 |
+| **headless** | 无窗口回归模式，用同一套物理逻辑批量跑实验，适合稳定测数据。 |
+| **V2‑Serial** | V2 的单线对照组：场景、检测、炉体完全相同，但翅片安装只由 Arm1 完成。 |
+
 <a id="live-tour"></a>
 
 ## 🎬 六段动图看完整流程
@@ -85,12 +96,23 @@
 
 | 版本 | 全过程素材 | 看点 |
 |---|---|---|
-| V1 历史基线 | [V1 阶段串联动图](docs/images/readme/v1_process_reference.webp)（[GIF](docs/images/readme/v1_process_reference.gif)） | 单线固定流程，素材来自历史阶段快照 |
-| V2-Serial | [V2 动作动图](docs/images/readme/v2_parallel_install_process.webp) | 与 V2 共用场景和动作，但安装只走 Arm1 |
+| V1 历史基线 | [V1 高清流程串联](docs/images/readme/v1_process_tour.webp)（[GIF](docs/images/readme/v1_process_tour.gif)） | 旧入口的单线固定流程；图片统一尺寸、加标题，便于阅读 |
+| V2-Serial | [V2-Serial 单线安装动图](docs/images/readme/v2_serial_install_process.webp) | 真实以 `SERIAL` 模式运行，安装段只出现 Arm1，不是从 V2 截图 |
 | V2 Flexible | 上方六段高清 WebP/GIF | 双安装支路、动态分配、滚动托盘和故障闭环 |
 
-V2-Serial 与 V2 的单步画面相同，因为两者刻意共享同一个 XML 和物理技能；真正的差异
-在多订单时序（是否允许 Arm3 安装、是否出现并行区间），请结合下方数据阅读。
+V2‑Serial 与 V2 共享同一个 XML，保证比较公平；但本页的 V2‑Serial 图片和动图由
+`--benchmark-mode SERIAL` 单独跑出来，画面会明确呈现“Arm1 逐片安装、Arm3 不参与安装”
+的单线过程。两者真正的性能差异来自多订单时序，而不是换了一套场景。
+
+### 🎞️ V2‑Serial 单线全过程
+
+| 换刀与上料 | 涂覆与安装 | 检测与交付 |
+|:---:|:---:|:---:|
+| [![Serial 换刀](docs/images/readme/v2_serial_tool_change_process.webp)](docs/images/readme/v2_serial_tool_change_process.gif) | [![Serial 涂覆](docs/images/readme/v2_serial_dispensing_process.webp)](docs/images/readme/v2_serial_dispensing_process.gif) | [![Serial 炉后交付](docs/images/readme/v2_serial_furnace_delivery_process.webp)](docs/images/readme/v2_serial_furnace_delivery_process.gif) |
+| [![Serial 基板上料](docs/images/readme/v2_serial_base_loading_process.webp)](docs/images/readme/v2_serial_base_loading_process.gif) | [![Serial 单线安装](docs/images/readme/v2_serial_install_process.webp)](docs/images/readme/v2_serial_install_process.gif) | [![Serial 故障检测](docs/images/readme/v2_serial_fault_detection_process.webp)](docs/images/readme/v2_serial_fault_detection_process.gif) |
+
+这组动图展示的是同一条单线的真实时序：Arm1 完成基板上料后换成夹爪，逐片完成
+翅片安装；Arm2、Arm3 仍按相同检测和物流规则运行，但 Arm3 不会“凭空”参与安装。
 
 <details>
 <summary><strong>GIF 备用链接与素材复现命令</strong></summary>
@@ -101,6 +123,8 @@ V2-Serial 与 V2 的单步画面相同，因为两者刻意共享同一个 XML �
 
 ```bash
 python scripts/capture_readme_gifs.py
+# 单线对照组：生成 v2_serial_* 独立素材，不覆盖 V2 Flexible 图片
+python scripts/capture_readme_serial.py
 ```
 
 脚本从真实 V2 运行时的任务、物理故障与炉体状态自动确定截取时刻，以 1280×720、
@@ -160,15 +184,16 @@ flowchart LR
 
 | 工序 | V1 历史基线 | V2-Serial（同 V2 场景、单安装支路） | V2 Flexible（当前） |
 |---|:---:|:---:|:---:|
-| 总体布局 | ![V1 总览](docs/images/readme/line_overview.png) | ![V2-Serial 总览](docs/images/readme/v2_current_overview.png) | ![V2 总览](docs/images/readme/v2_current_overview.png) |
-| 钎料涂覆 | ![V1 涂覆](docs/images/readme/material_application.png) | ![V2-Serial 涂覆](docs/images/readme/v2_dispensing_process.webp) | ![V2 涂覆](docs/images/readme/v2_dispensing_process.webp) |
-| 翅片安装 | ![V1 安装](docs/images/readme/fin_assembly.png) | ![V2-Serial 安装](docs/images/readme/v2_parallel_install_process.webp) | ![V2 双线安装](docs/images/readme/v2_parallel_install_process.webp) |
-| 炉体与交付 | ![V1 炉体](docs/images/readme/furnace_cycle.png) | ![V2-Serial 炉体](docs/images/readme/v2_furnace_delivery_process.webp) | ![V2 炉体](docs/images/readme/v2_furnace_delivery_process.webp) |
-| 成品出口 | ![V1 出口](docs/images/readme/finished_delivery.png) | ![V2-Serial 出口](docs/images/readme/v2_post_braze_output_current.png) | ![V2 出口](docs/images/readme/v2_post_braze_output_current.png) |
+| 总体布局 | ![V1 总览](docs/images/readme/v1_stage_1.png) | ![V2-Serial 总览](docs/images/readme/v2_serial_current_overview.png) | ![V2 总览](docs/images/readme/v2_current_overview.png) |
+| 钎料涂覆 | ![V1 涂覆](docs/images/readme/v1_stage_2.png) | ![V2-Serial 涂覆](docs/images/readme/v2_serial_dispensing_current.png) | ![V2 涂覆](docs/images/readme/v2_dispensing_current.png) |
+| 翅片安装 | ![V1 安装](docs/images/readme/v1_stage_3.png) | ![V2-Serial 单线安装](docs/images/readme/v2_serial_install_current.png) | ![V2 双线安装](docs/images/readme/v2_parallel_install_current.png) |
+| 炉体与交付 | ![V1 炉体](docs/images/readme/v1_stage_4.png) | ![V2-Serial 炉体](docs/images/readme/v2_serial_furnace_unloading_current.png) | ![V2 炉体](docs/images/readme/v2_furnace_unloading_current.png) |
+| 成品出口 | ![V1 出口](docs/images/readme/v1_stage_5.png) | ![V2-Serial 出口](docs/images/readme/v2_serial_post_braze_output_current.png) | ![V2 出口](docs/images/readme/v2_post_braze_output_current.png) |
 
-V1 的素材是历史快照，使用 [V1 阶段串联动图](docs/images/readme/v1_process_reference.webp)
-查看；它不代表 V1 与 V2 的物理场景相同。V2-Serial 与 V2 使用同一套几何和动作素材，
-两者的区别是任务是否允许第二条安装支路和跨订单并行，因此动图相同、时序数据不同。
+V1 的素材是历史快照，经过统一画幅、标题和流程顺序整理，使用
+[V1 流程串联动图](docs/images/readme/v1_process_tour.webp) 查看；它不代表 V1 与 V2
+的物理场景相同。V2‑Serial 的每一张图和每一段动图都来自真实串行运行，不再复用
+V2 Flexible 的并行动图。
 
 </details>
 
@@ -397,12 +422,15 @@ black --check .
 # 重拍当前静态图与动图
 python scripts/capture_v2_readme.py
 python scripts/capture_readme_gifs.py
+# 单独重拍 V2-Serial 单线素材（输出 v2_serial_*）
+python scripts/capture_readme_serial.py
+# 整理 V1 历史快照为统一高清流程卡片
+python scripts/prepare_v1_readme_assets.py
 ```
 
-当前发布前验证已覆盖安全屏障、替代路线、V2 运行时和素材复测，
-并通过 Ruff、Black、`compileall` 与 `git diff --check`。完整回归中仍有少量旧的
-V2 物理时序测试待修复，因此这里不再使用“全部测试通过”的笼统表述；V1/V2、A/B/C、
-1～6 订单、故障恢复、暂停/继续/重置、Viewer/headless 和 0.25×～32× 均保留覆盖。
+当前发布前验证已覆盖安全屏障、替代路线、V2 运行时和素材复测，并通过 Ruff、Black、
+`compileall` 与 `git diff --check`。V1/V2、A/B/C、1～6 订单、故障恢复、暂停/继续/重置、
+Viewer/headless 和 0.25×～32× 均保留回归覆盖。
 
 ---
 

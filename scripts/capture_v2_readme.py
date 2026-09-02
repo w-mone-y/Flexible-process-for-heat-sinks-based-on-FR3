@@ -21,7 +21,18 @@ from brazing_sim.dual_line.furnace import FurnacePhase
 from brazing_sim.dual_line.tray_flow import TrayOwner
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = ROOT / "docs" / "images" / "readme"
+OUTPUT_DIR = Path(os.environ.get("README_CAPTURE_OUTPUT_DIR", ROOT / "docs" / "images" / "readme"))
+BENCHMARK_MODE = os.environ.get("README_BENCHMARK_MODE", "FLEXIBLE").strip().upper()
+
+
+def _asset_name(filename: str) -> str:
+    """Keep serial-control screenshots separate from the flexible screenshots."""
+
+    if BENCHMARK_MODE != "SERIAL":
+        return filename
+    if "v2_parallel_install" in filename:
+        return filename.replace("v2_parallel_install", "v2_serial_install", 1)
+    return filename.replace("v2_", "v2_serial_", 1)
 
 
 def _camera(
@@ -48,7 +59,7 @@ def _save(
 ) -> None:
     renderer.update_scene(application.scene.data, camera=camera)
     frame = renderer.render()
-    path = OUTPUT_DIR / filename
+    path = OUTPUT_DIR / _asset_name(filename)
     Image.fromarray(frame).save(path, optimize=True)
     print(f"[capture] {filename} at t={application.runtime.sim_time:.2f}s", flush=True)
 
@@ -70,6 +81,8 @@ def _capture_fault_frame(
             "--fast",
             "--max-sim-time",
             "260",
+            "--benchmark-mode",
+            BENCHMARK_MODE,
         ]
     )
     application = V2BrazingApplication(args)
@@ -189,6 +202,8 @@ def main() -> int:
             "A,A,A",
             "--max-sim-time",
             "500",
+            "--benchmark-mode",
+            BENCHMARK_MODE,
         ]
     )
     application = V2BrazingApplication(args)
@@ -308,12 +323,9 @@ def main() -> int:
                     ),
                 )
                 captured.add("v2_pre_braze_inspection_current.png")
-            parallel_install = (
-                arm1 is not None
-                and arm1.kind == "INSTALL_FIN"
-                and arm3 is not None
-                and arm3.kind == "INSTALL_FIN"
-            )
+            parallel_install = arm1 is not None and arm1.kind == "INSTALL_FIN"
+            if BENCHMARK_MODE != "SERIAL":
+                parallel_install = parallel_install and arm3 is not None and arm3.kind == "INSTALL_FIN"
             if parallel_install and "v2_parallel_install_current.png" not in captured:
                 _save(
                     renderer,
