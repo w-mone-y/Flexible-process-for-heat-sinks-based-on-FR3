@@ -1,0 +1,16 @@
+# Comparable milestone envelopes used by the V2/V2-Serial benchmark report.
+# These values describe process work, not wall-clock rendering cost.
+schema_version: 1
+profile: comparable_process_envelope_v1
+units: seconds
+milestones:
+  base_loading: 12.0
+  brazing_dispensing: 24.0
+  material_inspection: 10.0
+  fin_pick: 8.0
+  fin_install: 10.0
+  fin_inspection: 10.0
+  fixture_press: 2.0
+  furnace_cycle: 10.0
+  post_braze_inspection: 10.0
+  output_delivery: 6.5
