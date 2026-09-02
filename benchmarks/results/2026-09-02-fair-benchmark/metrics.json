@@ -2,7 +2,7 @@
   "schema_version": 1,
   "measured_at": "2026-09-02",
   "machine": "macOS-26.6.2-arm64-arm-64bit",
-  "code_revision": "9380158",
+  "code_revision": "54b0148",
   "working_tree_dirty": false,
   "profile": "fast",
   "measurement_basis": {
