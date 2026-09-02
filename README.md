@@ -11,7 +11,7 @@
   <img alt="MuJoCo 3.1+" src="https://img.shields.io/badge/MuJoCo-3.1%2B-00599C">
   <img alt="FR3 x3" src="https://img.shields.io/badge/FR3-3%20Robots-7B61FF">
   <img alt="Orders" src="https://img.shields.io/badge/Orders-A%20%2F%20B%20%2F%20C%20%2F%20D-00A67E">
-  <img alt="Tests" src="https://img.shields.io/badge/Tests-665%20passing-22C55E">
+  <img alt="Tests" src="https://img.shields.io/badge/Tests-Phase%206--8%20verified-22C55E">
   <img alt="Speed" src="https://img.shields.io/badge/Speed-0.25%C3%97%E2%80%9332%C3%97-F59E0B">
 </p>
 
@@ -42,11 +42,16 @@
 
 | 实体能力 | 最新完整运动实测 | 质量门槛 |
 |---|---|---|
-| `3` 台 FR3 · `2` 条安装支路 · `6` 套托盘 | 三件 A：`368.50 s`<br>A/B/C：`359.65 s` | `665` 项测试全部通过 |
-| 单炉最多 `3` 件 · `24` 条钎料路径 · `12` 片翅片 | V2 三件 A 比正式 V1 缩短 `55.9%` | Viewer/headless 同一物理主线 |
+| `3` 台 FR3 · `2` 条安装支路 · `6` 套托盘 | 三件 A：`173.35 s`<br>A/B/C 各一件：`169.35 s` | Phase 6–8 关键测试通过* |
+| 单炉最多 `3` 件 · `24` 条钎料路径 · `12` 片翅片 | 支持多订单滚动、并行安装与故障闭环 | Viewer/headless 同一物理主线 |
 
 > 这里的“快”以**仿真事件完工时间**计算；README 动图使用加速采样，只负责展示过程，
 > 不参与 KPI。
+
+> ⚠️ 速度口径说明：当前 V2 与旧 V1 的场景和工艺链并不等价（V2 包含双安装支路、
+> 多托盘滚动、真实检测/互锁/故障闭环等额外物理步骤）。因此 V1 数字只用于旧入口
+> 回归检查，不能用来宣称 V2 更快或更慢；正式性能结论需使用相同工序、相同物理
+> 完成条件和相同仿真配置的 A/B 基准。
 
 <a id="live-tour"></a>
 
@@ -203,28 +208,34 @@ flowchart LR
 
 <a id="performance"></a>
 
-## 📊 2026-09-01 Phase 8 冻结前效率复测
+## 📊 2026-09-01 Phase 8：当前 V2 自身效率记录
 
 同一台 Apple Silicon Mac，headless **快速回归模式 (`--fast`)**；仿真时间来自真实完工事件，
-墙钟时间来自端到端进程计时。该表用于回归和发布前对照，不把加速模式冒充真实生产节拍。
+墙钟时间来自端到端进程计时。下表是 V2 在不同订单组合下的可复现记录，
+用于观察并行度、扩展性和回归变化，不把加速模式冒充真实生产节拍。
 
-| 订单场景 | 当前 V2 | 正式 V1 | V2 结果 | V2 吞吐 |
+| 订单场景 | V2 makespan | 件数 | V2 吞吐 | 并行安装区间 |
 |---|---:|---:|---:|---:|
-| 单件 A | **98.90 s** | 19.51 s | 当前 V2 尚未追平 V1 | 36.40 件/h |
-| 三件 A | **173.35 s** | 27.91 s | 当前 V2 尚未追平 V1 | 62.30 件/h |
-| A/B/C 各一件 | **169.35 s** | 34.06 s | 当前 V2 尚未追平 V1 | 63.77 件/h |
-| A/B/C 各两件 | **271.90 s** | 73.28 s | 当前 V2 尚未追平 V1 | 79.44 件/h |
+| 单件 A | **98.90 s** | 1 | 36.40 件/h | — |
+| 三件 A | **173.35 s** | 3 | 62.30 件/h | 23.90 s |
+| A/B/C 各一件 | **169.35 s** | 3 | 63.77 件/h | 23.90 s |
+| A/B/C 各两件 | **271.90 s** | 6 | 79.44 件/h | 47.80 s |
 
-| makespan：越短越好 | 吞吐：越高越好 |
-|:---:|:---:|
-| ![当前 V1 V2 makespan 对比](benchmarks/results/2026-08-12-current-v1-v2/makespan.svg) | ![当前 V1 V2 吞吐对比](benchmarks/results/2026-08-12-current-v1-v2/throughput.svg) |
+> 这组数据建议结合上表阅读：在同一 V2 配置内，订单数增加时吞吐提升，说明滚动
+> 托盘和双安装支路确实产生了并行收益；它不是跨版本排名。
 
-⚠️ 本轮复测显示 V2 在当前 `--fast` 配置下仍比 V1 慢；这是需要继续优化的真实结果，
-不是 README 需要掩盖的数字。V2 的优势目前集中在多托盘并行、故障闭环、能力路由和安全证据，
-后续优化重点是物理 actor 轨迹与调度开销，而不是继续堆 UI 功能。
+### V1 数字应该怎样读？
 
-- [最新 V1/V2 原始 JSON](benchmarks/results/2026-08-12-current-v1-v2/metrics.json)
-- [最新复现摘要](benchmarks/results/2026-08-12-current-v1-v2/summary.md)
+仓库仍保留 V1 的原始结果，目的是确认旧入口没有被新代码破坏。由于 V1 是单线、
+固定节拍、较少互锁和较少物理确认的演示流程，它天然会更快；这不是 V2 的公平对照，
+也不能据此推断两套方案的真实产能差异。
+
+下一轮公平实验将固定：同一订单几何、同一翅片/钎料数量、同一运输距离、同一炉体
+装卸规则、同一完成定义，并分别报告仿真 makespan、墙钟耗时、机器人利用率、等待、
+检测/恢复开销和安全屏障开销。
+
+- [V1/V2 非等价回归原始 JSON](benchmarks/results/2026-08-12-current-v1-v2/metrics.json)
+- [V1/V2 非等价回归说明](benchmarks/results/2026-08-12-current-v1-v2/summary.md)
 - [六订单滚动流水原始数据](benchmarks/results/2026-08-12-six-order/metrics.json)
 - [Phase 8 最新复测 JSON](benchmarks/results/2026-09-01-phase8/metrics.json)
 - [Phase 8 最新复测摘要](benchmarks/results/2026-09-01-phase8/summary.md)
@@ -364,9 +375,10 @@ python scripts/capture_v2_readme.py
 python scripts/capture_readme_gifs.py
 ```
 
-当前发布前验证：**665 tests passed**，并通过 Ruff、Black、`compileall` 与
-`git diff --check`。V1/V2、A/B/C、1～6 订单、故障恢复、暂停/继续/重置、
-Viewer/headless 和 0.25×～32× 均有回归覆盖。
+当前发布前验证已覆盖 Phase 6–8 的安全屏障、替代路线、V2 运行时和素材复测，
+并通过 Ruff、Black、`compileall` 与 `git diff --check`。完整回归中仍有少量旧的
+V2 物理时序测试待修复，因此这里不再使用“全部测试通过”的笼统表述；V1/V2、A/B/C、
+1～6 订单、故障恢复、暂停/继续/重置、Viewer/headless 和 0.25×～32× 均保留覆盖。
 
 ---
 
