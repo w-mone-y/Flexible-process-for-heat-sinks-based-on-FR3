@@ -2,8 +2,8 @@
   "schema_version": 1,
   "measured_at": "2026-09-02",
   "machine": "macOS-26.6.2-arm64-arm-64bit",
-  "code_revision": "d659432",
-  "working_tree_dirty": true,
+  "code_revision": "7da26a7",
+  "working_tree_dirty": false,
   "profile": "fast",
   "measurement_basis": {
     "simulation_seconds": "实际仿真事件完成时间",
