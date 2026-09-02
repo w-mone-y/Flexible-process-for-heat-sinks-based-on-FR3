@@ -10,7 +10,7 @@ from ..flexible import ProcessPlan, build_inline_plan
 from ..manufacturing_runtime import ManufacturingRuntime
 from ..manufacturing_config import load_scheduler_config
 from ..paths import CONFIG_DIR
-from ..planning import ManufacturingTask, TaskType, V2_DUAL_INSTALL_PROFILE
+from ..planning import ManufacturingTask, TaskType, V2_DUAL_INSTALL_PROFILE, LineExecutionProfile
 from ..scheduling import Arm1ToolPolicyConfig, ResourceStatus
 from .dispatch import InstallBranch
 from .furnace import FurnacePhase
@@ -733,14 +733,27 @@ class V2PhysicalExecutionBridge(RuntimeExecutionGate):
 class UnifiedV2Runtime:
     """Compatibility facade: one manufacturing authority, one V2 physical adapter."""
 
-    def __init__(self, *, fast: bool = False, twinshield_mode: str = "AUTHORITY") -> None:
-        self.physical_runtime = DualLineRuntime(fast=fast)
+    def __init__(
+        self,
+        *,
+        fast: bool = False,
+        twinshield_mode: str = "AUTHORITY",
+        benchmark_mode: str = "FLEXIBLE",
+    ) -> None:
+        mode = str(benchmark_mode or "FLEXIBLE").strip().upper()
+        if mode not in {"FLEXIBLE", "SERIAL"}:
+            raise ValueError("benchmark_mode must be FLEXIBLE or SERIAL")
+        self.benchmark_mode = mode
+        serial_mode = mode == "SERIAL"
+        self.physical_runtime = DualLineRuntime(fast=fast, serial_mode=serial_mode)
         self.bridge = V2PhysicalExecutionBridge(self.physical_runtime)
         self._physical_event_cursor = 0
         self.physical_runtime.set_execution_gate(self.bridge)
         scheduler_config = load_scheduler_config(CONFIG_DIR / "scheduler.yaml")
         scheduler_config = replace(
             scheduler_config,
+            allow_parallel_tasks=False if serial_mode else scheduler_config.allow_parallel_tasks,
+            max_assignments_per_tick=1 if serial_mode else scheduler_config.max_assignments_per_tick,
             arm1_tool_policy=Arm1ToolPolicyConfig(
                 # Six is only the admitted-WIP safety ceiling.  The policy
                 # derives the actual first wave from the two executable fin
@@ -756,11 +769,25 @@ class UnifiedV2Runtime:
             scheduler_config=scheduler_config,
             skill_registry=self.bridge.build_registry(),
             context=self.bridge,
+            # Serial is a scheduling control, not a smaller factory.  Keep
+            # the six-tray WIP pool so the comparison does not accidentally
+            # measure starvation caused by an artificial one-slot buffer.
             max_wip_units=6,
             enable_arm1_tool_policy=True,
             camera_coordination=True,
             enable_motion_planning=True,
-            execution_profile=V2_DUAL_INSTALL_PROFILE,
+            execution_profile=(
+                LineExecutionProfile(
+                    name="V2_SERIAL",
+                    restrictions={
+                        **V2_DUAL_INSTALL_PROFILE.restrictions,
+                        "FIN_PICKING": frozenset({"ARM1"}),
+                        "FIN_ASSEMBLY": frozenset({"ARM1"}),
+                    },
+                )
+                if serial_mode
+                else V2_DUAL_INSTALL_PROFILE
+            ),
             dispatch_guard=self.bridge.task_dispatch_allowed,
             external_batch_controller=True,
             twinshield_mode=twinshield_mode,
@@ -952,6 +979,13 @@ class UnifiedV2Runtime:
             for unit in self.physical_runtime.units.values()
             if unit.branch in resource_for_branch
         }
+        if self.benchmark_mode == "SERIAL":
+            # Before the first physical branch assignment there is no unit
+            # hint to sync.  The serial control profile must still prevent
+            # the manufacturing DAG from dispatching PICK/INSTALL to Arm3.
+            selected = {
+                unit.unit_id: "ARM1" for unit in self.physical_runtime.units.values()
+            } | selected
         if not selected:
             return
         for task in self.manufacturing_runtime.graph:
@@ -1115,6 +1149,7 @@ class UnifiedV2Runtime:
         completion = self.physical_completion_report()
         state["physical_completion_gates"] = completion
         state["physical_execution_complete"] = bool(completion["passed"])
+        state["benchmark_mode"] = self.benchmark_mode
         return state
 
     def compute_reference_plan(

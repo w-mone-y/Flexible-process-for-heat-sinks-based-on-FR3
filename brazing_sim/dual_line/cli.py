@@ -32,6 +32,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--fast", action="store_true", help="shorten upstream demo operations")
     parser.add_argument(
+        "--benchmark-mode",
+        type=str.upper,
+        choices=("FLEXIBLE", "SERIAL"),
+        default="FLEXIBLE",
+        help="benchmark profile: FLEXIBLE uses both install branches; SERIAL uses V2 geometry with one branch",
+    )
+    parser.add_argument(
         "--twinshield-mode",
         type=str.upper,
         choices=("AUTHORITY", "FALLBACK", "SHADOW", "OFF"),

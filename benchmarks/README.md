@@ -1,6 +1,6 @@
 # 性能基准
 
-本目录保存 V2、正式 V1 与早期 V1 的可复现实测工具和精选结果。基准同时区分：
+本目录保存 V2、V2-Serial、正式 V1 与早期 V1 的可复现实测工具和精选结果。基准同时区分：
 
 - **仿真 makespan**：由订单完成事件给出的仿真时间，衡量产线流程效率。
 - **墙钟时间**：同一台电脑从启动进程到输出最终状态的真实运行耗时，衡量程序计算效率。
@@ -30,6 +30,16 @@ python benchmarks/compare_versions.py \
 `--profile full` 改为 `--profile fast`；快速模式结果不能替代完整运动基准。
 
 ## 公平性边界
+
+### V2 / V2-Serial 对照
+
+`V2-Serial` 使用与 V2 完全相同的 MuJoCo 场景、订单几何、运输和炉体规则，
+但关闭 Arm3 的翅片安装支路，并将安装任务按 Arm1 顺序执行。它是衡量“第二条
+安装支路和动态派工带来的收益”的控制组；V1 不参与这组性能百分比。
+
+```bash
+python brazing_line_v2.py --headless --orders A,A,A --fast --benchmark-mode SERIAL
+```
 
 - 三个版本使用相同 A 产品；三件 A 均只执行一次炉批（支持时）。
 - 混合场景固定为 A/B/C 各一件、相同优先级。

@@ -241,6 +241,7 @@ class V2BrazingApplication:
         self.runtime = UnifiedV2Runtime(
             fast=bool(args.fast),
             twinshield_mode=str(getattr(args, "twinshield_mode", "AUTHORITY")),
+            benchmark_mode=str(getattr(args, "benchmark_mode", "FLEXIBLE")),
         )
         self.controls = V2ControlSurface(self.runtime)
         self.presenter = V2StatePresenter()

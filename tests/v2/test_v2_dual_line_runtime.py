@@ -200,6 +200,23 @@ def test_unified_v2_sizes_the_base_wave_from_its_two_parallel_install_branches()
     assert snapshot["parallel_fin_branches"] == 2
 
 
+def test_v2_cli_accepts_serial_benchmark_mode() -> None:
+    args = parse_args(("--headless", "--fast", "--benchmark-mode", "SERIAL", "--orders", "A"))
+    assert args.benchmark_mode == "SERIAL"
+
+
+def test_v2_serial_profile_uses_one_install_branch_and_one_wip_slot() -> None:
+    runtime = DualLineRuntime(fast=True, serial_mode=True)
+    runtime.submit_order("A", order_id="SERIAL_A")
+    for _ in range(4_000):
+        runtime.tick(0.05)
+        if runtime.complete:
+            break
+    snapshot = runtime.snapshot()
+    assert snapshot["benchmark_mode"] == "SERIAL"
+    assert snapshot["install_branch_counts"] == {"ARM1_A": 1}
+
+
 def test_six_order_viewer_pipeline_releases_fin_work_after_a_three_base_wave() -> None:
     args = parse_args(
         (

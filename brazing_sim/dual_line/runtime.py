@@ -237,8 +237,11 @@ _STAGE_ORDER: dict[UnitStage, int] = {stage: index for index, stage in enumerate
 class DualLineRuntime:
     """Asynchronous six-tray runtime with shared Arm3 and a batch furnace."""
 
-    def __init__(self, *, fast: bool = False) -> None:
+    def __init__(self, *, fast: bool = False, serial_mode: bool = False) -> None:
         self.fast = bool(fast)
+        # Benchmark-only profile: retain the V2 scene and process, but route
+        # every fin-install task through Arm1 to create a fair serial control.
+        self.serial_mode = bool(serial_mode)
         self.topology = DualLineTopology.standard()
         topology_errors = self.topology.validate()
         if topology_errors:
@@ -1124,6 +1127,22 @@ class DualLineRuntime:
         return congested * (self.durations.merge + self.durations.pre_braze_inspection)
 
     def _assign_branch(self, unit: V2UnitState) -> InstallBranch:
+        if self.serial_mode:
+            selected_branch = InstallBranch.ARM1_A
+            unit.branch = selected_branch
+            self.install_branch_counts[selected_branch] += 1
+            self._event(
+                "INSTALL_ASSIGNED",
+                unit_id=unit.unit_id,
+                tray_id=unit.tray_id,
+                branch=selected_branch.value,
+                explanation_zh="V2-Serial 对照：关闭 Arm3 安装支路，全部翅片由 Arm1 顺序完成",
+                selected_cost=0.0,
+                arm3_activated=False,
+                arm3_expected_gain_s=0.0,
+                arm3_inspection_penalty_s=0.0,
+            )
+            return selected_branch
         camera_review_required = self._camera_review_reason(unit) is not None
         arm3_fault_demonstration_required = self.faults.claim_arm3_fin_install(unit.unit_id)
         force_arm3 = camera_review_required or arm3_fault_demonstration_required
@@ -1211,6 +1230,9 @@ class DualLineRuntime:
         at S2B avoids a corridor deadlock while preserving branch immutability
         after the first physical handoff or fin installation.
         """
+
+        if self.serial_mode:
+            return False
 
         if (
             unit.branch is None
@@ -2636,6 +2658,7 @@ class DualLineRuntime:
         return {
             "schema_version": 2,
             "line": "V2_DUAL_INSTALL",
+            "benchmark_mode": "SERIAL" if self.serial_mode else "FLEXIBLE",
             # The independent V2 line now gates runtime progress on physical
             # carriers, solved robot paths, tool ownership and constrained
             # in-flight workpiece proxies. It remains a rehearsal because

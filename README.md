@@ -42,7 +42,7 @@
 
 | 实体能力 | 最新完整运动实测 | 质量门槛 |
 |---|---|---|
-| `3` 台 FR3 · `2` 条安装支路 · `6` 套托盘 | 三件 A：`173.35 s`<br>A/B/C 各一件：`169.35 s` | Phase 6–8 关键测试通过* |
+| `3` 台 FR3 · `2` 条安装支路 · `6` 套托盘 | 三件 A：`173.35 s`<br>A/B/C 各一件：`169.35 s` | 关键回归测试通过* |
 | 单炉最多 `3` 件 · `24` 条钎料路径 · `12` 片翅片 | 支持多订单滚动、并行安装与故障闭环 | Viewer/headless 同一物理主线 |
 
 > 这里的“快”以**仿真事件完工时间**计算；README 动图使用加速采样，只负责展示过程，
@@ -71,6 +71,17 @@
     <td align="center"><strong>⑥ 炉后卸料与成品交付</strong><br><img src="docs/images/readme/v2_furnace_delivery_process.webp" width="100%"><br><sub>后门打开、逐层卸料、焊后检测、黄色出口交付</sub></td>
   </tr>
 </table>
+
+### 三个版本怎样看？
+
+| 版本 | 全过程素材 | 看点 |
+|---|---|---|
+| V1 历史基线 | [V1 阶段串联动图](docs/images/readme/v1_process_reference.webp)（[GIF](docs/images/readme/v1_process_reference.gif)） | 单线固定流程，素材来自历史阶段快照 |
+| V2-Serial | [V2 动作动图](docs/images/readme/v2_parallel_install_process.webp) | 与 V2 共用场景和动作，但安装只走 Arm1 |
+| V2 Flexible | 上方六段高清 WebP/GIF | 双安装支路、动态分配、滚动托盘和故障闭环 |
+
+V2-Serial 与 V2 的单步画面相同，因为两者刻意共享同一个 XML 和物理技能；真正的差异
+在多订单时序（是否允许 Arm3 安装、是否出现并行区间），请结合下方数据阅读。
 
 <details>
 <summary><strong>GIF 备用链接与素材复现命令</strong></summary>
@@ -136,15 +147,19 @@ flowchart LR
 | ![托盘离炉后的固定相机检测](docs/images/readme/v2_post_braze_inspection_current.png) | ![托盘进入封闭式成品出口](docs/images/readme/v2_post_braze_output_current.png) |
 
 <details>
-<summary><strong>展开 V1 / V2 四组场景对照</strong></summary>
+<summary><strong>展开 V1 / V2-Serial / V2 三组场景与流程对照</strong></summary>
 
-| 工序 | 稳定 V1 | 当前 V2 |
-|---|:---:|:---:|
-| 总体布局 | ![V1 总览](docs/images/readme/line_overview.png) | ![V2 总览](docs/images/readme/v2_current_overview.png) |
-| 钎料涂覆 | ![V1 涂覆](docs/images/readme/material_application.png) | ![V2 涂覆](docs/images/readme/v2_dispensing_current.png) |
-| 翅片安装 | ![V1 安装](docs/images/readme/fin_assembly.png) | ![V2 双线安装](docs/images/readme/v2_parallel_install_current.png) |
-| 炉体与交付 | ![V1 炉体](docs/images/readme/furnace_cycle.png) | ![V2 炉体](docs/images/readme/v2_furnace_batch_current.png) |
-| 成品出口 | ![V1 出口](docs/images/readme/finished_delivery.png) | ![V2 出口](docs/images/readme/v2_post_braze_output_current.png) |
+| 工序 | V1 历史基线 | V2-Serial（同 V2 场景、单安装支路） | V2 Flexible（当前） |
+|---|:---:|:---:|:---:|
+| 总体布局 | ![V1 总览](docs/images/readme/line_overview.png) | ![V2-Serial 总览](docs/images/readme/v2_current_overview.png) | ![V2 总览](docs/images/readme/v2_current_overview.png) |
+| 钎料涂覆 | ![V1 涂覆](docs/images/readme/material_application.png) | ![V2-Serial 涂覆](docs/images/readme/v2_dispensing_process.webp) | ![V2 涂覆](docs/images/readme/v2_dispensing_process.webp) |
+| 翅片安装 | ![V1 安装](docs/images/readme/fin_assembly.png) | ![V2-Serial 安装](docs/images/readme/v2_parallel_install_process.webp) | ![V2 双线安装](docs/images/readme/v2_parallel_install_process.webp) |
+| 炉体与交付 | ![V1 炉体](docs/images/readme/furnace_cycle.png) | ![V2-Serial 炉体](docs/images/readme/v2_furnace_delivery_process.webp) | ![V2 炉体](docs/images/readme/v2_furnace_delivery_process.webp) |
+| 成品出口 | ![V1 出口](docs/images/readme/finished_delivery.png) | ![V2-Serial 出口](docs/images/readme/v2_post_braze_output_current.png) | ![V2 出口](docs/images/readme/v2_post_braze_output_current.png) |
+
+V1 的素材是历史快照，使用 [V1 阶段串联动图](docs/images/readme/v1_process_reference.webp)
+查看；它不代表 V1 与 V2 的物理场景相同。V2-Serial 与 V2 使用同一套几何和动作素材，
+两者的区别是任务是否允许第二条安装支路和跨订单并行，因此动图相同、时序数据不同。
 
 </details>
 
@@ -186,59 +201,56 @@ flowchart LR
 
 </details>
 
-## 🛡️ Phase 6–8：从“能跑”到“可证明”
+## ✅ 项目验证与复现
 
-### Phase 6｜安全屏障逐段强制
-
-每条机械臂候选轨迹都会进行关节与时间双重采样（≤20 ms），并记录预测最小净空。
-低于 40 mm 时，`FORCE` 模式会拒绝提交并把任务留在 READY，返回资源、原因和预约信息；
-`SHADOW` 模式只记录风险，用于安全消融实验。状态可通过
-`GET /safety/barrier` 查看，预约通过 `GET /motion/reservations` 查看。
-
-### Phase 7｜真实替代路线与驾驶舱证据
-
-订单的 OR 路线先由能力目录筛选，再在提交边界绑定具体资源；任务会写入
-`selected_alternative` 和选择原因，甘特图、任务图和 `/state` 读取同一份事实。
-因此“候选路线”不会停留在 UI 装饰：选中的 Arm1/Arm3、节拍和拒绝原因都能追溯。
-
-### Phase 8｜竞赛版冻结
-
-冻结阶段只做复现、回归、性能对照和素材更新。每次发布保留原始 JSON/CSV、运行配置、代码版本
-和失败样本；当前复测明确显示 V2 仍有物理节拍优化空间，后续结果会继续以可复现实验为准。
+项目用同一套 Viewer/headless 运行时验证订单、运输、检测、故障恢复、安全门控和暂停/继续/重置。
+每次复测都保留原始 JSON/CSV、运行配置、代码版本和失败样本；性能数字只在明确的对照口径下解读。
 
 <a id="performance"></a>
 
-## 📊 2026-09-01 Phase 8：当前 V2 自身效率记录
+## 📊 公平效率对照：V2 Flexible vs V2-Serial
 
-同一台 Apple Silicon Mac，headless **快速回归模式 (`--fast`)**；仿真时间来自真实完工事件，
-墙钟时间来自端到端进程计时。下表是 V2 在不同订单组合下的可复现记录，
-用于观察并行度、扩展性和回归变化，不把加速模式冒充真实生产节拍。
+同一台 Apple Silicon Mac、同一 V2 场景、同一订单几何和同一完成定义，headless
+**快速回归模式 (`--fast`)**。`V2-Serial` 只关闭 Arm3 翅片安装支路，保留相同物流、
+检测、炉体和安全门控；因此差异主要来自并行安装与动态派工。
 
-| 订单场景 | V2 makespan | 件数 | V2 吞吐 | 并行安装区间 |
-|---|---:|---:|---:|---:|
-| 单件 A | **98.90 s** | 1 | 36.40 件/h | — |
-| 三件 A | **173.35 s** | 3 | 62.30 件/h | 23.90 s |
-| A/B/C 各一件 | **169.35 s** | 3 | 63.77 件/h | 23.90 s |
-| A/B/C 各两件 | **271.90 s** | 6 | 79.44 件/h | 47.80 s |
+| 订单场景 | V2-Serial makespan | V2 makespan | 时间改善 | V2 吞吐 | 并行安装区间 |
+|---|---:|---:|---:|---:|---:|
+| 单件 A | 98.90 s | 98.90 s | 0.0% | 36.40 件/h | 0.0 s |
+| 三件 A | 182.10 s | **173.35 s** | **↓ 4.8%** | **62.30 件/h** | 23.90 s |
+| A/B/C 各一件 | 187.85 s | **169.35 s** | **↓ 9.8%** | **63.77 件/h** | 23.90 s |
 
-> 这组数据建议结合上表阅读：在同一 V2 配置内，订单数增加时吞吐提升，说明滚动
-> 托盘和双安装支路确实产生了并行收益；它不是跨版本排名。
+> 单件订单没有可重叠的第二个托盘，所以两种模式相同；订单进入流水后，V2 的并行安装
+> 开始缩短总时间并提高吞吐。
 
-### V1 数字应该怎样读？
+### 三台 Arm 的等待时间（V2 相对 V2-Serial）
 
-仓库仍保留 V1 的原始结果，目的是确认旧入口没有被新代码破坏。由于 V1 是单线、
-固定节拍、较少互锁和较少物理确认的演示流程，它天然会更快；这不是 V2 的公平对照，
-也不能据此推断两套方案的真实产能差异。
+等待时间按“该 Arm 所在 V2 运行窗口 − 实际执行时间”统计；不是把没有分配任务的机械臂
+伪装成工作。多订单时，V2 通过双安装支路和预定位减少整体等待，并让 Arm2
+在上游托盘到位后连续涂覆。
 
-下一轮公平实验将固定：同一订单几何、同一翅片/钎料数量、同一运输距离、同一炉体
-装卸规则、同一完成定义，并分别报告仿真 makespan、墙钟耗时、机器人利用率、等待、
-检测/恢复开销和安全屏障开销。
+| 订单场景 | Arm1 等待：Serial → V2 | Arm2 等待：Serial → V2 | Arm3 等待：Serial → V2 |
+|---|---:|---:|---:|
+| 三件 A | 74.2 s → 117.3 s | 161.0 s → **152.2 s** | 130.5 s → **68.8 s** |
+| A/B/C 各一件 | 74.9 s → 103.3 s | 165.8 s → **147.3 s** | 136.2 s → **69.5 s** |
 
-- [V1/V2 非等价回归原始 JSON](benchmarks/results/2026-08-12-current-v1-v2/metrics.json)
-- [V1/V2 非等价回归说明](benchmarks/results/2026-08-12-current-v1-v2/summary.md)
+| 总等待（Arm1+Arm2+Arm3） | V2-Serial | V2 Flexible | 变化 |
+|---|---:|---:|---:|
+| 三件 A | 365.7 s | **338.3 s** | **↓ 7.5%** |
+| A/B/C 各一件 | 376.9 s | **320.0 s** | **↓ 15.1%** |
+
+Arm1 的等待在当前控制组中可能上升，因为 V2 将部分安装任务交给 Arm3；这正是“整体
+吞吐优先”而不是“单个 Arm 忙碌率最大化”的调度结果。Arm3 等待显著下降，Arm2 等待
+也下降，整体 makespan 同步改善。完整原始字段（利用率、等待、并行区间）见基准 JSON。
+
+### V1 只作历史回归参考
+
+正式 V1 是旧的单线固定流程，物理场景和完成条件与 V2 不等价。它保留在仓库中用于
+确认旧入口没有被破坏，不参与上面的性能百分比或“谁更快”的排名。
+
+- [V2/V2-Serial/V1 公平口径原始 JSON](benchmarks/results/2026-09-02-fair-benchmark/metrics.json)
+- [V2/V2-Serial/V1 公平口径摘要](benchmarks/results/2026-09-02-fair-benchmark/summary.md)
 - [六订单滚动流水原始数据](benchmarks/results/2026-08-12-six-order/metrics.json)
-- [Phase 8 最新复测 JSON](benchmarks/results/2026-09-01-phase8/metrics.json)
-- [Phase 8 最新复测摘要](benchmarks/results/2026-09-01-phase8/summary.md)
 - 复现脚本：[benchmarks/compare_versions.py](benchmarks/compare_versions.py)
 
 <details>
@@ -286,6 +298,9 @@ python brazing_line_v2.py --headless --orders A,B,C --max-sim-time 2000
 
 # 六订单滚动 WIP + 两个三层炉批
 python brazing_line_v2.py --headless --orders A,B,C,A,B,C --max-sim-time 2000
+
+# V2-Serial 公平控制组（同一 V2 场景，关闭 Arm3 安装支路）
+python brazing_line_v2.py --headless --orders A,B,C --benchmark-mode SERIAL --fast
 
 # 稳定 V1
 mjpython brazing_line.py
@@ -375,7 +390,7 @@ python scripts/capture_v2_readme.py
 python scripts/capture_readme_gifs.py
 ```
 
-当前发布前验证已覆盖 Phase 6–8 的安全屏障、替代路线、V2 运行时和素材复测，
+当前发布前验证已覆盖安全屏障、替代路线、V2 运行时和素材复测，
 并通过 Ruff、Black、`compileall` 与 `git diff --check`。完整回归中仍有少量旧的
 V2 物理时序测试待修复，因此这里不再使用“全部测试通过”的笼统表述；V1/V2、A/B/C、
 1～6 订单、故障恢复、暂停/继续/重置、Viewer/headless 和 0.25×～32× 均保留覆盖。
