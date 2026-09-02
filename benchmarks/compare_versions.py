@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run reproducible V2/V1/early-V1 order-efficiency comparisons."""
+"""Run reproducible V2/V2-Serial/V1 order-efficiency comparisons."""
 
 from __future__ import annotations
 
