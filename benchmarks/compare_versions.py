@@ -303,6 +303,7 @@ def _write_outputs(output_dir: Path, profile: str, rows: list[Measurement]) -> N
             "simulation_seconds": "实际仿真事件完成时间",
             "wall_seconds": "subprocess 端到端 perf_counter 中位数",
             "throughput": "完成件数 / 仿真 makespan",
+            "process_timing_profile": "config/benchmark_timing.yaml",
         },
         "results": [asdict(row) for row in rows],
     }
